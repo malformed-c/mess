@@ -25,13 +25,59 @@ does **not** fire the ack — the receipt fires when the recipient runs its own
 `mess recv` to actually read the message. So `--ack` is a true "was read" signal,
 not just "was delivered."
 
-## Install
+## Installation
+
+**Prerequisites:** Go 1.24+ (uses `omitzero` and `strings.SplitSeq`; the module
+targets 1.26) and a Unix-like OS — `mess` uses a Unix domain socket, and the
+Claude Code hooks use `flock`.
+
+### 1. Build and install the binary
 
 ```sh
+git clone https://github.com/malformed-c/mess && cd mess
 go build -o mess .
-# put it on PATH, e.g.
-install -m755 mess ~/.local/bin/mess
+install -m755 mess ~/.local/bin/mess     # make sure ~/.local/bin is on $PATH
 ```
+
+Confirm it's on your `PATH`:
+
+```sh
+command -v mess        # -> /home/you/.local/bin/mess
+```
+
+### 2. Verify
+
+```sh
+mess ping              # auto-starts the daemon on first use, prints "ok"
+MESS_AGENT=alice mess ps
+```
+
+That's everything for using `mess` by hand (or from any shell/CI). State lives
+under `~/.mess/` (see [The daemon](#the-daemon)); to start clean, `mess stop` and
+`rm -rf ~/.mess`.
+
+### 3. (Recommended) Claude Code integration
+
+To make Claude Code sessions auto-register and auto-wake on incoming messages:
+
+1. **Give each session an identity** by launching it with `MESS_AGENT`:
+
+   ```sh
+   MESS_AGENT=alice claude
+   ```
+
+   (or, mid-session, run `mess register alice` once — it sticks for the session.)
+
+2. **Add the hooks** to `~/.claude/settings.json` — the complete block is in
+   [Claude Code integration](#claude-code-integration) below. Merge it with any
+   existing `hooks`/`env`.
+
+3. **Activate per session.** Hooks apply to *new* sessions automatically. A
+   session already running when you add/change the hooks needs a one-time `/hooks`
+   reload (or restart) plus one prompt, so its `Stop` hook parks a fresh listener.
+
+No permission rules are needed if your settings use `"defaultMode": "dontAsk"`;
+otherwise allow `Bash(mess *)`.
 
 ## Identity
 
@@ -110,7 +156,7 @@ detached daemon. State lives under `~/.mess/` (override with `MESS_DIR`):
 - `~/.mess/state.json` — persisted queues, subscriptions, topics
 - `~/.mess/daemon.log` — daemon logs
 
-## Using it from Claude Code hooks
+## Claude Code integration
 
 Because it's just a CLI, it drops straight into hooks (which are shell commands).
 Give each session an identity via `MESS_AGENT`, then:
@@ -118,6 +164,9 @@ Give each session an identity via `MESS_AGENT`, then:
 - A `SessionStart` hook runs `mess register` so the session is reachable.
 - A `Stop` hook with `asyncRewake: true` makes the session **auto-wake** on
   incoming messages while idle, with no manual re-arm.
+- `UserPromptSubmit`/`PreToolUse` hooks mark the session `busy`, and a second
+  `Stop` hook clears it — so `mess ps` shows an accurate `working`/`listening`/
+  `idle` status.
 
 ### Auto-wake (the key pattern)
 
@@ -131,35 +180,51 @@ Crucially, the wake **peeks** (`--peek`) rather than consuming: if the rewake is
 ever dropped, the message stays queued and re-wakes — it's never lost. The agent
 reads and clears its inbox with its own `mess recv` on wake.
 
+The complete block to merge into `~/.claude/settings.json` (uses an absolute path
+to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
+
 ```json
 {
   "hooks": {
     "SessionStart": [
       { "hooks": [ { "type": "command",
-        "command": "who=$(mess whoami); [ -n \"$who\" ] && mess register; true" } ] }
+        "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess register 2>/dev/null; true" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command",
+        "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess busy 2>/dev/null; true" } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command",
+        "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess busy 2>/dev/null; true" } ] }
     ],
     "Stop": [
-      { "hooks": [ {
-        "type": "command",
-        "asyncRewake": true,
-        "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
-        "command": "who=$(mess whoami); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0"
-      } ] }
+      { "hooks": [
+        { "type": "command",
+          "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess unbusy 2>/dev/null; true" },
+        { "type": "command",
+          "asyncRewake": true,
+          "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
+          "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0" }
+      ] }
     ]
   }
 }
 ```
 
-The `flock` guard ensures only one parked waiter exists; `--no-broadcast` keeps
-broadcasts from causing a wake storm; `--peek` makes delivery loss-proof; `--batch
-1s` coalesces a burst of messages into a single wake; and `exit 2` re-invokes the
-agent, which then runs `mess recv` to consume. To wake a peer, just
-`mess send <them> "..."` — they wake at their next idle.
+What each piece does:
 
-For the accurate `working` status, also hook turn activity to the busy flag:
-`UserPromptSubmit` and `PreToolUse` run `mess busy`, and a second `Stop` hook runs
-`mess unbusy`. Then `mess ps` shows `working` while an agent is mid-turn,
-`listening` while it's idle-and-parked, and `idle` otherwise.
+- **SessionStart → `mess register`** — joins the network so the session is reachable.
+- **UserPromptSubmit / PreToolUse → `mess busy`** and **Stop → `mess unbusy`** —
+  drive the accurate `working` status.
+- **Stop → auto-wake** (`asyncRewake`): the `flock` guard ensures a single parked
+  waiter; `--no-broadcast` avoids a wake storm; `--peek` makes delivery loss-proof
+  (a dropped wake re-wakes, never loses mail); `--batch 1s` coalesces a burst into
+  one wake; `exit 2` re-invokes the agent, which then runs `mess recv` to consume.
+
+To wake a peer, just `mess send <them> "..."` — they wake at their next idle. Every
+hook is guarded by `mess whoami`, so a session launched without an identity does
+nothing.
 
 > **Avoid idle broadcasts with auto-wake.** A hook that broadcasts "<name> idle"
 > on `Stop` will cause a wake storm: every idle ping wakes every peer, who then go
