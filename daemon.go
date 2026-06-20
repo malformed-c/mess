@@ -154,7 +154,7 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 			resetIdle()
 			continue
 		}
-		ch := d.broker.waitChan(req.As)
+		ch := d.broker.waitChan(req.As, kinds)
 		select {
 		case <-ch:
 			// new delivery; loop to drain
@@ -199,6 +199,14 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true}
 	case "recv":
 		return d.recv(req)
+	case "state":
+		b.SetState(req.As, req.Body)
+		return Response{OK: true}
+	case "rm":
+		if b.RemoveAgent(req.To) {
+			return Response{OK: true, Count: 1}
+		}
+		return Response{OK: true, Count: 0} // idempotent: unknown agent is not an error
 	case "ps":
 		agents, topics := b.Ps()
 		return Response{OK: true, Agents: agents, Topics: topics}
@@ -270,13 +278,23 @@ func (d *daemon) send(req Request) Response {
 
 func (d *daemon) recv(req Request) Response {
 	b := d.broker
-	kinds := kindSet(req.Kinds)
-	msgs := b.DrainKinds(req.As, req.Peek, req.Max, kinds)
-	if len(msgs) > 0 || !req.Wait {
+	trigger := kindSet(req.Kinds)
+
+	// Non-blocking drain: the kind filter acts as a result filter.
+	if !req.Wait {
+		msgs := b.DrainKinds(req.As, req.Peek, req.Max, trigger)
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
-	// Blocking receive: wait for a delivery, honoring an optional timeout.
+	// Blocking receive: the kind filter is the WAKE TRIGGER (e.g. --no-broadcast
+	// means broadcasts don't wake you), but once woken we drain EVERYTHING so no
+	// queued message (broadcasts included) is left behind.
+	drainAll := func() []Message { return b.DrainKinds(req.As, req.Peek, req.Max, nil) }
+	if b.HasPending(req.As, trigger) {
+		msgs := drainAll()
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
+	}
+
 	timeout, stop, err := timerFor(req.Timeout)
 	if err != nil {
 		return Response{Error: err.Error()}
@@ -287,12 +305,13 @@ func (d *daemon) recv(req Request) Response {
 	b.AddListener(req.As)
 	defer b.RemoveListener(req.As)
 	for {
-		ch := b.waitChan(req.As)
+		ch := b.waitChan(req.As, trigger)
 		select {
 		case <-ch:
-			msgs = b.DrainKinds(req.As, req.Peek, req.Max, kinds)
-			if len(msgs) > 0 {
-				return Response{OK: true, Messages: msgs, Count: len(msgs)}
+			if b.HasPending(req.As, trigger) {
+				if msgs := drainAll(); len(msgs) > 0 {
+					return Response{OK: true, Messages: msgs, Count: len(msgs)}
+				}
 			}
 		case <-timeout:
 			return Response{OK: true, Messages: nil, Count: 0}

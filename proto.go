@@ -45,6 +45,7 @@ type AgentInfo struct {
 	Pending   int      `json:"pending"`
 	Topics    []string `json:"topics,omitempty"`
 	Listening bool     `json:"listening,omitempty"` // has an active streaming listener
+	State     string   `json:"state,omitempty"`     // self-reported working state
 }
 
 // TopicInfo is reported by the `ps` op.

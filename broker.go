@@ -33,6 +33,7 @@ type agentState struct {
 	name    string
 	inbox   []Message
 	topics  map[string]bool
+	state   string          // self-reported "what I'm working on"
 	waiters []chan struct{} // signaled (then dropped) on next delivery
 }
 
@@ -223,16 +224,41 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 	return out
 }
 
+func matchKind(m Message, kinds map[string]bool) bool {
+	return kinds == nil || kinds[m.Kind]
+}
+
+// HasPending reports whether the agent has a queued message matching kinds
+// (nil = any kind).
+func (b *Broker) HasPending(name string, kinds map[string]bool) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return false
+	}
+	for _, m := range a.inbox {
+		if matchKind(m, kinds) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitChan registers a one-shot waiter and returns a channel signaled on the
-// next delivery to the agent.
-func (b *Broker) waitChan(name string) <-chan struct{} {
+// next delivery to the agent. It fires immediately only if a message matching
+// kinds is already queued, so a non-matching leftover (e.g. an ignored
+// broadcast) doesn't busy-loop a filtered waiter.
+func (b *Broker) waitChan(name string, kinds map[string]bool) <-chan struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	a := b.ensure(name)
 	ch := make(chan struct{}, 1)
-	if len(a.inbox) > 0 { // already has messages; fire immediately
-		ch <- struct{}{}
-		return ch
+	for _, m := range a.inbox {
+		if matchKind(m, kinds) {
+			ch <- struct{}{} // already has a matching message; fire immediately
+			return ch
+		}
 	}
 	a.waiters = append(a.waiters, ch)
 	return ch
@@ -264,6 +290,34 @@ func (b *Broker) IsListening(name string) bool {
 	return b.listeners[name] > 0
 }
 
+// SetState records an agent's self-reported working state (empty clears it).
+func (b *Broker) SetState(name, state string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensure(name).state = state
+	b.changed()
+}
+
+// RemoveAgent forgets an agent entirely — its inbox, topic subscriptions, and
+// listener count — e.g. to clear out a dead session. Returns false if unknown.
+func (b *Broker) RemoveAgent(name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.agents[name]; !ok {
+		return false
+	}
+	delete(b.agents, name)
+	delete(b.listeners, name)
+	for topic, subs := range b.topics {
+		delete(subs, name)
+		if len(subs) == 0 {
+			delete(b.topics, topic)
+		}
+	}
+	b.changed()
+	return true
+}
+
 // Ps reports current agents and topics, sorted for stable output.
 func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 	b.mu.Lock()
@@ -275,7 +329,7 @@ func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 			topics = append(topics, t)
 		}
 		sort.Strings(topics)
-		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0})
+		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, State: a.state})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 

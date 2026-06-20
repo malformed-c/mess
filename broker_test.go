@@ -110,7 +110,7 @@ func TestUnsubStopsDelivery(t *testing.T) {
 
 func TestWaitChanFiresOnDelivery(t *testing.T) {
 	b := newTestBroker()
-	ch := b.waitChan("bob")
+	ch := b.waitChan("bob", nil)
 	select {
 	case <-ch:
 		t.Fatal("waiter fired before any delivery")
@@ -128,7 +128,7 @@ func TestWaitChanFiresOnDelivery(t *testing.T) {
 func TestWaitChanFiresImmediatelyIfPending(t *testing.T) {
 	b := newTestBroker()
 	b.Send("alice", "bob", "already here")
-	ch := b.waitChan("bob")
+	ch := b.waitChan("bob", nil)
 	select {
 	case <-ch:
 	case <-time.After(time.Second):
@@ -206,6 +206,35 @@ func TestDrainKindsFiltersAndPreserves(t *testing.T) {
 	rest := b.Drain("bob", false, 0)
 	if len(rest) != 1 || rest[0].Kind != KindBroadcast {
 		t.Fatalf("broadcast should remain after filtered drain: %+v", rest)
+	}
+}
+
+func TestHasPendingTriggerAndDrainAll(t *testing.T) {
+	b := newTestBroker()
+	b.Register("bob")
+	directOnly := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
+
+	// A broadcast alone must NOT satisfy a direct/topic wake trigger.
+	b.Broadcast("alice", "fyi")
+	if b.HasPending("bob", directOnly) {
+		t.Fatal("a broadcast should not trigger a --no-broadcast waiter")
+	}
+	if !b.HasPending("bob", nil) {
+		t.Fatal("broadcast should still count as pending for an unfiltered check")
+	}
+
+	// A direct message triggers the wake...
+	b.Send("alice", "bob", "do this")
+	if !b.HasPending("bob", directOnly) {
+		t.Fatal("a direct message should trigger the waiter")
+	}
+	// ...and draining all (nil) consumes the broadcast too — nothing left behind.
+	got := b.DrainKinds("bob", false, 0, nil)
+	if len(got) != 2 {
+		t.Fatalf("wake should drain all queued messages, got %d: %+v", len(got), got)
+	}
+	if b.HasPending("bob", nil) {
+		t.Fatal("inbox should be empty after draining all")
 	}
 }
 

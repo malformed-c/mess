@@ -22,6 +22,8 @@ Usage:
   mess unsub <topic>              unsubscribe from a topic
   mess register [name]            join the network; with a name, set this
                                   session's identity (persists across turns)
+  mess state [text...]            set your working state (shown in ps); --clear to clear
+  mess rm <agent>                 remove an agent (e.g. a dead session) from the network
   mess whoami                     print your resolved identity (empty if none)
   mess islistening                exit 0 if you have an active listener, else 1
   mess recv [duration]            receive queued messages
@@ -81,6 +83,10 @@ func main() {
 		err = cmdSubUnsub(p, cmd, args)
 	case "register":
 		err = cmdRegister(p, args)
+	case "state":
+		err = cmdState(p, args)
+	case "rm":
+		err = cmdRm(p, args)
 	case "whoami":
 		err = cmdWhoami(p)
 	case "islistening":
@@ -306,6 +312,53 @@ func cmdRegister(p paths, args []string) error {
 	return nil
 }
 
+// cmdState sets the calling agent's working state (what it's currently doing),
+// shown in `mess ps`. With --clear (or empty body) it clears the state.
+func cmdState(p paths, args []string) error {
+	fs, as := newFlags("state")
+	clear := fs.Bool("clear", false, "clear your working state")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	state := ""
+	if !*clear {
+		if state, err = bodyFrom(fs.Args()); err != nil {
+			return err
+		}
+	}
+	if _, err := call(p, Request{Op: "state", As: name, Body: state}); err != nil {
+		return err
+	}
+	if state == "" {
+		fmt.Println("state cleared")
+	} else {
+		fmt.Printf("state: %s\n", state)
+	}
+	return nil
+}
+
+// cmdRm removes an agent from the network (its inbox, subscriptions, presence).
+func cmdRm(p paths, args []string) error {
+	fs, _ := newFlags("rm")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess rm <agent>")
+	}
+	resp, err := call(p, Request{Op: "rm", To: rest[0]})
+	if err != nil {
+		return err
+	}
+	if resp.Count == 0 {
+		fmt.Printf("no such agent %q\n", rest[0])
+	} else {
+		fmt.Printf("removed %s\n", rest[0])
+	}
+	return nil
+}
+
 // cmdWhoami prints the resolved identity, or nothing (exit 0) if none. Designed
 // so hooks can do: who=$(mess whoami) && [ -n "$who" ] && ...
 func cmdWhoami(p paths) error {
@@ -370,11 +423,25 @@ func cmdRecv(p paths, args []string) error {
 		}
 	}
 
+	// A blocking receiver that joins an agent already being listened on creates
+	// a race: a message wakes only one waiter. Warn (stderr, so --json stdout is
+	// clean) but proceed. The canonical single receiver is the auto-wake hook.
+	if *wait || *follow {
+		warnIfAlreadyListening(p, name)
+	}
+
 	if *follow {
 		return followRecv(p, name, timeout, *max, *asJSON, kinds)
 	}
 
-	resp, err := call(p, Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds})
+	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds}
+	// A blocking wait uses the restart-resilient path so it survives a daemon
+	// bounce; a non-blocking drain is a plain one-shot call.
+	dispatch := call
+	if *wait {
+		dispatch = callWait
+	}
+	resp, err := dispatch(p, req)
 	if err != nil {
 		return err
 	}
@@ -418,6 +485,22 @@ func resolveKinds(kind string, noBroadcast bool) ([]string, error) {
 	return out, nil
 }
 
+// warnIfAlreadyListening prints a stderr warning when the agent already has an
+// active listener, so a redundant second waiter doesn't silently create a
+// wake race. Best-effort: stays quiet if the daemon can't be queried.
+func warnIfAlreadyListening(p paths, name string) {
+	resp, err := call(p, Request{Op: "ps"})
+	if err != nil {
+		return
+	}
+	for _, a := range resp.Agents {
+		if a.Name == name && a.Listening {
+			fmt.Fprintf(os.Stderr, "mess: warning: %q already has an active listener; a second one makes each message wake only one of them. Prefer a single receiver (the auto-wake Stop hook).\n", name)
+			return
+		}
+	}
+}
+
 // followRecv blocks, printing messages as they arrive, until interrupted (or,
 // if an idle timeout was given, until that elapses with no message). Designed to
 // run as a long-lived background command so an agent can be woken by peers.
@@ -446,6 +529,9 @@ func cmdPs(p paths, args []string) error {
 	} else {
 		fmt.Println("agents:")
 		for _, a := range resp.Agents {
+			// Two honest presence states: "listening" = parked on recv --wait and
+			// reachable; "idle" = no listener (may be busy or idle — mess can't
+			// tell, so it doesn't claim "working").
 			status := "idle"
 			if a.Listening {
 				status = "listening"
@@ -453,6 +539,9 @@ func cmdPs(p paths, args []string) error {
 			line := fmt.Sprintf("  %-16s %-9s %d pending", a.Name, status, a.Pending)
 			if len(a.Topics) > 0 {
 				line += "  [" + strings.Join(a.Topics, ", ") + "]"
+			}
+			if a.State != "" {
+				line += "  — " + a.State
 			}
 			fmt.Println(line)
 		}

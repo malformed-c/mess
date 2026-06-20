@@ -19,6 +19,7 @@ type agentSnap struct {
 	Name   string    `json:"name"`
 	Inbox  []Message `json:"inbox,omitempty"`
 	Topics []string  `json:"topics,omitempty"`
+	State  string    `json:"state,omitempty"`
 }
 
 // snapshot captures broker state. Caller must hold the lock.
@@ -30,7 +31,7 @@ func (b *Broker) snapshot() snapshot {
 			topics = append(topics, t)
 		}
 		sort.Strings(topics)
-		s.Agents = append(s.Agents, agentSnap{Name: a.name, Inbox: a.inbox, Topics: topics})
+		s.Agents = append(s.Agents, agentSnap{Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state})
 	}
 	sort.Slice(s.Agents, func(i, j int) bool { return s.Agents[i].Name < s.Agents[j].Name })
 	for t, subs := range b.topics {
@@ -54,6 +55,7 @@ func (b *Broker) load(s snapshot) {
 	for _, as := range s.Agents {
 		a := b.ensure(as.Name)
 		a.inbox = as.Inbox
+		a.state = as.State
 		for _, t := range as.Topics {
 			a.topics[t] = true
 		}

@@ -41,6 +41,69 @@ func daemonError(msg string) error {
 	return fmt.Errorf("%s", msg)
 }
 
+// callWait runs a blocking recv that survives a daemon restart: if the
+// connection drops (or the daemon reports it is shutting down) before a real
+// response, it waits for the daemon to come back and re-issues, so a parked
+// receiver (e.g. the auto-wake hook) stays armed across a `mess stop`+restart.
+// It does not force-start the daemon on reconnect, so a genuine stop still ends
+// the wait once the daemon stays down past the reconnect window.
+func callWait(p paths, req Request) (Response, error) {
+	first := true
+	for {
+		var conn net.Conn
+		var err error
+		if first {
+			conn, err = dialOrStart(p) // initial attempt may start the daemon
+			first = false
+		} else {
+			conn, err = net.Dial("unix", p.sock) // reconnect: don't resurrect a stopped daemon
+		}
+		if err != nil {
+			if waitForDaemon(p) {
+				continue
+			}
+			return Response{}, err
+		}
+		encErr := json.NewEncoder(conn).Encode(req)
+		var resp Response
+		var decErr error
+		if encErr == nil {
+			decErr = json.NewDecoder(conn).Decode(&resp)
+		}
+		conn.Close()
+		if encErr != nil || decErr != nil { // connection dropped mid-wait (daemon bounced)
+			if waitForDaemon(p) {
+				continue
+			}
+			return Response{}, fmt.Errorf("lost connection to daemon")
+		}
+		if resp.Error == "daemon shutting down" { // restart in progress
+			if waitForDaemon(p) {
+				continue
+			}
+			return Response{}, fmt.Errorf("daemon stopped")
+		}
+		if !resp.OK && resp.Error != "" {
+			return resp, daemonError(resp.Error)
+		}
+		return resp, nil
+	}
+}
+
+// waitForDaemon polls (without starting one) for the daemon to become reachable
+// again, e.g. while a restart is in flight. Returns false if it stays down.
+func waitForDaemon(p paths) bool {
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.Dial("unix", p.sock); err == nil {
+			c.Close()
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
+}
+
 // callStream sends one request and invokes onResp for each response streamed
 // back over the held connection, until the daemon closes it (EOF).
 func callStream(p paths, req Request, onResp func(Response) error) error {
