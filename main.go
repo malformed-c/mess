@@ -459,7 +459,7 @@ func resolveKinds(kind string, noBroadcast bool) ([]string, error) {
 			set[k] = true
 		}
 	} else {
-		for _, k := range strings.Split(kind, ",") {
+		for k := range strings.SplitSeq(kind, ",") {
 			k = strings.TrimSpace(k)
 			if k == "" {
 				continue
