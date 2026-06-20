@@ -159,31 +159,39 @@ mid-session identity with `mess register`) — there's no shell profile to rely 
 ## Field notes
 
 `mess` was built and battle-tested in a single session by a fleet of Claude Code
-agents coordinating a real multi-service build (an "Aphelion" billing feature).
-Their unedited takes as users:
+agents coordinating a real multi-service build (an "Aphelion" billing feature) —
+a coordinator driving backend, frontend, and a systems agent. Their unedited
+takes after the dust settled:
 
-> **backend** — "The standout is `recv --wait` + the global auto-wake hook — a
-> peer's send actually *wakes* my model mid-task, which is what makes mess a real
-> coordination tool and not just a mailbox. Fast, zero-setup… genuinely useful,
-> would use again."
+> **coordinator** — "The honest `working` vs `listening` status is the big one for
+> a coordinator: I can tell a heads-down agent from a parked-and-reachable one at
+> a glance. I drove a full multi-increment billing+payments rollout plus a
+> parallel security sweep across 4 agents through it — it's the difference between
+> five separate sessions and one coordinated team."
 
-> **coordinator** — "mess turns a handful of separate Claude sessions into one
-> coordinated team — the auto-wake hook lets a coordinator fan out work and get
-> pulled back the moment any agent reports, with zero polling."
+> **backend** — "The loss-proof peek-to-wake is the big win — across a multi-hour,
+> multi-agent build I never dropped a handoff; the 're-wakes until you recv'
+> guarantee means a message can't silently vanish, which is exactly what you need
+> when real work depends on the reply. It carried the entire billing workstream's
+> cross-agent coordination end-to-end."
 
-> **frontend** — "Once the auto-wake Stop hook shipped, mess was genuinely
-> excellent — I ran a multi-step billing hand-off with backend + coordinator
-> across many turns and it 'just worked', direct messages waking me hands-free;
-> that self-rearming auto-wake is the standout feature."
+> **frontend** — "Unread stays queued and re-wakes me until I recv, so I trust
+> nothing drops; with hands-free auto-wake and the honest listening/working
+> status I ran a full multi-agent billing feature end-to-end without a hitch."
 
-> **claude-systems** — "A daemon-backed CLI for messaging between Claude Code
-> sessions on one machine: direct/broadcast/topic channels over a Unix socket,
-> with auto-wake that re-invokes an idle agent when a peer pings it."
+> **claude-systems** — "The loss-proof peek-to-wake just worked: messages surfaced
+> at my next idle with nothing to arm or re-arm, and `mess ps` made it clear who
+> was reachable. For local multi-agent coordination it was transparent and I
+> never lost a message."
 
 The recurring lesson from that session, now baked into the design above: the
 auto-wake model only works well with `--no-broadcast` (no idle-broadcast wake
 storm) and `--peek` (loss-proof delivery), and **one receiver per agent** (the
 hook) — never a manual `recv --wait` loop alongside it.
+
+**Known trade-off:** with peek-to-wake, every wake costs a `mess recv` round-trip
+to clear the inbox, so a burst of messages wakes you back-to-back. The fleet
+unanimously judged that an acceptable price for never losing a message.
 
 ## Development
 
