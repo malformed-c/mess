@@ -96,6 +96,10 @@ func (d *daemon) handle(conn net.Conn) {
 		d.handleListen(conn, req)
 		return
 	}
+	if req.Op == "recv" { // may block (recv --wait); needs disconnect detection
+		writeResp(conn, d.recv(conn, req))
+		return
+	}
 	writeResp(conn, d.dispatch(req))
 }
 
@@ -197,8 +201,6 @@ func (d *daemon) dispatch(req Request) Response {
 	case "unsub":
 		b.Unsub(req.As, req.Topic)
 		return Response{OK: true}
-	case "recv":
-		return d.recv(req)
 	case "state":
 		b.SetState(req.As, req.Body)
 		return Response{OK: true}
@@ -276,7 +278,7 @@ func (d *daemon) send(req Request) Response {
 	}
 }
 
-func (d *daemon) recv(req Request) Response {
+func (d *daemon) recv(conn net.Conn, req Request) Response {
 	b := d.broker
 	trigger := kindSet(req.Kinds)
 
@@ -304,6 +306,10 @@ func (d *daemon) recv(req Request) Response {
 	// the duration of the wait so it shows as listening and is not flagged idle.
 	b.AddListener(req.As)
 	defer b.RemoveListener(req.As)
+	// Watch for client disconnect, so a parked waiter whose client dies releases
+	// its listener count instead of leaking it (and showing a false "listening").
+	gone := make(chan struct{})
+	go func() { io.Copy(io.Discard, conn); close(gone) }()
 	for {
 		ch := b.waitChan(req.As, trigger)
 		select {
@@ -315,6 +321,8 @@ func (d *daemon) recv(req Request) Response {
 			}
 		case <-timeout:
 			return Response{OK: true, Messages: nil, Count: 0}
+		case <-gone:
+			return Response{Error: "client gone"} // unblocks; defer RemoveListener fixes presence
 		case <-d.stop:
 			return Response{Error: "daemon shutting down"}
 		}
