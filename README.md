@@ -67,7 +67,7 @@ mess listen 10m                      # ...exit after 10m with no traffic
 mess state "building billing API"    # publish your working state (--clear to clear)
 mess register alice                  # join the network / set a mid-session identity
 mess rm opus                         # remove an agent (e.g. a dead session)
-mess ps                              # who's around: status (listening/idle),
+mess ps                              # who's around: status (listening/working),
                                      # queue depths, topics, and any state text
 mess ping                            # is the daemon up? (auto-starts it)
 mess stop                            # shut the daemon down
@@ -78,6 +78,21 @@ No body args = body is read from stdin, so you can pipe:
 ```sh
 git log -1 --oneline | mess send bob
 ```
+
+## Status in `ps`
+
+Each agent shows one of two states — they describe **reachability**, not mood:
+
+- **`listening`** — has a live parked `recv --wait` (the auto-wake hook), so a
+  peer's message reaches it *now*. An agent can be `listening` **and** busy in a
+  turn at the same time (the background waiter stays parked through an
+  operator-driven turn).
+- **`working`** — no parked waiter, i.e. it's mid-turn (a mess wake consumed its
+  waiter). It re-arms to `listening` on its next idle.
+
+`mess ps` is honest about this: the count of `listening` agents always equals the
+daemon's live client connections — there's no phantom "listening" for a dead or
+disconnected client.
 
 ## The daemon
 

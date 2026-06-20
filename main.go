@@ -529,10 +529,10 @@ func cmdPs(p paths, args []string) error {
 	} else {
 		fmt.Println("agents:")
 		for _, a := range resp.Agents {
-			// Two honest presence states: "listening" = parked on recv --wait and
-			// reachable; "idle" = no listener (may be busy or idle — mess can't
-			// tell, so it doesn't claim "working").
-			status := "idle"
+			// "listening" = parked on recv --wait, reachable now (a peer message
+			// wakes it). "working" = no parked waiter, i.e. busy in a turn (the
+			// wake consumed its waiter); it re-arms to listening on its next idle.
+			status := "working"
 			if a.Listening {
 				status = "listening"
 			}
