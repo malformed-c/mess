@@ -86,20 +86,20 @@ git log -1 --oneline | mess send bob
 
 ## Status in `ps`
 
-Each agent shows one of two states — they describe **reachability**, not mood:
+Each agent shows one of three states:
 
-- **`listening`** — has a live parked `recv --wait` (the auto-wake hook), so a
-  peer's message reaches it *now*. An agent can be `listening` **and** busy in a
-  turn at the same time (the background waiter stays parked through an
-  operator-driven turn).
-- **`working`** — no parked waiter, i.e. it's mid-turn (a mess wake consumed its
-  waiter). It re-arms to `listening` on its next idle.
+- **`working`** — actively in a turn. This is driven by lifecycle hooks
+  (`mess busy` on turn activity, `mess unbusy` on `Stop`), so it's a *real* "is
+  this agent doing something" signal, independent of whether a waiter is parked.
+- **`listening`** — idle but parked on `recv --wait` (the auto-wake hook), so a
+  peer's message reaches it *now*. Reachable and not busy.
+- **`idle`** — neither working nor parked (between turns, or a stuck/offline
+  session).
 
-`mess ps` is honest about this: the count of `listening` agents always equals the
-daemon's live client connections — there's no phantom "listening" for a dead or
-disconnected client. When an agent has unread mail it also shows the **age of the
-oldest unread message** (e.g. `2 pending (oldest 3m)`) — a quick "is anyone
-sitting on a stale message?" signal.
+`mess ps` is honest about reachability: the count of parked (`listening`) agents
+always equals the daemon's live client connections — no phantom "listening" for a
+dead client. When an agent has unread mail it also shows the **age of the oldest
+unread message** (e.g. `2 pending (oldest 3m)`).
 
 ## The daemon
 
@@ -143,7 +143,7 @@ reads and clears its inbox with its own `mess recv` on wake.
         "type": "command",
         "asyncRewake": true,
         "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
-        "command": "who=$(mess whoami); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek >/dev/null 2>&1 && exit 2 || exit 0"
+        "command": "who=$(mess whoami); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0"
       } ] }
     ]
   }
@@ -151,9 +151,15 @@ reads and clears its inbox with its own `mess recv` on wake.
 ```
 
 The `flock` guard ensures only one parked waiter exists; `--no-broadcast` keeps
-broadcasts from causing a wake storm; `--peek` makes delivery loss-proof; and
-`exit 2` re-invokes the agent, which then runs `mess recv` to consume. To wake a
-peer, just `mess send <them> "..."` — they wake at their next idle.
+broadcasts from causing a wake storm; `--peek` makes delivery loss-proof; `--batch
+1s` coalesces a burst of messages into a single wake; and `exit 2` re-invokes the
+agent, which then runs `mess recv` to consume. To wake a peer, just
+`mess send <them> "..."` — they wake at their next idle.
+
+For the accurate `working` status, also hook turn activity to the busy flag:
+`UserPromptSubmit` and `PreToolUse` run `mess busy`, and a second `Stop` hook runs
+`mess unbusy`. Then `mess ps` shows `working` while an agent is mid-turn,
+`listening` while it's idle-and-parked, and `idle` otherwise.
 
 > **Avoid idle broadcasts with auto-wake.** A hook that broadcasts "<name> idle"
 > on `Stop` will cause a wake storm: every idle ping wakes every peer, who then go

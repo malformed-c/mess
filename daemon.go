@@ -150,6 +150,7 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 	}
 
 	kinds := kindSet(req.Kinds)
+	batch, _ := time.ParseDuration(req.Batch) // 0 on empty/invalid = no batching
 	for {
 		if msgs := d.broker.DrainKinds(req.As, false, req.Max, kinds); len(msgs) > 0 {
 			if err := enc.Encode(Response{OK: true, Messages: msgs, Count: len(msgs)}); err != nil {
@@ -161,7 +162,16 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 		ch := d.broker.waitChan(req.As, kinds)
 		select {
 		case <-ch:
-			// new delivery; loop to drain
+			// new delivery; pause briefly to coalesce a burst, then loop to drain
+			if batch > 0 {
+				select {
+				case <-time.After(batch):
+				case <-gone:
+					return
+				case <-d.stop:
+					return
+				}
+			}
 		case <-idleCh:
 			return
 		case <-gone:
@@ -203,6 +213,18 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true}
 	case "state":
 		b.SetState(req.As, req.Body)
+		return Response{OK: true}
+	case "busy":
+		dur := time.Hour // generous crash backstop; turn hooks refresh, Stop clears
+		if req.Timeout != "" {
+			if d, err := time.ParseDuration(req.Timeout); err == nil {
+				dur = d
+			}
+		}
+		b.SetBusy(req.As, dur)
+		return Response{OK: true}
+	case "unbusy":
+		b.ClearBusy(req.As)
 		return Response{OK: true}
 	case "rm":
 		if b.RemoveAgent(req.To) {
@@ -291,10 +313,32 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// Blocking receive: the kind filter is the WAKE TRIGGER (e.g. --no-broadcast
 	// means broadcasts don't wake you), but once woken we drain EVERYTHING so no
 	// queued message (broadcasts included) is left behind.
-	drainAll := func() []Message { return b.DrainKinds(req.As, req.Peek, req.Max, nil) }
-	if b.HasPending(req.As, trigger) {
-		msgs := drainAll()
+	batch, _ := time.ParseDuration(req.Batch) // 0 on empty/invalid = no batching
+
+	// Watch for client disconnect, so a parked waiter whose client dies releases
+	// its listener count instead of leaking it (and showing a false "listening").
+	gone := make(chan struct{})
+	go func() { io.Copy(io.Discard, conn); close(gone) }()
+
+	// finish drains everything and returns. With --batch it first waits a short
+	// window so a burst of messages coalesces into a single wake instead of one
+	// wake per message.
+	finish := func() Response {
+		if batch > 0 {
+			select {
+			case <-time.After(batch):
+			case <-gone:
+				return Response{Error: "client gone"}
+			case <-d.stop:
+				return Response{Error: "daemon shutting down"}
+			}
+		}
+		msgs := b.DrainKinds(req.As, req.Peek, req.Max, nil)
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
+	}
+
+	if b.HasPending(req.As, trigger) {
+		return finish()
 	}
 
 	timeout, stop, err := timerFor(req.Timeout)
@@ -306,18 +350,12 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// the duration of the wait so it shows as listening and is not flagged idle.
 	b.AddListener(req.As)
 	defer b.RemoveListener(req.As)
-	// Watch for client disconnect, so a parked waiter whose client dies releases
-	// its listener count instead of leaking it (and showing a false "listening").
-	gone := make(chan struct{})
-	go func() { io.Copy(io.Discard, conn); close(gone) }()
 	for {
 		ch := b.waitChan(req.As, trigger)
 		select {
 		case <-ch:
 			if b.HasPending(req.As, trigger) {
-				if msgs := drainAll(); len(msgs) > 0 {
-					return Response{OK: true, Messages: msgs, Count: len(msgs)}
-				}
+				return finish()
 			}
 		case <-timeout:
 			return Response{OK: true, Messages: nil, Count: 0}

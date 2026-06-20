@@ -261,6 +261,40 @@ func TestPsReportsOldestPending(t *testing.T) {
 	}
 }
 
+func TestBusyStatusAndExpiry(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Register("bob")
+	working := func() bool {
+		agents, _ := b.Ps()
+		for _, a := range agents {
+			if a.Name == "bob" {
+				return a.Working
+			}
+		}
+		return false
+	}
+	if working() {
+		t.Fatal("not busy initially")
+	}
+	b.SetBusy("bob", time.Minute)
+	if !working() {
+		t.Fatal("should be working after SetBusy")
+	}
+	// Clears explicitly.
+	b.ClearBusy("bob")
+	if working() {
+		t.Fatal("should not be working after ClearBusy")
+	}
+	// And expires on its own (crash backstop).
+	b.SetBusy("bob", time.Minute)
+	now = now.Add(2 * time.Minute)
+	if working() {
+		t.Fatal("busy should expire after its TTL")
+	}
+}
+
 func TestListenerTracking(t *testing.T) {
 	b := newTestBroker()
 	if b.IsListening("alice") {

@@ -24,6 +24,10 @@ type Broker struct {
 	// can tell whether an agent is actively reachable. Transient.
 	listeners map[string]int
 
+	// busyUntil marks an agent as actively in a turn until the given time (set by
+	// turn-activity hooks, cleared on Stop; the time is a crash backstop).
+	busyUntil map[string]time.Time
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
@@ -44,6 +48,7 @@ func NewBroker() *Broker {
 		topics:      map[string]map[string]bool{},
 		pendingAcks: map[string]chan struct{}{},
 		listeners:   map[string]int{},
+		busyUntil:   map[string]time.Time{},
 		now:         time.Now,
 	}
 }
@@ -290,6 +295,22 @@ func (b *Broker) IsListening(name string) bool {
 	return b.listeners[name] > 0
 }
 
+// SetBusy marks an agent as actively in a turn for the given duration (a crash
+// backstop; turn-activity hooks refresh it, and Stop clears it).
+func (b *Broker) SetBusy(name string, dur time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensure(name)
+	b.busyUntil[name] = b.now().Add(dur)
+}
+
+// ClearBusy marks an agent as no longer in a turn (called on Stop).
+func (b *Broker) ClearBusy(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.busyUntil, name)
+}
+
 // SetState records an agent's self-reported working state (empty clears it).
 func (b *Broker) SetState(name, state string) {
 	b.mu.Lock()
@@ -333,7 +354,7 @@ func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 		if len(a.inbox) > 0 {
 			oldest = a.inbox[0].Time // inbox is in arrival order; [0] is oldest
 		}
-		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, State: a.state, Oldest: oldest})
+		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, Working: b.busyUntil[a.name].After(b.now()), State: a.state, Oldest: oldest})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 

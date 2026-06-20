@@ -37,6 +37,7 @@ type Request struct {
 	Peek    bool     `json:"peek,omitempty"`    // recv without consuming
 	Max     int      `json:"max,omitempty"`     // recv at most N messages (0 = all)
 	Kinds   []string `json:"kinds,omitempty"`   // recv only these kinds (nil = all)
+	Batch   string   `json:"batch,omitempty"`   // (recv --wait) coalesce a burst within this window
 }
 
 // AgentInfo is reported by the `ps` op.
@@ -45,6 +46,7 @@ type AgentInfo struct {
 	Pending   int       `json:"pending"`
 	Topics    []string  `json:"topics,omitempty"`
 	Listening bool      `json:"listening,omitempty"` // has an active streaming listener
+	Working   bool      `json:"working,omitempty"`   // currently in a turn (busy)
 	State     string    `json:"state,omitempty"`     // self-reported working state
 	Oldest    time.Time `json:"oldest,omitzero"`     // arrival time of the oldest pending message
 }

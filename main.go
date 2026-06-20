@@ -23,6 +23,7 @@ Usage:
   mess register [name]            join the network; with a name, set this
                                   session's identity (persists across turns)
   mess state [text...]            set your working state (shown in ps); --clear to clear
+  mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
   mess rm <agent>                 remove an agent (e.g. a dead session) from the network
   mess whoami                     print your resolved identity (empty if none)
   mess islistening                exit 0 if you have an active listener, else 1
@@ -51,6 +52,8 @@ recv flags:
   --kind LIST       only these kinds (comma-list: direct,broadcast,topic)
   --no-broadcast    ignore broadcasts (= --kind direct,topic); useful for a
                     parked waiter that should wake only on actionable messages
+  --batch DUR       with --wait: coalesce a burst arriving within DUR into one
+                    wake (fewer back-to-back wakes for rapid messages)
   --json            print messages as JSON lines
 
 Common flags:
@@ -85,6 +88,8 @@ func main() {
 		err = cmdRegister(p, args)
 	case "state":
 		err = cmdState(p, args)
+	case "busy", "unbusy":
+		err = cmdBusy(p, cmd, args)
 	case "rm":
 		err = cmdRm(p, args)
 	case "whoami":
@@ -339,6 +344,24 @@ func cmdState(p paths, args []string) error {
 	return nil
 }
 
+// cmdBusy marks (busy) or clears (unbusy) the calling agent's in-a-turn flag,
+// which drives the "working" status in ps. Driven by lifecycle hooks.
+func cmdBusy(p paths, op string, args []string) error {
+	fs, as := newFlags(op)
+	ttl := fs.String("ttl", "", "busy auto-clears after this long (default 1h backstop)")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	req := Request{Op: op, As: name}
+	if op == "busy" {
+		req.Timeout = *ttl
+	}
+	_, err = call(p, req)
+	return err
+}
+
 // cmdRm removes an agent from the network (its inbox, subscriptions, presence).
 func cmdRm(p paths, args []string) error {
 	fs, _ := newFlags("rm")
@@ -401,6 +424,7 @@ func cmdRecv(p paths, args []string) error {
 	max := fs.Int("max", 0, "return at most N messages")
 	kind := fs.String("kind", "", "only these kinds (comma-list: direct,broadcast,topic)")
 	noBroadcast := fs.Bool("no-broadcast", false, "ignore broadcasts (= --kind direct,topic)")
+	batch := fs.String("batch", "", "with --wait: coalesce a burst arriving within this window into one return")
 	parseAnywhere(fs, args)
 	name, err := agentName(p, *as)
 	if err != nil {
@@ -431,10 +455,10 @@ func cmdRecv(p paths, args []string) error {
 	}
 
 	if *follow {
-		return followRecv(p, name, timeout, *max, *asJSON, kinds)
+		return followRecv(p, name, timeout, *max, *asJSON, kinds, *batch)
 	}
 
-	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds}
+	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch}
 	// A blocking wait uses the restart-resilient path so it survives a daemon
 	// bounce; a non-blocking drain is a plain one-shot call.
 	dispatch := call
@@ -504,8 +528,8 @@ func warnIfAlreadyListening(p paths, name string) {
 // followRecv blocks, printing messages as they arrive, until interrupted (or,
 // if an idle timeout was given, until that elapses with no message). Designed to
 // run as a long-lived background command so an agent can be woken by peers.
-func followRecv(p paths, name, timeout string, max int, asJSON bool, kinds []string) error {
-	return callStream(p, Request{Op: "listen", As: name, Timeout: timeout, Max: max, Kinds: kinds}, func(resp Response) error {
+func followRecv(p paths, name, timeout string, max int, asJSON bool, kinds []string, batch string) error {
+	return callStream(p, Request{Op: "listen", As: name, Timeout: timeout, Max: max, Kinds: kinds, Batch: batch}, func(resp Response) error {
 		printMessages(resp.Messages, asJSON)
 		return nil
 	})
@@ -541,11 +565,14 @@ func cmdPs(p paths, args []string) error {
 	} else {
 		fmt.Println("agents:")
 		for _, a := range resp.Agents {
-			// "listening" = parked on recv --wait, reachable now (a peer message
-			// wakes it). "working" = no parked waiter, i.e. busy in a turn (the
-			// wake consumed its waiter); it re-arms to listening on its next idle.
-			status := "working"
-			if a.Listening {
+			// "working" = actively in a turn (busy, set by lifecycle hooks);
+			// "listening" = idle but parked on recv --wait, reachable now;
+			// "idle" = neither (between turns / not parked).
+			status := "idle"
+			switch {
+			case a.Working:
+				status = "working"
+			case a.Listening:
 				status = "listening"
 			}
 			line := fmt.Sprintf("  %-16s %-9s %d pending", a.Name, status, a.Pending)
