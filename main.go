@@ -511,6 +511,18 @@ func followRecv(p paths, name, timeout string, max int, asJSON bool, kinds []str
 	})
 }
 
+// compactDur renders a duration as a short "45s" / "3m" / "2h" age.
+func compactDur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+}
+
 func cmdPs(p paths, args []string) error {
 	fs := flag.NewFlagSet("ps", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
@@ -537,6 +549,9 @@ func cmdPs(p paths, args []string) error {
 				status = "listening"
 			}
 			line := fmt.Sprintf("  %-16s %-9s %d pending", a.Name, status, a.Pending)
+			if a.Pending > 0 && !a.Oldest.IsZero() {
+				line += fmt.Sprintf(" (oldest %s)", compactDur(time.Since(a.Oldest)))
+			}
 			if len(a.Topics) > 0 {
 				line += "  [" + strings.Join(a.Topics, ", ") + "]"
 			}

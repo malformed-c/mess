@@ -329,7 +329,11 @@ func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 			topics = append(topics, t)
 		}
 		sort.Strings(topics)
-		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, State: a.state})
+		var oldest time.Time
+		if len(a.inbox) > 0 {
+			oldest = a.inbox[0].Time // inbox is in arrival order; [0] is oldest
+		}
+		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, State: a.state, Oldest: oldest})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 

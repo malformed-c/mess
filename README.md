@@ -20,6 +20,11 @@ Acking is automatic: the recipient sends the receipt simply by `recv`-ing the
 message — there is no separate ack command, and `--peek` does not count as a
 read. Only direct sends can be acked (broadcast/topic have many recipients).
 
+This works correctly with the auto-wake flow: the wake hook only *peeks*, so it
+does **not** fire the ack — the receipt fires when the recipient runs its own
+`mess recv` to actually read the message. So `--ack` is a true "was read" signal,
+not just "was delivered."
+
 ## Install
 
 ```sh
@@ -68,7 +73,7 @@ mess state "building billing API"    # publish your working state (--clear to cl
 mess register alice                  # join the network / set a mid-session identity
 mess rm opus                         # remove an agent (e.g. a dead session)
 mess ps                              # who's around: status (listening/working),
-                                     # queue depths, topics, and any state text
+                                     # queue depth + age of oldest unread, topics, state
 mess ping                            # is the daemon up? (auto-starts it)
 mess stop                            # shut the daemon down
 ```
@@ -92,7 +97,9 @@ Each agent shows one of two states — they describe **reachability**, not mood:
 
 `mess ps` is honest about this: the count of `listening` agents always equals the
 daemon's live client connections — there's no phantom "listening" for a dead or
-disconnected client.
+disconnected client. When an agent has unread mail it also shows the **age of the
+oldest unread message** (e.g. `2 pending (oldest 3m)`) — a quick "is anyone
+sitting on a stale message?" signal.
 
 ## The daemon
 

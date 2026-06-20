@@ -41,11 +41,12 @@ type Request struct {
 
 // AgentInfo is reported by the `ps` op.
 type AgentInfo struct {
-	Name      string   `json:"name"`
-	Pending   int      `json:"pending"`
-	Topics    []string `json:"topics,omitempty"`
-	Listening bool     `json:"listening,omitempty"` // has an active streaming listener
-	State     string   `json:"state,omitempty"`     // self-reported working state
+	Name      string    `json:"name"`
+	Pending   int       `json:"pending"`
+	Topics    []string  `json:"topics,omitempty"`
+	Listening bool      `json:"listening,omitempty"` // has an active streaming listener
+	State     string    `json:"state,omitempty"`     // self-reported working state
+	Oldest    time.Time `json:"oldest,omitzero"`     // arrival time of the oldest pending message
 }
 
 // TopicInfo is reported by the `ps` op.

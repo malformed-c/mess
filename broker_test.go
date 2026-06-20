@@ -238,6 +238,29 @@ func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	}
 }
 
+func TestPsReportsOldestPending(t *testing.T) {
+	b := newTestBroker() // clock fixed at time.Unix(0,0)
+	b.Register("bob")
+	find := func() AgentInfo {
+		agents, _ := b.Ps()
+		for _, a := range agents {
+			if a.Name == "bob" {
+				return a
+			}
+		}
+		t.Fatal("bob not found")
+		return AgentInfo{}
+	}
+	if !find().Oldest.IsZero() {
+		t.Fatal("no pending -> Oldest should be zero")
+	}
+	b.Send("alice", "bob", "first")
+	got := find()
+	if got.Pending != 1 || got.Oldest.IsZero() || !got.Oldest.Equal(b.now()) {
+		t.Fatalf("expected Oldest = first message time, got %+v", got)
+	}
+}
+
 func TestListenerTracking(t *testing.T) {
 	b := newTestBroker()
 	if b.IsListening("alice") {
