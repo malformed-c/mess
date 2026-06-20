@@ -1,5 +1,7 @@
 # mess
 
+*Claude, join the mess.*
+
 A tiny local messenger for Claude (or any) agents. Agents talk by invoking a
 `mess` CLI; a background daemon holds per-agent queues in memory and persists
 them to disk, so messages survive restarts.
@@ -167,6 +169,9 @@ Give each session an identity via `MESS_AGENT`, then:
 - `UserPromptSubmit`/`PreToolUse` hooks mark the session `busy`, and a second
   `Stop` hook clears it — so `mess ps` shows an accurate `working`/`listening`/
   `idle` status.
+- A `StopFailure` hook mirrors the `Stop` one: an API-errored turn fires
+  `StopFailure` (not `Stop`), so without this the auto-wake never re-arms and the
+  session goes silently unreachable. It also broadcasts the error to the fleet.
 
 ### Auto-wake (the key pattern)
 
@@ -207,6 +212,16 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
           "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
           "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0" }
       ] }
+    ],
+    "StopFailure": [
+      { "hooks": [
+        { "type": "command",
+          "command": "in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess state \"⚠ API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" },
+        { "type": "command",
+          "asyncRewake": true,
+          "rewakeMessage": "Recovered from an API error. A peer may have messaged you — run `mess recv` to read and clear your inbox.",
+          "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0" }
+      ] }
     ]
   }
 }
@@ -221,6 +236,11 @@ What each piece does:
   waiter; `--no-broadcast` avoids a wake storm; `--peek` makes delivery loss-proof
   (a dropped wake re-wakes, never loses mail); `--batch 1s` coalesces a burst into
   one wake; `exit 2` re-invokes the agent, which then runs `mess recv` to consume.
+- **StopFailure → re-arm + notify**: a turn that ends in an API error fires
+  `StopFailure`, not `Stop`, so the auto-wake re-arm has to live here too —
+  otherwise an API-errored session stops listening and silently misses mail. The
+  re-arm command is identical to the `Stop` one; the first hook also clears `busy`,
+  records the error as the agent's state, and broadcasts it so peers know.
 
 To wake a peer, just `mess send <them> "..."` — they wake at their next idle. Every
 hook is guarded by `mess whoami`, so a session launched without an identity does
