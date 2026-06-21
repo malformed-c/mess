@@ -212,6 +212,7 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
           "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess unbusy 2>/dev/null; true" },
         { "type": "command",
           "asyncRewake": true,
+          "timeout": 86400,
           "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
           "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0" }
       ] }
@@ -235,6 +236,12 @@ What each piece does:
   waiter; `--no-broadcast` avoids a wake storm; `--peek` makes delivery loss-proof
   (a dropped wake re-wakes, never loses mail); `--batch 1s` coalesces a burst into
   one wake; `exit 2` re-invokes the agent, which then runs `mess recv` to consume.
+  The **`"timeout": 86400`** is essential: Claude Code reaps a hook command at
+  **600s (10 min) by default**, which would kill the parked waiter — and since
+  nothing re-arms it until the next turn, the session would go silently deaf after
+  ten idle minutes. Raising the timeout lets the waiter stay parked (here up to a
+  day) so a peer's message still finds it `listening`. (After the timeout it is
+  reaped and re-arms on the next turn; nothing is lost — peek keeps queued mail.)
 - **StopFailure → notify only**: a turn that ends in an API error fires
   `StopFailure`, not `Stop`. The hook clears `busy`, records the error as the
   agent's state, and broadcasts it so peers know. It deliberately does **not** try
