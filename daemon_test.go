@@ -1,10 +1,34 @@
 package main
 
 import (
+	"bytes"
+	"log"
 	"net"
 	"testing"
 	"time"
 )
+
+// The dedup logger collapses a run of identical messages into one line with a
+// (×N) count, and writes distinct messages verbatim.
+func TestEventLogDeduplicates(t *testing.T) {
+	var buf bytes.Buffer
+	origOut, origFlags := log.Writer(), log.Flags()
+	defer func() { log.SetOutput(origOut); log.SetFlags(origFlags) }()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+
+	e := &eventLog{}
+	e.log("recv x parked")
+	e.log("recv x parked")
+	e.log("recv x parked") // 3 in a row -> one "(×3)" line
+	e.log("send a -> b")   // distinct: flushes the run, then pends
+	e.flush()              // flush the trailing single line
+
+	want := "recv x parked (×3)\nsend a -> b\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
 
 // A parked recv --wait whose client disconnects must release its listener count,
 // not leak it (which would show a false "listening" in ps).

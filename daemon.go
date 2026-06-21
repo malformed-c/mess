@@ -18,10 +18,65 @@ import (
 // logs the useful lifecycle events: sends, wakes, parks, and listener churn.
 var debugEnabled = os.Getenv("MESS_DEBUG") != ""
 
-// dlog logs only when MESS_DEBUG is set.
+// eventLog collapses consecutive identical log messages into a single line
+// annotated with a repeat count ("<msg> (×N)"), so a burst of the same event
+// (e.g. repeated parks or drains) doesn't flood the log. A message is held until
+// the next distinct message arrives or a periodic flush fires, so the count is
+// known before the line is written.
+type eventLog struct {
+	mu    sync.Mutex
+	last  string
+	count int
+}
+
+// events is the daemon-wide deduplicating logger; flushed periodically by a
+// ticker started in runDaemon.
+var events = &eventLog{}
+
+// log records a message, suppressing it if it equals the pending one (just
+// bumping the count) and otherwise flushing the pending one first.
+func (e *eventLog) log(msg string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.count > 0 && msg == e.last {
+		e.count++
+		return
+	}
+	e.flushLocked()
+	e.last, e.count = msg, 1
+}
+
+// flushLocked writes the pending message (with its count) and resets. Holds lock.
+func (e *eventLog) flushLocked() {
+	switch e.count {
+	case 0:
+		return
+	case 1:
+		log.Print(e.last)
+	default:
+		log.Printf("%s (×%d)", e.last, e.count)
+	}
+	e.count = 0
+}
+
+// flush writes any pending message; called on a timer and at shutdown so a
+// trailing line (e.g. a lone "parked") isn't held indefinitely.
+func (e *eventLog) flush() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.flushLocked()
+}
+
+// elog logs a lifecycle event through the deduplicating logger.
+func elog(format string, args ...any) {
+	events.log(fmt.Sprintf(format, args...))
+}
+
+// dlog logs only when MESS_DEBUG is set (through the same dedup path for
+// consistent ordering with elog).
 func dlog(format string, args ...any) {
 	if debugEnabled {
-		log.Printf(format, args...)
+		events.log(fmt.Sprintf(format, args...))
 	}
 }
 
@@ -58,18 +113,33 @@ func runDaemon(p paths) error {
 
 	snap, err := loadSnapshotFile(p.state)
 	if err != nil {
-		log.Printf("warning: could not load state: %v", err)
+		elog("warning: could not load state: %v", err)
 	} else {
 		d.broker.load(snap)
 	}
 	d.broker.onChange = d.persist
 
-	log.Printf("mess daemon listening on %s", p.sock)
+	// Periodically flush the dedup logger so a trailing collapsed line lands.
+	flushTicker := time.NewTicker(time.Second)
+	go func() {
+		for {
+			select {
+			case <-flushTicker.C:
+				events.flush()
+			case <-d.stop:
+				return
+			}
+		}
+	}()
+
+	elog("mess daemon listening on %s", p.sock)
 	go d.acceptLoop()
 	<-d.stop
+	flushTicker.Stop()
 	_ = ln.Close()
 	_ = os.Remove(p.sock)
-	log.Printf("mess daemon stopped")
+	elog("mess daemon stopped")
+	events.flush()
 	return nil
 }
 
@@ -78,7 +148,7 @@ func (d *daemon) persist(s snapshot) {
 	d.saveMu.Lock()
 	defer d.saveMu.Unlock()
 	if err := saveSnapshot(d.paths.state, s); err != nil {
-		log.Printf("warning: could not save state: %v", err)
+		elog("warning: could not save state: %v", err)
 	}
 }
 
@@ -90,7 +160,7 @@ func (d *daemon) acceptLoop() {
 			case <-d.stop:
 				return // shutting down
 			default:
-				log.Printf("accept error: %v", err)
+				elog("accept error: %v", err)
 				return
 			}
 		}
@@ -136,8 +206,8 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 
 	d.broker.AddListener(req.As)
 	defer d.broker.RemoveListener(req.As)
-	log.Printf("listen %s start (waiting on %s)", req.As, kindsLabel(req.Kinds))
-	defer log.Printf("listen %s end", req.As)
+	elog("listen %s start (waiting on %s)", req.As, kindsLabel(req.Kinds))
+	defer elog("listen %s end", req.As)
 
 	// Detect client disconnect by watching for EOF on the connection.
 	gone := make(chan struct{})
@@ -213,17 +283,17 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true}
 	case "register":
 		b.Register(req.As)
-		log.Printf("register %s", req.As)
+		elog("register %s", req.As)
 		return Response{OK: true}
 	case "send":
 		return d.send(req)
 	case "broadcast":
 		_, n := b.Broadcast(req.As, req.Body)
-		log.Printf("broadcast %s -> %d agent(s)", req.As, n)
+		elog("broadcast %s -> %d agent(s)", req.As, n)
 		return Response{OK: true, Count: n}
 	case "pub":
 		_, n := b.Pub(req.As, req.Topic, req.Body)
-		log.Printf("pub %s #%s -> %d sub(s)", req.As, req.Topic, n)
+		elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, n)
 		return Response{OK: true, Count: n}
 	case "sub":
 		b.Sub(req.As, req.Topic)
@@ -295,7 +365,7 @@ func (d *daemon) send(req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		pending, listening := b.Stat(req.To)
-		log.Printf("send %s -> %s | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
+		elog("send %s -> %s | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
 		return Response{OK: true, Count: 1}
 	}
 
@@ -305,7 +375,7 @@ func (d *daemon) send(req Request) Response {
 		return Response{Error: err.Error()}
 	}
 	pending, listening := b.Stat(req.To)
-	log.Printf("send %s -> %s (ack) | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
+	elog("send %s -> %s (ack) | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
 	timeout, stop, err := timerFor(req.Timeout)
 	if err != nil {
 		b.CancelAck(m.ID)
@@ -332,7 +402,7 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	if !req.Wait {
 		msgs := b.DrainKinds(req.As, req.Peek, req.Max, trigger)
 		if len(msgs) > 0 {
-			log.Printf("recv %s drained %d%s", req.As, len(msgs), peekNote(req.Peek))
+			elog("recv %s drained %d%s", req.As, len(msgs), peekNote(req.Peek))
 		} else {
 			dlog("recv %s drained 0", req.As)
 		}
@@ -363,7 +433,7 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 			}
 		}
 		msgs := b.DrainKinds(req.As, req.Peek, req.Max, nil)
-		log.Printf("recv %s woke -> drained %d%s", req.As, len(msgs), peekNote(req.Peek))
+		elog("recv %s woke -> drained %d%s", req.As, len(msgs), peekNote(req.Peek))
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -380,7 +450,7 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// the duration of the wait so it shows as listening and is not flagged idle.
 	b.AddListener(req.As)
 	defer b.RemoveListener(req.As)
-	log.Printf("recv %s parked (waiting on %s)", req.As, kindsLabel(req.Kinds))
+	elog("recv %s parked (waiting on %s)", req.As, kindsLabel(req.Kinds))
 	for {
 		ch := b.waitChan(req.As, trigger)
 		select {
@@ -389,10 +459,10 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 				return finish()
 			}
 		case <-timeout:
-			log.Printf("recv %s wait timed out (unparked)", req.As)
+			elog("recv %s wait timed out (unparked)", req.As)
 			return Response{OK: true, Messages: nil, Count: 0}
 		case <-gone:
-			log.Printf("recv %s client gone (unparked)", req.As) // defer RemoveListener fixes presence
+			elog("recv %s client gone (unparked)", req.As) // defer RemoveListener fixes presence
 			return Response{Error: "client gone"}
 		case <-d.stop:
 			return Response{Error: "daemon shutting down"}

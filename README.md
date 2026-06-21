@@ -158,6 +158,13 @@ detached daemon. State lives under `~/.mess/` (override with `MESS_DIR`):
 - `~/.mess/state.json` — persisted queues, subscriptions, topics
 - `~/.mess/daemon.log` — daemon logs
 
+The log records the message/wake lifecycle — sends (with the recipient's pending
+count and whether it was `listening` at delivery time), broadcasts, pubs, and recv
+`parked`/`woke`/`client gone` — which makes a missed wake diagnosable from the log
+alone. Consecutive identical lines are **collapsed** into one with a repeat count
+(`… (×N)`) so a burst doesn't flood the file. Set `MESS_DEBUG=1` for low-level
+detail (e.g. benign client-disconnect write errors).
+
 ## Claude Code integration
 
 Because it's just a CLI, it drops straight into hooks (which are shell commands).
