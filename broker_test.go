@@ -320,6 +320,26 @@ func TestListenerTracking(t *testing.T) {
 	}
 }
 
+func TestStatReportsPendingAndListening(t *testing.T) {
+	b := newTestBroker()
+	if p, l := b.Stat("bob"); p != 0 || l {
+		t.Fatalf("unknown agent: want 0/false, got %d/%v", p, l)
+	}
+	b.Send("alice", "bob", "one")
+	b.Send("alice", "bob", "two")
+	if p, l := b.Stat("bob"); p != 2 || l {
+		t.Fatalf("after 2 sends: want 2/false, got %d/%v", p, l)
+	}
+	b.AddListener("bob")
+	if p, l := b.Stat("bob"); p != 2 || !l {
+		t.Fatalf("with listener: want 2/true, got %d/%v", p, l)
+	}
+	b.RemoveListener("bob")
+	if _, l := b.Stat("bob"); l {
+		t.Fatal("listener removed: want false")
+	}
+}
+
 func TestPersistenceRoundTrip(t *testing.T) {
 	b := newTestBroker()
 	b.Send("alice", "bob", "keep me")

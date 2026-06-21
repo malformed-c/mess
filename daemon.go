@@ -8,9 +8,22 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
+
+// debugEnabled gates low-level/noisy logging (benign client-disconnect write
+// errors, raw drains). Set MESS_DEBUG=1 to see them. The default, "info" level,
+// logs the useful lifecycle events: sends, wakes, parks, and listener churn.
+var debugEnabled = os.Getenv("MESS_DEBUG") != ""
+
+// dlog logs only when MESS_DEBUG is set.
+func dlog(format string, args ...any) {
+	if debugEnabled {
+		log.Printf(format, args...)
+	}
+}
 
 // daemon owns the broker, the listener, and the persistence file.
 type daemon struct {
@@ -123,6 +136,8 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 
 	d.broker.AddListener(req.As)
 	defer d.broker.RemoveListener(req.As)
+	log.Printf("listen %s start (waiting on %s)", req.As, kindsLabel(req.Kinds))
+	defer log.Printf("listen %s end", req.As)
 
 	// Detect client disconnect by watching for EOF on the connection.
 	gone := make(chan struct{})
@@ -185,7 +200,9 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 func writeResp(conn net.Conn, r Response) {
 	enc := json.NewEncoder(conn)
 	if err := enc.Encode(r); err != nil {
-		log.Printf("write error: %v", err)
+		// A broken pipe just means the client disconnected before reading the
+		// reply (the common case for a parked recv whose hook was reaped). Benign.
+		dlog("write error: %v", err)
 	}
 }
 
@@ -196,14 +213,17 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true}
 	case "register":
 		b.Register(req.As)
+		log.Printf("register %s", req.As)
 		return Response{OK: true}
 	case "send":
 		return d.send(req)
 	case "broadcast":
 		_, n := b.Broadcast(req.As, req.Body)
+		log.Printf("broadcast %s -> %d agent(s)", req.As, n)
 		return Response{OK: true, Count: n}
 	case "pub":
 		_, n := b.Pub(req.As, req.Topic, req.Body)
+		log.Printf("pub %s #%s -> %d sub(s)", req.As, req.Topic, n)
 		return Response{OK: true, Count: n}
 	case "sub":
 		b.Sub(req.As, req.Topic)
@@ -274,6 +294,8 @@ func (d *daemon) send(req Request) Response {
 		if _, err := b.Send(req.As, req.To, req.Body); err != nil {
 			return Response{Error: err.Error()}
 		}
+		pending, listening := b.Stat(req.To)
+		log.Printf("send %s -> %s | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
 		return Response{OK: true, Count: 1}
 	}
 
@@ -282,6 +304,8 @@ func (d *daemon) send(req Request) Response {
 	if err != nil {
 		return Response{Error: err.Error()}
 	}
+	pending, listening := b.Stat(req.To)
+	log.Printf("send %s -> %s (ack) | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
 	timeout, stop, err := timerFor(req.Timeout)
 	if err != nil {
 		b.CancelAck(m.ID)
@@ -307,6 +331,11 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// Non-blocking drain: the kind filter acts as a result filter.
 	if !req.Wait {
 		msgs := b.DrainKinds(req.As, req.Peek, req.Max, trigger)
+		if len(msgs) > 0 {
+			log.Printf("recv %s drained %d%s", req.As, len(msgs), peekNote(req.Peek))
+		} else {
+			dlog("recv %s drained 0", req.As)
+		}
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -334,6 +363,7 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 			}
 		}
 		msgs := b.DrainKinds(req.As, req.Peek, req.Max, nil)
+		log.Printf("recv %s woke -> drained %d%s", req.As, len(msgs), peekNote(req.Peek))
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -350,6 +380,7 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// the duration of the wait so it shows as listening and is not flagged idle.
 	b.AddListener(req.As)
 	defer b.RemoveListener(req.As)
+	log.Printf("recv %s parked (waiting on %s)", req.As, kindsLabel(req.Kinds))
 	for {
 		ch := b.waitChan(req.As, trigger)
 		select {
@@ -358,13 +389,31 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 				return finish()
 			}
 		case <-timeout:
+			log.Printf("recv %s wait timed out (unparked)", req.As)
 			return Response{OK: true, Messages: nil, Count: 0}
 		case <-gone:
-			return Response{Error: "client gone"} // unblocks; defer RemoveListener fixes presence
+			log.Printf("recv %s client gone (unparked)", req.As) // defer RemoveListener fixes presence
+			return Response{Error: "client gone"}
 		case <-d.stop:
 			return Response{Error: "daemon shutting down"}
 		}
 	}
+}
+
+// peekNote annotates a drain log line when messages were left in place.
+func peekNote(peek bool) string {
+	if peek {
+		return " (peek; left queued)"
+	}
+	return ""
+}
+
+// kindsLabel renders a recv kind filter for logs ("all" when unfiltered).
+func kindsLabel(kinds []string) string {
+	if len(kinds) == 0 {
+		return "all"
+	}
+	return strings.Join(kinds, ",")
 }
 
 var errNoDaemon = errors.New("no daemon running")

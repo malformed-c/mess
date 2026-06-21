@@ -295,6 +295,17 @@ func (b *Broker) IsListening(name string) bool {
 	return b.listeners[name] > 0
 }
 
+// Stat returns an agent's queued-message count and whether it currently has an
+// active listener — a cheap one-lock snapshot for diagnostic logging.
+func (b *Broker) Stat(name string) (pending int, listening bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if a := b.agents[name]; a != nil {
+		pending = len(a.inbox)
+	}
+	return pending, b.listeners[name] > 0
+}
+
 // SetBusy marks an agent as actively in a turn for the given duration (a crash
 // backstop; turn-activity hooks refresh it, and Stop clears it).
 func (b *Broker) SetBusy(name string, dur time.Duration) {
