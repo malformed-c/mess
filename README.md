@@ -169,9 +169,12 @@ Give each session an identity via `MESS_AGENT`, then:
 - `UserPromptSubmit`/`PreToolUse` hooks mark the session `busy`, and a second
   `Stop` hook clears it — so `mess ps` shows an accurate `working`/`listening`/
   `idle` status.
-- A `StopFailure` hook mirrors the `Stop` one: an API-errored turn fires
-  `StopFailure` (not `Stop`), so without this the auto-wake never re-arms and the
-  session goes silently unreachable. It also broadcasts the error to the fleet.
+- A `StopFailure` hook (fires when a turn ends in an API error) clears `busy`,
+  records the error as the agent's state, and broadcasts it to the fleet. It is
+  **notify-only**: Claude Code ignores a `StopFailure` hook's exit code, so
+  `asyncRewake` does **not** work there — an API-errored session cannot be woken
+  by a hook and stays unreachable until you prompt it (its queued mail is safe and
+  drains on the next prompt). See the note below.
 
 ### Auto-wake (the key pattern)
 
@@ -216,11 +219,7 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
     "StopFailure": [
       { "hooks": [
         { "type": "command",
-          "command": "in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess state \"⚠ API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" },
-        { "type": "command",
-          "asyncRewake": true,
-          "rewakeMessage": "Recovered from an API error. A peer may have messaged you — run `mess recv` to read and clear your inbox.",
-          "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0" }
+          "command": "in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess state \"⚠ API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" }
       ] }
     ]
   }
@@ -236,15 +235,23 @@ What each piece does:
   waiter; `--no-broadcast` avoids a wake storm; `--peek` makes delivery loss-proof
   (a dropped wake re-wakes, never loses mail); `--batch 1s` coalesces a burst into
   one wake; `exit 2` re-invokes the agent, which then runs `mess recv` to consume.
-- **StopFailure → re-arm + notify**: a turn that ends in an API error fires
-  `StopFailure`, not `Stop`, so the auto-wake re-arm has to live here too —
-  otherwise an API-errored session stops listening and silently misses mail. The
-  re-arm command is identical to the `Stop` one; the first hook also clears `busy`,
-  records the error as the agent's state, and broadcasts it so peers know.
+- **StopFailure → notify only**: a turn that ends in an API error fires
+  `StopFailure`, not `Stop`. The hook clears `busy`, records the error as the
+  agent's state, and broadcasts it so peers know. It deliberately does **not** try
+  to re-arm the auto-wake: Claude Code ignores a `StopFailure` hook's exit code, so
+  `asyncRewake` has no effect there (see the warning below).
 
 To wake a peer, just `mess send <them> "..."` — they wake at their next idle. Every
 hook is guarded by `mess whoami`, so a session launched without an identity does
 nothing.
+
+> **An API-errored session can't be woken by a hook.** When a turn ends in an API
+> error, Claude Code runs `StopFailure` instead of `Stop`, and its docs state the
+> hook's "output and exit code are ignored" — so an `asyncRewake` re-arm on
+> `StopFailure` silently does nothing (worse: a parked waiter would make `mess ps`
+> show a false `listening`). Such a session is unreachable until you prompt it;
+> peek-to-wake keeps its queued mail intact, and it drains on the next prompt. The
+> auto-wake here is `Stop`-only by design.
 
 > **Avoid idle broadcasts with auto-wake.** A hook that broadcasts "<name> idle"
 > on `Stop` will cause a wake storm: every idle ping wakes every peer, who then go
