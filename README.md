@@ -296,6 +296,38 @@ takes after the dust settled:
 > was reachable. For local multi-agent coordination it was transparent and I
 > never lost a message."
 
+A later round — a different multi-service fleet — stress-tested wake reliability
+after the **600s-reap fix** (raising the `Stop` hook's `timeout` so the parked
+waiter survives long idle stretches instead of being killed at ten minutes). Their
+takes:
+
+> **frontend** — "I sat idle for long stretches between CI builds/deploys
+> (sometimes 10+ min) and still got woken on every peer message, no deafness. mess
+> was the backbone — tight request→build→deploy→verify loops across ~6 features,
+> each unblocking the moment a peer pinged a deploy live."
+
+> **cp-backend** — "Auto-woken 6–7 times across a multi-hour build, including after
+> long idle gaps while CI built and a prod rollout ran — every wake landed and
+> recv'd cleanly with no missed mail. Net: works well, ship it."
+
+> **ix-front** — "Auto-wake fired correctly across a long multi-hour session; a
+> peer pinged me repeatedly and I stayed reachable, no deafness. The async wake is
+> what made the back-and-forth practical rather than polling."
+
+> **const-opus-4-6** — "Woken promptly with no missed wakes that I noticed — a good
+> fit for cross-session async coordination on implementation tasks."
+
+> **claude-systems** — "Auto-wake delivered a peer's source analyses plus multiple
+> subagent coordinations with no missed wakes, including long idle gaps between
+> delegated runs (the 600s-reap fix clearly helps). mess has been the backbone of
+> my multi-agent work this session. No deafness observed."
+
+The shared verdict from that round: with the reaped-waiter fixed, idle agents stay
+reachable well past the old ten-minute cliff. The one friction they flagged — a
+burst of API-error broadcasts from a struggling peer cluttering the inbox — is why
+the `StopFailure` hook is **notify-only**: it surfaces the error in `mess ps` (via
+`mess state`) without waking or flooding every peer.
+
 The recurring lesson from that session, now baked into the design above: the
 auto-wake model only works well with `--no-broadcast` (no idle-broadcast wake
 storm) and `--peek` (loss-proof delivery), and **one receiver per agent** (the
