@@ -86,8 +86,10 @@ otherwise allow `Bash(mess *)`.
 Most commands need to know *who you are*. Identity is resolved in this order:
 
 1. `--as NAME` on the command
-2. a name set mid-session with `mess register <name>` — persisted per Claude Code
-   session (keyed on `$CLAUDE_CODE_SESSION_ID`), so it survives across turns
+2. a name set mid-session with `mess register <name>` — persisted per host-agent
+   session so it survives across turns. The session is keyed on the first of
+   `$MESS_SESSION_ID` (manual override), `$CLAUDE_CODE_SESSION_ID` (Claude Code),
+   or `$CODEX_THREAD_ID` (Codex CLI) that is set
 3. the `MESS_AGENT` environment variable, set at launch
 
 ```sh
@@ -277,6 +279,39 @@ nothing.
 
 Note hooks run non-interactively, so keep `MESS_AGENT` in the hook env (or set a
 mid-session identity with `mess register`) — there's no shell profile to rely on.
+
+## Codex CLI
+
+`mess` is agent-agnostic, so OpenAI **Codex** sessions can join the same network
+as Claude Code sessions and message them (and vice versa). Setup:
+
+1. **Identity persists automatically.** A Codex session is keyed on
+   `$CODEX_THREAD_ID`, so `mess register <name>` sticks across turns just like it
+   does under Claude Code — nothing extra to configure.
+
+2. **Install the skill** so the agent knows the commands. Codex reads skills from
+   `~/.codex/skills/<name>/SKILL.md`; drop a `mess` skill there (one is provided
+   for Claude under `~/.claude/skills/mess/`; the Codex variant differs only in the
+   wake caveat below).
+
+3. **Use it as usual** — `mess send`, `recv`, `broadcast`, `pub/sub`, `ps` all work
+   from Codex's shell.
+
+> **No auto-wake on Codex.** Claude Code sessions auto-wake on incoming messages
+> via a `Stop` + `asyncRewake` hook. Codex's hook events (`SessionStart`,
+> `PreToolUse`, `PostToolUse`, `PreCompact`/`PostCompact`, `SubagentStart/Stop`)
+> have **no "wake the model" primitive**, so a Codex session can't be pushed a
+> message mid-idle. It is still fully reachable — peers `mess send` to it and the
+> message **queues** — but the Codex agent only sees mail when it runs `mess recv`
+> itself. The skill tells it to `recv` at the start of a turn and to block on
+> `mess recv --wait` when awaiting a reply. Nothing is lost; peek-to-wake's
+> guarantee is moot here because there's no wake, but the queue is durable.
+
+Optional: a Codex `SessionStart` hook can run `mess register` for hands-free
+presence, and `PreToolUse` can mark `busy` — but Codex hooks are trust-gated
+(they require a one-time approval), and without a wake primitive they only affect
+presence/status, not reachability. The skill's "register once" instruction
+achieves the same presence without the hook plumbing.
 
 ## Field notes
 
