@@ -340,6 +340,52 @@ func TestStatReportsPendingAndListening(t *testing.T) {
 	}
 }
 
+func TestCleanupPrunesIdleNotListening(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Register("old")        // lastSeen = 1000
+	b.AddListener("parked")  // listening; lastSeen = 1000
+	now = now.Add(48 * time.Hour)
+	b.Register("recent") // fresh: lastSeen = now
+
+	present := func(name string) bool {
+		_, ok := b.agents[name]
+		return ok
+	}
+
+	// Dry-run: reports the one idle, non-listening agent, removes nothing.
+	if preview := b.Cleanup(24*time.Hour, true); len(preview) != 1 || preview[0] != "old" {
+		t.Fatalf("dry-run want [old], got %v", preview)
+	}
+	if !present("old") {
+		t.Fatal("dry-run must not remove anything")
+	}
+
+	// Real run: prunes "old" only. "parked" is idle 48h but listening (kept);
+	// "recent" was just seen (kept).
+	removed := b.Cleanup(24*time.Hour, false)
+	if len(removed) != 1 || removed[0] != "old" {
+		t.Fatalf("want removed [old], got %v", removed)
+	}
+	if present("old") {
+		t.Fatal("'old' should be pruned")
+	}
+	if !present("parked") || !present("recent") {
+		t.Fatal("listening and recently-seen agents must be kept")
+	}
+}
+
+func TestLastSeenPersists(t *testing.T) {
+	b := newTestBroker() // now fixed at Unix(0,0)
+	b.Register("bob")
+	b2 := newTestBroker()
+	b2.load(b.snapshot())
+	if got, ok := b2.lastSeen["bob"]; !ok || !got.Equal(time.Unix(0, 0)) {
+		t.Fatalf("lastSeen not restored: got %v ok=%v", got, ok)
+	}
+}
+
 func TestPersistenceRoundTrip(t *testing.T) {
 	b := newTestBroker()
 	b.Send("alice", "bob", "keep me")

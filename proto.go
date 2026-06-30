@@ -66,4 +66,5 @@ type Response struct {
 	Agents   []AgentInfo `json:"agents,omitempty"`
 	Topics   []TopicInfo `json:"topics,omitempty"`
 	Count    int         `json:"count,omitempty"`
+	Removed  []string    `json:"removed,omitempty"` // (cleanup) agents pruned (or, with dry-run, eligible)
 }

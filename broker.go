@@ -28,6 +28,10 @@ type Broker struct {
 	// turn-activity hooks, cleared on Stop; the time is a crash backstop).
 	busyUntil map[string]time.Time
 
+	// lastSeen records the last time an agent did anything (registered, sent,
+	// recv'd, parked, ...). Drives `cleanup`, which prunes long-idle agents.
+	lastSeen map[string]time.Time
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
@@ -49,7 +53,16 @@ func NewBroker() *Broker {
 		pendingAcks: map[string]chan struct{}{},
 		listeners:   map[string]int{},
 		busyUntil:   map[string]time.Time{},
+		lastSeen:    map[string]time.Time{},
 		now:         time.Now,
+	}
+}
+
+// touch records that an agent was just active (for cleanup). Call with the lock
+// held; an empty name (e.g. a recv with no identity) is ignored.
+func (b *Broker) touch(name string) {
+	if name != "" {
+		b.lastSeen[name] = b.now()
 	}
 }
 
@@ -91,6 +104,7 @@ func (b *Broker) Register(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ensure(name)
+	b.touch(name)
 	b.changed()
 }
 
@@ -114,6 +128,7 @@ func (b *Broker) send(from, to, body string, ack bool) (Message, <-chan struct{}
 		return Message{}, nil, fmt.Errorf("recipient required")
 	}
 	m := Message{ID: b.nextID(), From: from, To: to, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack}
+	b.touch(from)
 	b.ensure(to).deliver(m)
 	var ackCh chan struct{}
 	if ack {
@@ -136,6 +151,7 @@ func (b *Broker) Broadcast(from, body string) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	m := Message{ID: b.nextID(), From: from, Kind: KindBroadcast, Body: body, Time: b.now()}
+	b.touch(from)
 	n := 0
 	for name, a := range b.agents {
 		if name == from {
@@ -153,6 +169,7 @@ func (b *Broker) Pub(from, topic, body string) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	m := Message{ID: b.nextID(), From: from, Topic: topic, Kind: KindTopic, Body: body, Time: b.now()}
+	b.touch(from)
 	n := 0
 	for name := range b.topics[topic] {
 		if name == from {
@@ -170,6 +187,7 @@ func (b *Broker) Sub(name, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ensure(name).topics[topic] = true
+	b.touch(name)
 	if b.topics[topic] == nil {
 		b.topics[topic] = map[string]bool{}
 	}
@@ -181,6 +199,7 @@ func (b *Broker) Sub(name, topic string) {
 func (b *Broker) Unsub(name, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.touch(name)
 	if a := b.agents[name]; a != nil {
 		delete(a.topics, topic)
 	}
@@ -206,6 +225,7 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	a := b.ensure(name)
+	b.touch(name)
 	var out, keep []Message
 	for _, m := range a.inbox {
 		if (kinds == nil || kinds[m.Kind]) && (max <= 0 || len(out) < max) {
@@ -274,6 +294,7 @@ func (b *Broker) AddListener(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ensure(name)
+	b.touch(name)
 	b.listeners[name]++
 }
 
@@ -312,6 +333,7 @@ func (b *Broker) SetBusy(name string, dur time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ensure(name)
+	b.touch(name)
 	b.busyUntil[name] = b.now().Add(dur)
 }
 
@@ -327,6 +349,7 @@ func (b *Broker) SetState(name, state string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ensure(name).state = state
+	b.touch(name)
 	b.changed()
 }
 
@@ -335,19 +358,60 @@ func (b *Broker) SetState(name, state string) {
 func (b *Broker) RemoveAgent(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.removeAgentLocked(name) {
+		return false
+	}
+	b.changed()
+	return true
+}
+
+// removeAgentLocked forgets an agent's presence, inbox, subscriptions, listener
+// count, busy/last-seen bookkeeping. Returns false if unknown. Holds the lock;
+// the caller fires changed() (so a batch removal persists once).
+func (b *Broker) removeAgentLocked(name string) bool {
 	if _, ok := b.agents[name]; !ok {
 		return false
 	}
 	delete(b.agents, name)
 	delete(b.listeners, name)
+	delete(b.busyUntil, name)
+	delete(b.lastSeen, name)
 	for topic, subs := range b.topics {
 		delete(subs, name)
 		if len(subs) == 0 {
 			delete(b.topics, topic)
 		}
 	}
-	b.changed()
 	return true
+}
+
+// Cleanup prunes agents idle longer than maxAge — last active over maxAge ago
+// (or never seen) and not currently listening, so live/parked sessions are kept.
+// With dryRun it only reports who is eligible without removing anything. Returns
+// the affected agent names, sorted.
+func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	var names []string
+	for name := range b.agents {
+		if b.listeners[name] > 0 {
+			continue // reachable right now — never prune
+		}
+		seen, ok := b.lastSeen[name]
+		if ok && now.Sub(seen) <= maxAge {
+			continue // active recently enough
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if !dryRun && len(names) > 0 {
+		for _, name := range names {
+			b.removeAgentLocked(name)
+		}
+		b.changed()
+	}
+	return names
 }
 
 // Ps reports current agents and topics, sorted for stable output.

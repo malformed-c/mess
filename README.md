@@ -119,7 +119,10 @@ mess listen 10m                      # ...exit after 10m with no traffic
 
 mess state "building billing API"    # publish your working state (--clear to clear)
 mess register alice                  # join the network / set a mid-session identity
-mess rm opus                         # remove an agent (e.g. a dead session)
+mess unregister                      # leave the network + clear this session's identity
+mess rm opus                         # remove another agent (e.g. a dead session)
+mess cleanup                         # prune agents idle >24h and not listening
+mess cleanup 2h --dry-run            # ...custom age; preview without removing
 mess ps                              # who's around: status (listening/working),
                                      # queue depth + age of oldest unread, topics, state
 mess ping                            # is the daemon up? (auto-starts it)

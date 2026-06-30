@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // snapshot is the serializable form of broker state. Waiters are transient and
@@ -16,10 +17,11 @@ type snapshot struct {
 }
 
 type agentSnap struct {
-	Name   string    `json:"name"`
-	Inbox  []Message `json:"inbox,omitempty"`
-	Topics []string  `json:"topics,omitempty"`
-	State  string    `json:"state,omitempty"`
+	Name     string    `json:"name"`
+	Inbox    []Message `json:"inbox,omitempty"`
+	Topics   []string  `json:"topics,omitempty"`
+	State    string    `json:"state,omitempty"`
+	LastSeen time.Time `json:"lastSeen,omitzero"`
 }
 
 // snapshot captures broker state. Caller must hold the lock.
@@ -31,7 +33,7 @@ func (b *Broker) snapshot() snapshot {
 			topics = append(topics, t)
 		}
 		sort.Strings(topics)
-		s.Agents = append(s.Agents, agentSnap{Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state})
+		s.Agents = append(s.Agents, agentSnap{Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state, LastSeen: b.lastSeen[a.name]})
 	}
 	sort.Slice(s.Agents, func(i, j int) bool { return s.Agents[i].Name < s.Agents[j].Name })
 	for t, subs := range b.topics {
@@ -52,12 +54,21 @@ func (b *Broker) load(s snapshot) {
 	b.seq = s.Seq
 	b.agents = map[string]*agentState{}
 	b.topics = map[string]map[string]bool{}
+	b.lastSeen = map[string]time.Time{}
 	for _, as := range s.Agents {
 		a := b.ensure(as.Name)
 		a.inbox = as.Inbox
 		a.state = as.State
 		for _, t := range as.Topics {
 			a.topics[t] = true
+		}
+		// Default a missing timestamp (legacy snapshot) to load time, so an
+		// upgrade gives every existing agent a full grace period before cleanup
+		// could prune it — rather than treating them all as "never seen".
+		if as.LastSeen.IsZero() {
+			b.lastSeen[as.Name] = b.now()
+		} else {
+			b.lastSeen[as.Name] = as.LastSeen
 		}
 	}
 	for t, names := range s.Topics {

@@ -318,9 +318,30 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true}
 	case "rm":
 		if b.RemoveAgent(req.To) {
+			elog("rm %s", req.To)
 			return Response{OK: true, Count: 1}
 		}
 		return Response{OK: true, Count: 0} // idempotent: unknown agent is not an error
+	case "unregister":
+		if b.RemoveAgent(req.As) {
+			elog("unregister %s", req.As)
+			return Response{OK: true, Count: 1}
+		}
+		return Response{OK: true, Count: 0} // idempotent
+	case "cleanup":
+		maxAge := 24 * time.Hour
+		if req.Timeout != "" {
+			if d, err := time.ParseDuration(req.Timeout); err == nil {
+				maxAge = d
+			} else {
+				return Response{Error: "invalid duration: " + req.Timeout}
+			}
+		}
+		names := b.Cleanup(maxAge, req.Peek) // Peek == dry-run
+		if len(names) > 0 && !req.Peek {
+			elog("cleanup removed %d agent(s): %v", len(names), names)
+		}
+		return Response{OK: true, Count: len(names), Removed: names}
 	case "ps":
 		agents, topics := b.Ps()
 		return Response{OK: true, Agents: agents, Topics: topics}

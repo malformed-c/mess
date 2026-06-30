@@ -22,6 +22,10 @@ Usage:
   mess unsub <topic>              unsubscribe from a topic
   mess register [name]            join the network; with a name, set this
                                   session's identity (persists across turns)
+  mess unregister                 leave the network and clear this session's
+                                  identity (inverse of register)
+  mess cleanup [maxage]           prune agents idle longer than maxage (default
+                                  24h) and not listening; --dry-run to preview
   mess state [text...]            set your working state (shown in ps); --clear to clear
   mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
   mess rm <agent>                 remove an agent (e.g. a dead session) from the network
@@ -86,6 +90,10 @@ func main() {
 		err = cmdSubUnsub(p, cmd, args)
 	case "register":
 		err = cmdRegister(p, args)
+	case "unregister":
+		err = cmdUnregister(p, args)
+	case "cleanup":
+		err = cmdCleanup(p, args)
 	case "state":
 		err = cmdState(p, args)
 	case "busy", "unbusy":
@@ -314,6 +322,61 @@ func cmdRegister(p paths, args []string) error {
 		return err
 	}
 	fmt.Printf("registered as %s\n", name)
+	return nil
+}
+
+// cmdUnregister removes the calling agent from the network and clears this
+// session's persisted identity — the inverse of register.
+func cmdUnregister(p paths, args []string) error {
+	fs, as := newFlags("unregister")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	if _, err := call(p, Request{Op: "unregister", As: name}); err != nil {
+		return err
+	}
+	// Only clear the persisted identity when unregistering our *own* session
+	// identity — not when --as targets some other agent.
+	if name == readIdentity(p) {
+		if err := clearIdentity(p); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("unregistered %s\n", name)
+	if env := os.Getenv("MESS_AGENT"); env != "" {
+		fmt.Printf("note: MESS_AGENT=%s is still set; this session will re-register as %q on its next action\n", env, env)
+	}
+	return nil
+}
+
+// cmdCleanup prunes agents idle longer than maxage (default 24h) that aren't
+// currently listening. With --dry-run it only reports what would be removed.
+func cmdCleanup(p paths, args []string) error {
+	fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "list what would be removed without removing")
+	parseAnywhere(fs, args)
+	maxAge := ""
+	if rest := fs.Args(); len(rest) > 0 {
+		if _, derr := time.ParseDuration(rest[0]); derr != nil {
+			return fmt.Errorf("invalid duration %q", rest[0])
+		}
+		maxAge = rest[0]
+	}
+	resp, err := call(p, Request{Op: "cleanup", Timeout: maxAge, Peek: *dryRun})
+	if err != nil {
+		return err
+	}
+	if len(resp.Removed) == 0 {
+		fmt.Println("nothing to clean up")
+		return nil
+	}
+	verb := "removed"
+	if *dryRun {
+		verb = "would remove"
+	}
+	fmt.Printf("%s %d agent(s): %s\n", verb, len(resp.Removed), strings.Join(resp.Removed, ", "))
 	return nil
 }
 

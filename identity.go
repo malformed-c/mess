@@ -50,3 +50,16 @@ func writeIdentity(p paths, name string) error {
 	}
 	return os.WriteFile(path, []byte(name+"\n"), 0o600)
 }
+
+// clearIdentity removes this session's persisted mid-session identity (the
+// inverse of writeIdentity). Absent file is not an error.
+func clearIdentity(p paths) error {
+	path := identityPath(p)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
