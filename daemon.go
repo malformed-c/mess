@@ -282,7 +282,10 @@ func (d *daemon) dispatch(req Request) Response {
 	case "ping":
 		return Response{OK: true}
 	case "register":
-		b.Register(req.As)
+		if ok, msg := b.RegisterOwned(req.As, req.Session, req.Anchor, req.Force); !ok {
+			elog("register %s refused: %s", req.As, msg)
+			return Response{Error: msg}
+		}
 		elog("register %s", req.As)
 		return Response{OK: true}
 	case "send":

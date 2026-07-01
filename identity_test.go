@@ -42,6 +42,9 @@ func TestIdentityRequiresSessionID(t *testing.T) {
 func TestSessionIDSupportsCodexAndOverride(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
+	for _, e := range anchorEnvVars { // isolate the session key from anchor fallback
+		t.Setenv(e, "")
+	}
 	t.Setenv("CODEX_THREAD_ID", "codex-thread-1")
 	p := resolvePaths()
 	if err := writeIdentity(p, "cx"); err != nil {
@@ -78,6 +81,33 @@ func TestAgentNamePrecedence(t *testing.T) {
 	// Explicit flag beats everything.
 	if got, _ := agentName(p, "from-flag"); got != "from-flag" {
 		t.Fatalf("expected flag identity to win, got %q", got)
+	}
+}
+
+// A mid-session identity survives a host session-id rotation via the terminal
+// anchor, but is not inherited by a different terminal.
+func TestAnchorFallbackSurvivesSessionRotation(t *testing.T) {
+	t.Setenv("MESS_DIR", t.TempDir())
+	clearSessionEnv(t)
+	for _, e := range anchorEnvVars {
+		t.Setenv(e, "")
+	}
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
+	t.Setenv("MESS_ANCHOR", "term-1")
+	p := resolvePaths()
+
+	if err := writeIdentity(p, "arise-5"); err != nil {
+		t.Fatal(err)
+	}
+	// Session id rotates (resume/relaunch), same terminal anchor -> recovered.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-B")
+	if got := readIdentity(p); got != "arise-5" {
+		t.Fatalf("anchor should recover identity after session-id rotation, got %q", got)
+	}
+	// A different terminal must NOT inherit it.
+	t.Setenv("MESS_ANCHOR", "term-2")
+	if got := readIdentity(p); got != "" {
+		t.Fatalf("a different terminal must not inherit the identity, got %q", got)
 	}
 }
 

@@ -32,6 +32,11 @@ type Broker struct {
 	// recv'd, parked, ...). Drives `cleanup`, which prunes long-idle agents.
 	lastSeen map[string]time.Time
 
+	// owners records which host session (and terminal anchor) currently owns each
+	// name, so register can guard against two live sessions claiming one name
+	// while still allowing a rotated session (same anchor) to reclaim its own.
+	owners map[string]ownerInfo
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
@@ -45,6 +50,13 @@ type agentState struct {
 	waiters []chan struct{} // signaled (then dropped) on next delivery
 }
 
+// ownerInfo identifies the host session that registered a name, and its stable
+// terminal anchor (empty when unavailable).
+type ownerInfo struct {
+	session string
+	anchor  string
+}
+
 // NewBroker returns an empty broker.
 func NewBroker() *Broker {
 	return &Broker{
@@ -54,6 +66,7 @@ func NewBroker() *Broker {
 		listeners:   map[string]int{},
 		busyUntil:   map[string]time.Time{},
 		lastSeen:    map[string]time.Time{},
+		owners:      map[string]ownerInfo{},
 		now:         time.Now,
 	}
 }
@@ -99,13 +112,53 @@ func (b *Broker) changed() {
 	}
 }
 
-// Register makes an agent known so it can receive broadcasts.
+// Register makes an agent known so it can receive broadcasts. It does not track
+// ownership (used internally and in tests); RegisterOwned is the guarded path.
 func (b *Broker) Register(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ensure(name)
 	b.touch(name)
 	b.changed()
+}
+
+// RegisterOwned registers name on behalf of a host session (and terminal
+// anchor), guarding against a *different, still-live* session in a *different*
+// terminal claiming a name already in use. It returns ok=false and a message on
+// such a collision, unless force is set. A rotated session that shares the
+// current owner's anchor, or a takeover of a name whose owner is no longer live,
+// is allowed — that's identity recovery, not a collision.
+func (b *Broker) RegisterOwned(name, session, anchor string, force bool) (bool, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if cur, ok := b.owners[name]; ok && !force && cur.session != session {
+		sameTerminal := anchor != "" && anchor == cur.anchor
+		if !sameTerminal && b.aliveLocked(name) {
+			return false, fmt.Sprintf("name %q is in use by another live session; choose a different name or pass --force to take it over", name)
+		}
+	}
+	b.ensure(name)
+	b.touch(name)
+	b.owners[name] = ownerInfo{session: session, anchor: anchor}
+	b.changed()
+	return true, ""
+}
+
+// aliveLocked reports whether an agent looks currently reachable — parked
+// (listening), in a turn (busy), or active in the last couple of minutes. Held
+// lock. Used by the register collision guard to tell a live owner from a dead
+// one whose name may be reclaimed.
+func (b *Broker) aliveLocked(name string) bool {
+	if b.listeners[name] > 0 {
+		return true
+	}
+	if b.busyUntil[name].After(b.now()) {
+		return true
+	}
+	if t, ok := b.lastSeen[name]; ok && b.now().Sub(t) < 2*time.Minute {
+		return true
+	}
+	return false
 }
 
 // Send delivers a direct message to a single recipient.
@@ -376,6 +429,7 @@ func (b *Broker) removeAgentLocked(name string) bool {
 	delete(b.listeners, name)
 	delete(b.busyUntil, name)
 	delete(b.lastSeen, name)
+	delete(b.owners, name)
 	for topic, subs := range b.topics {
 		delete(subs, name)
 		if len(subs) == 0 {

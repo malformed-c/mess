@@ -376,6 +376,36 @@ func TestCleanupPrunesIdleNotListening(t *testing.T) {
 	}
 }
 
+func TestRegisterOwnedGuard(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+
+	if ok, _ := b.RegisterOwned("arise", "sessA", "termA", false); !ok {
+		t.Fatal("first claim of a free name should succeed")
+	}
+	if ok, _ := b.RegisterOwned("arise", "sessA", "termA", false); !ok {
+		t.Fatal("same session re-registering its own name should succeed")
+	}
+	// Different session, different terminal, owner still live -> collision.
+	if ok, msg := b.RegisterOwned("arise", "sessB", "termB", false); ok || msg == "" {
+		t.Fatalf("expected a collision, got ok=%v msg=%q", ok, msg)
+	}
+	// ...but --force takes it over.
+	if ok, _ := b.RegisterOwned("arise", "sessB", "termB", true); !ok {
+		t.Fatal("force should take over")
+	}
+	// A rotated session sharing the same terminal anchor reclaims it (not a collision).
+	if ok, _ := b.RegisterOwned("arise", "sessB2", "termB", false); !ok {
+		t.Fatal("same-anchor rotation should be allowed without force")
+	}
+	// Once the owner is no longer live, a different terminal may take the name.
+	now = now.Add(3 * time.Minute)
+	if ok, _ := b.RegisterOwned("arise", "sessC", "termC", false); !ok {
+		t.Fatal("takeover of a non-live owner should be allowed")
+	}
+}
+
 func TestLastSeenPersists(t *testing.T) {
 	b := newTestBroker() // now fixed at Unix(0,0)
 	b.Register("bob")

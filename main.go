@@ -307,19 +307,29 @@ func cmdSubUnsub(p paths, op string, args []string) error {
 
 func cmdRegister(p paths, args []string) error {
 	fs, as := newFlags("register")
+	force := fs.Bool("force", false, "take over a name already held by another live session")
 	parseAnywhere(fs, args)
-	// `mess register <name>` sets and persists this session's identity.
+	// `mess register <name>` sets and persists this session's identity. Defer the
+	// write until the daemon accepts the name, so a rejected collision doesn't
+	// leave a stale identity file behind.
+	newName := ""
 	if rest := fs.Args(); len(rest) > 0 {
-		if err := writeIdentity(p, rest[0]); err != nil {
+		newName = rest[0]
+	}
+	name := newName
+	if name == "" {
+		var err error
+		if name, err = agentName(p, *as); err != nil {
 			return err
 		}
 	}
-	name, err := agentName(p, *as)
-	if err != nil {
-		return err
+	if _, err := call(p, Request{Op: "register", As: name, Session: sessionID(), Anchor: stableAnchor(), Force: *force}); err != nil {
+		return err // includes the collision message + the --force hint
 	}
-	if _, err := call(p, Request{Op: "register", As: name}); err != nil {
-		return err
+	if newName != "" {
+		if err := writeIdentity(p, newName); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("registered as %s\n", name)
 	return nil
