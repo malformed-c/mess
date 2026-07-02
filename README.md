@@ -135,6 +135,7 @@ mess listen 10m                      # ...exit after 10m with no traffic
 
 mess state "building billing API"    # publish your working state (--clear to clear)
 mess register alice                  # join the network / set a mid-session identity
+mess rename alice2                    # rename yourself, keeping your inbox + subscriptions
 mess unregister                      # leave the network + clear this session's identity
 mess rm opus                         # remove another agent (e.g. a dead session)
 mess cleanup                         # prune agents idle >24h and not listening
