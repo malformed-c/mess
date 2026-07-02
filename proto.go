@@ -44,9 +44,8 @@ type Request struct {
 	Max     int      `json:"max,omitempty"`     // recv at most N messages (0 = all)
 	Kinds   []string `json:"kinds,omitempty"`   // recv only these kinds (nil = all)
 	Batch   string   `json:"batch,omitempty"`   // (recv --wait) coalesce a burst within this window
-	Session string   `json:"session,omitempty"` // (register) host session id, for name-ownership
-	Anchor  string   `json:"anchor,omitempty"`  // (register) stable terminal anchor, for ownership
-	Force   bool     `json:"force,omitempty"`   // (register) take over a name held by another session
+	Session string   `json:"session,omitempty"` // host session id (stamped on every request), binds a name to its owning session
+	Force   bool     `json:"force,omitempty"`   // (register/rename) take over a name held by another live session
 }
 
 // AgentInfo is reported by the `ps` op.

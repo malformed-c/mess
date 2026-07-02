@@ -114,9 +114,17 @@ recycled terminal tab. (Headless or when you want a fixed name from launch, set
 `MESS_AGENT`.)
 
 **Name-collision guard.** `mess register <name>` refuses a name already held by a
-different, still-live session in a different terminal — so two agents can't both
-grab `alice` and share an inbox. Pass `--force` to take over. A name whose owner
-has gone offline can be taken without `--force`.
+different, still-live session — so two agents can't both grab `alice` and share an
+inbox. Pass `--force` to take over. A name whose owner has gone offline can be
+taken without `--force`.
+
+**Ownership gate (defense in depth).** The daemon binds each name to the host
+session id that owns it and enforces that binding on *every* identity-asserting
+op — `send`, `recv`, `sub`, `busy`, … — not just `register`. If a different live
+session ever tries to act under a name it doesn't own (however its identity was
+resolved), the daemon refuses: it can neither speak nor drain an inbox as another
+live agent. The first live user of a free or abandoned name takes ownership; a
+bare `MESS_AGENT` run with no session id is not enforced.
 
 ## Usage
 

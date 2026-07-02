@@ -42,9 +42,6 @@ func TestIdentityRequiresSessionID(t *testing.T) {
 func TestSessionIDSupportsCodexAndOverride(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
-	for _, e := range anchorEnvVars { // isolate the session key from anchor fallback
-		t.Setenv(e, "")
-	}
 	t.Setenv("CODEX_THREAD_ID", "codex-thread-1")
 	p := resolvePaths()
 	if err := writeIdentity(p, "cx"); err != nil {
@@ -92,9 +89,9 @@ func TestAgentNamePrecedence(t *testing.T) {
 func TestIdentityDoesNotLeakAcrossSessions(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
-	for _, e := range anchorEnvVars {
-		t.Setenv(e, "term-1") // same terminal throughout — must not cause inheritance
-	}
+	// Same terminal throughout (these once fed a fallback) — must not matter now.
+	t.Setenv("KONSOLE_DBUS_SESSION", "term-1")
+	t.Setenv("TMUX_PANE", "term-1")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
 	p := resolvePaths()
 

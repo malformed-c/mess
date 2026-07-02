@@ -65,11 +65,11 @@ type agentState struct {
 // maxHistory bounds the per-agent replay history (recently-consumed messages).
 const maxHistory = 50
 
-// ownerInfo identifies the host session that registered a name, and its stable
-// terminal anchor (empty when unavailable).
+// ownerInfo identifies the host session that owns a name. Ownership binds a name
+// to the (stable, per-session) host session id that first claimed it, so a
+// different live session can't act under it.
 type ownerInfo struct {
 	session string
-	anchor  string
 }
 
 // warnInfo is a transient status warning and its expiry.
@@ -200,26 +200,58 @@ func (b *Broker) Register(name string) {
 	b.changed()
 }
 
-// RegisterOwned registers name on behalf of a host session (and terminal
-// anchor), guarding against a *different, still-live* session in a *different*
-// terminal claiming a name already in use. It returns ok=false and a message on
-// such a collision, unless force is set. A rotated session that shares the
-// current owner's anchor, or a takeover of a name whose owner is no longer live,
-// is allowed — that's identity recovery, not a collision.
-func (b *Broker) RegisterOwned(name, session, anchor string, force bool) (bool, string) {
+// RegisterOwned registers name on behalf of a host session, guarding against a
+// *different, still-live* session claiming a name already in use. It returns
+// ok=false and a message on such a collision, unless force is set. A takeover of
+// a name whose owner is no longer live is allowed (reclaiming a dead name). The
+// host session id is stable for a session's whole life, so a different id under
+// the same name is always a distinct session — never a rotation.
+func (b *Broker) RegisterOwned(name, session string, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if cur, ok := b.owners[name]; ok && !force && cur.session != session {
-		sameTerminal := anchor != "" && anchor == cur.anchor
-		if !sameTerminal && b.aliveLocked(name) {
-			return false, fmt.Sprintf("name %q is in use by another live session; choose a different name or pass --force to take it over", name)
-		}
+	if !force && b.foreignLiveOwnerLocked(name, session) {
+		return false, ownershipMsg(name)
 	}
 	b.ensure(name)
 	b.touch(name)
 	b.clearWarnLocked(name) // re-registering (fresh/resumed session) clears a stale warning
-	b.owners[name] = ownerInfo{session: session, anchor: anchor}
+	b.owners[name] = ownerInfo{session: session}
 	b.changed()
+	return true, ""
+}
+
+// foreignLiveOwnerLocked reports whether name is currently owned by a *different*
+// still-live session than the caller's — i.e. claiming it would be an identity
+// takeover. A "" session can't be distinguished from any other, so it is never
+// treated as an owner or as the caller (no enforcement without a session id).
+func (b *Broker) foreignLiveOwnerLocked(name, session string) bool {
+	cur, ok := b.owners[name]
+	return ok && cur.session != "" && session != "" && cur.session != session && b.aliveLocked(name)
+}
+
+func ownershipMsg(name string) string {
+	return fmt.Sprintf("name %q is in use by another live session; choose a different name (mess register <name>) or pass --force to take it over", name)
+}
+
+// ClaimIdentity binds name to the caller's session for any identity-asserting
+// operation (send, recv, sub, busy, ...), rejecting a *different live session*
+// acting under a name it doesn't own. This is defense in depth: even if identity
+// resolution ever handed a session the wrong name, the daemon refuses to let it
+// speak or receive as another live agent. First live user of a free/dead name
+// takes ownership. No session id (e.g. a bare MESS_AGENT run) means no
+// enforcement — the check is skipped.
+func (b *Broker) ClaimIdentity(name, session string) (bool, string) {
+	if name == "" || session == "" {
+		return true, ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.foreignLiveOwnerLocked(name, session) {
+		return false, ownershipMsg(name)
+	}
+	b.ensure(name)
+	b.touch(name) // acting under a name is activity — keeps ownership live-and-enforced
+	b.owners[name] = ownerInfo{session: session}
 	return true, ""
 }
 
@@ -228,7 +260,7 @@ func (b *Broker) RegisterOwned(name, session, anchor string, force bool) (bool, 
 // honors the same collision guard as RegisterOwned on the destination name
 // (refuses a different live session's name unless force). Returns ok=false and a
 // message on collision.
-func (b *Broker) Rename(old, newName, session, anchor string, force bool) (bool, string) {
+func (b *Broker) Rename(old, newName, session string, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if newName == "" {
@@ -237,15 +269,12 @@ func (b *Broker) Rename(old, newName, session, anchor string, force bool) (bool,
 	if old == newName {
 		b.ensure(newName)
 		b.touch(newName)
-		b.owners[newName] = ownerInfo{session: session, anchor: anchor}
+		b.owners[newName] = ownerInfo{session: session}
 		b.changed()
 		return true, ""
 	}
-	if cur, ok := b.owners[newName]; ok && !force && cur.session != session {
-		sameTerminal := anchor != "" && anchor == cur.anchor
-		if !sameTerminal && b.aliveLocked(newName) {
-			return false, fmt.Sprintf("name %q is in use by another live session; choose a different name or pass --force to take it over", newName)
-		}
+	if !force && b.foreignLiveOwnerLocked(newName, session) {
+		return false, ownershipMsg(newName)
 	}
 
 	dst := b.ensure(newName)
@@ -271,7 +300,7 @@ func (b *Broker) Rename(old, newName, session, anchor string, force bool) (bool,
 	}
 	b.removeAgentLocked(old) // also unsubscribes old from topics and clears its maps
 	b.touch(newName)
-	b.owners[newName] = ownerInfo{session: session, anchor: anchor}
+	b.owners[newName] = ownerInfo{session: session}
 	b.changed()
 	return true, ""
 }

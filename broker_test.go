@@ -456,38 +456,73 @@ func TestRegisterOwnedGuard(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 
-	if ok, _ := b.RegisterOwned("arise", "sessA", "termA", false); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessA", false); !ok {
 		t.Fatal("first claim of a free name should succeed")
 	}
-	if ok, _ := b.RegisterOwned("arise", "sessA", "termA", false); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessA", false); !ok {
 		t.Fatal("same session re-registering its own name should succeed")
 	}
-	// Different session, different terminal, owner still live -> collision.
-	if ok, msg := b.RegisterOwned("arise", "sessB", "termB", false); ok || msg == "" {
+	// A different live session claiming the same name -> collision, regardless of
+	// terminal (the host session id is stable, so a new id is a new session).
+	if ok, msg := b.RegisterOwned("arise", "sessB", false); ok || msg == "" {
 		t.Fatalf("expected a collision, got ok=%v msg=%q", ok, msg)
 	}
 	// ...but --force takes it over.
-	if ok, _ := b.RegisterOwned("arise", "sessB", "termB", true); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessB", true); !ok {
 		t.Fatal("force should take over")
 	}
-	// A rotated session sharing the same terminal anchor reclaims it (not a collision).
-	if ok, _ := b.RegisterOwned("arise", "sessB2", "termB", false); !ok {
-		t.Fatal("same-anchor rotation should be allowed without force")
-	}
-	// Once the owner is no longer live, a different terminal may take the name.
+	// Once the owner is no longer live, another session may take the name.
 	now = now.Add(3 * time.Minute)
-	if ok, _ := b.RegisterOwned("arise", "sessC", "termC", false); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessC", false); !ok {
+		t.Fatal("takeover of a non-live owner should be allowed")
+	}
+}
+
+// ClaimIdentity is the defense-in-depth gate: a different live session may not
+// act (send/recv/...) under a name it doesn't own, but the owner itself and a
+// free/dead name are fine. A "" session id disables the check.
+func TestClaimIdentityGuard(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+
+	// A live agent owns "alice".
+	if ok, _ := b.RegisterOwned("alice", "sessA", false); !ok {
+		t.Fatal("register should succeed")
+	}
+	// The owning session may act as alice.
+	if ok, _ := b.ClaimIdentity("alice", "sessA"); !ok {
+		t.Fatal("owner should be allowed to act as its own name")
+	}
+	// A different live session must be rejected.
+	if ok, msg := b.ClaimIdentity("alice", "sessB"); ok || msg == "" {
+		t.Fatalf("a foreign live session must be rejected, got ok=%v", ok)
+	}
+	// No session id -> no enforcement (bare MESS_AGENT run).
+	if ok, _ := b.ClaimIdentity("alice", ""); !ok {
+		t.Fatal("empty session id should skip the ownership check")
+	}
+	// A free name is claimable by first live use.
+	if ok, _ := b.ClaimIdentity("bob", "sessB"); !ok {
+		t.Fatal("first live use of a free name should claim it")
+	}
+	if ok, msg := b.ClaimIdentity("bob", "sessA"); ok || msg == "" {
+		t.Fatalf("bob is now owned by sessB; sessA must be rejected, got ok=%v", ok)
+	}
+	// Once alice's owner goes stale, a new session may take over.
+	now = now.Add(3 * time.Minute)
+	if ok, _ := b.ClaimIdentity("alice", "sessB"); !ok {
 		t.Fatal("takeover of a non-live owner should be allowed")
 	}
 }
 
 func TestRenameMigratesInboxAndSubscriptions(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned("old", "sessX", "termX", false)
+	b.RegisterOwned("old", "sessX", false)
 	b.Send("peer", "old", "queued for old")
 	b.Sub("old", "builds")
 
-	if ok, msg := b.Rename("old", "new", "sessX", "termX", false); !ok {
+	if ok, msg := b.Rename("old", "new", "sessX", false); !ok {
 		t.Fatalf("rename should succeed: %s", msg)
 	}
 	if _, ok := b.agents["old"]; ok {
@@ -515,13 +550,13 @@ func TestRenameHonorsCollisionGuard(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()
 	b.now = func() time.Time { return now }
-	b.RegisterOwned("me", "s1", "t1", false)
-	b.RegisterOwned("taken", "s2", "t2", false) // a different live session
+	b.RegisterOwned("me", "s1", false)
+	b.RegisterOwned("taken", "s2", false) // a different live session
 
-	if ok, msg := b.Rename("me", "taken", "s1", "t1", false); ok || msg == "" {
+	if ok, msg := b.Rename("me", "taken", "s1", false); ok || msg == "" {
 		t.Fatalf("rename onto a live name should be refused, got ok=%v", ok)
 	}
-	if ok, _ := b.Rename("me", "taken", "s1", "t1", true); !ok {
+	if ok, _ := b.Rename("me", "taken", "s1", true); !ok {
 		t.Fatal("--force rename should take the name over")
 	}
 	if _, ok := b.agents["me"]; ok {
@@ -586,7 +621,7 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	}
 	// Re-registering (a resumed session) also clears it.
 	b.SetWarn("bob", "again", time.Minute)
-	b.RegisterOwned("bob", "s", "a", false)
+	b.RegisterOwned("bob", "s", false)
 	if warn() != "" {
 		t.Fatalf("warning should clear on re-register, got %q", warn())
 	}

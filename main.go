@@ -343,7 +343,7 @@ func cmdRegister(p paths, args []string) error {
 			return err
 		}
 	}
-	if _, err := call(p, Request{Op: "register", As: name, Session: sessionID(), Anchor: stableAnchor(), Force: *force}); err != nil {
+	if _, err := call(p, Request{Op: "register", As: name, Force: *force}); err != nil {
 		return err // includes the collision message + the --force hint
 	}
 	if newName != "" {
@@ -396,7 +396,7 @@ func cmdRename(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := call(p, Request{Op: "rename", As: old, To: newName, Session: sessionID(), Anchor: stableAnchor(), Force: *force}); err != nil {
+	if _, err := call(p, Request{Op: "rename", As: old, To: newName, Force: *force}); err != nil {
 		return err // includes the collision message + the --force hint
 	}
 	if err := writeIdentity(p, newName); err != nil {

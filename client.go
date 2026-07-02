@@ -12,8 +12,20 @@ import (
 	"time"
 )
 
+// withSession stamps the caller's host session id onto a request (unless already
+// set), so the daemon can bind names to sessions and reject a different live
+// session acting under a name it doesn't own. Empty when run outside a supported
+// host agent — the daemon then skips the ownership check.
+func withSession(req Request) Request {
+	if req.Session == "" {
+		req.Session = sessionID()
+	}
+	return req
+}
+
 // call sends one request to the daemon, auto-starting it if needed.
 func call(p paths, req Request) (Response, error) {
+	req = withSession(req)
 	conn, err := dialOrStart(p)
 	if err != nil {
 		return Response{}, err
@@ -48,6 +60,7 @@ func daemonError(msg string) error {
 // It does not force-start the daemon on reconnect, so a genuine stop still ends
 // the wait once the daemon stays down past the reconnect window.
 func callWait(p paths, req Request) (Response, error) {
+	req = withSession(req)
 	first := true
 	for {
 		var conn net.Conn
@@ -107,6 +120,7 @@ func waitForDaemon(p paths) bool {
 // callStream sends one request and invokes onResp for each response streamed
 // back over the held connection, until the daemon closes it (EOF).
 func callStream(p paths, req Request, onResp func(Response) error) error {
+	req = withSession(req)
 	conn, err := dialOrStart(p)
 	if err != nil {
 		return err

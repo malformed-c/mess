@@ -33,24 +33,12 @@ import (
 //   - CODEX_THREAD_ID        — OpenAI Codex CLI
 var sessionEnvVars = []string{"MESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}
 
-// anchorEnvVars are stable per-terminal identifiers, in priority order. They are
-// not used for identity (see above); they only supply the daemon's collision
-// guard with a "same terminal" hint so a re-register from the same tty isn't
-// treated as a foreign takeover. MESS_ANCHOR is an explicit override; the rest
-// are set by common terminals (most-granular — per pane/tab — first).
-var anchorEnvVars = []string{"MESS_ANCHOR", "TMUX_PANE", "STY", "TERM_SESSION_ID", "KONSOLE_DBUS_SESSION", "WINDOWID"}
-
 // sessionID returns the host agent's session identifier, or "" when run outside
-// a recognized agent (e.g. a plain shell).
+// a recognized agent (e.g. a plain shell). It is the sole key for identity: it is
+// stable for a session's whole life and unique per session, so it neither leaks a
+// name to a new session nor loses one across turns/compaction/resume.
 func sessionID() string {
 	return firstEnv(sessionEnvVars)
-}
-
-// stableAnchor returns a per-terminal identifier, or "" when none is available
-// (e.g. headless). Passed to the daemon purely as a collision-guard hint (see
-// anchorEnvVars); it plays no part in resolving identity.
-func stableAnchor() string {
-	return firstEnv(anchorEnvVars)
 }
 
 func firstEnv(names []string) string {

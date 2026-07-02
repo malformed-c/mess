@@ -175,6 +175,16 @@ func (d *daemon) handle(conn net.Conn) {
 		writeResp(conn, Response{Error: "bad request: " + err.Error()})
 		return
 	}
+	// Defense in depth: for any op where req.As is the caller's *own* identity,
+	// refuse to let a different live session act under a name it doesn't own —
+	// even if the client's identity resolution ever produced the wrong name.
+	if actsAsSelf(req.Op) {
+		if ok, msg := d.broker.ClaimIdentity(req.As, req.Session); !ok {
+			elog("%s as %s refused: %s", req.Op, req.As, msg)
+			writeResp(conn, Response{Error: msg})
+			return
+		}
+	}
 	if req.Op == "listen" { // streaming: many responses over one held connection
 		d.handleListen(conn, req)
 		return
@@ -276,13 +286,26 @@ func writeResp(conn net.Conn, r Response) {
 	}
 }
 
+// actsAsSelf reports whether an op's req.As is the caller's *own* identity (so it
+// should pass the session-ownership gate). Excludes register/rename (their own
+// guard honors --force) and target-addressed ops (rm/drain use a name argument,
+// not the caller's identity).
+func actsAsSelf(op string) bool {
+	switch op {
+	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
+		"busy", "unbusy", "recv", "listen", "replay", "unregister":
+		return true
+	}
+	return false
+}
+
 func (d *daemon) dispatch(req Request) Response {
 	b := d.broker
 	switch req.Op {
 	case "ping":
 		return Response{OK: true}
 	case "register":
-		if ok, msg := b.RegisterOwned(req.As, req.Session, req.Anchor, req.Force); !ok {
+		if ok, msg := b.RegisterOwned(req.As, req.Session, req.Force); !ok {
 			elog("register %s refused: %s", req.As, msg)
 			return Response{Error: msg}
 		}
@@ -354,7 +377,7 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return Response{OK: true, Count: 0} // idempotent
 	case "rename":
-		if ok, msg := b.Rename(req.As, req.To, req.Session, req.Anchor, req.Force); !ok {
+		if ok, msg := b.Rename(req.As, req.To, req.Session, req.Force); !ok {
 			elog("rename %s -> %s refused: %s", req.As, req.To, msg)
 			return Response{Error: msg}
 		}
