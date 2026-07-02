@@ -454,6 +454,37 @@ func TestRenameHonorsCollisionGuard(t *testing.T) {
 	}
 }
 
+func TestPsReportsOnline(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Register("stale")     // active now, but will go stale
+	b.AddListener("parked") // a live listener
+	online := func(name string) bool {
+		agents, _ := b.Ps()
+		for _, a := range agents {
+			if a.Name == name {
+				return a.Online
+			}
+		}
+		return false
+	}
+	if !online("stale") {
+		t.Fatal("a just-active agent should be online")
+	}
+	now = now.Add(10 * time.Minute) // stale's last activity is now old
+	if online("stale") {
+		t.Fatal("an agent idle for 10m should be offline")
+	}
+	if !online("parked") {
+		t.Fatal("a listening agent should stay online")
+	}
+	b.SetBusy("stale", time.Minute) // working again -> back online
+	if !online("stale") {
+		t.Fatal("a working agent should be online")
+	}
+}
+
 func TestWarningAutoClearsAndExpires(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()

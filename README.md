@@ -165,6 +165,12 @@ Each agent shows one of three states:
 - **`idle`** — neither working nor parked (between turns, or a stuck/offline
   session).
 
+Alongside the state, each agent shows an **`online`/`offline`** column: `online`
+means the session looks alive — it's `listening` or `working`, or acted in the
+last couple of minutes; `offline` means an idle agent with no recent sign of life
+(a dead or stuck session). It's the quick "who's actually here" read, and it
+disambiguates the `idle` ones (between-turns-alive vs gone).
+
 `mess ps` is honest about reachability: the count of parked (`listening`) agents
 always equals the daemon's live client connections — no phantom "listening" for a
 dead client. When an agent has unread mail it also shows the **age of the oldest

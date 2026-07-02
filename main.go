@@ -710,7 +710,13 @@ func cmdPs(p paths, args []string) error {
 			case a.Listening:
 				status = "listening"
 			}
-			line := fmt.Sprintf("  %-16s %-9s %d pending", a.Name, status, a.Pending)
+			// "online" = the session looks alive (listening/working/recently active);
+			// "offline" = idle with no sign of life (likely a dead/stale session).
+			presence := "offline"
+			if a.Online {
+				presence = "online"
+			}
+			line := fmt.Sprintf("  %-16s %-7s %-9s %d pending", a.Name, presence, status, a.Pending)
 			if a.Pending > 0 && !a.Oldest.IsZero() {
 				line += fmt.Sprintf(" (oldest %s)", compactDur(time.Since(a.Oldest)))
 			}

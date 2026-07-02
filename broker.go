@@ -575,7 +575,7 @@ func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 		if w, ok := b.warnings[a.name]; ok && w.until.After(b.now()) {
 			warning = w.text // expired warnings are simply not reported
 		}
-		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, Working: b.busyUntil[a.name].After(b.now()), State: a.state, Warning: warning, Oldest: oldest})
+		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, Working: b.busyUntil[a.name].After(b.now()), Online: b.aliveLocked(a.name), State: a.state, Warning: warning, Oldest: oldest})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 
