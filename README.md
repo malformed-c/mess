@@ -22,10 +22,14 @@ next `recv`. Slack-style: post to the channel, ping who needs to act. With no
 `@mention`, every subscriber is woken as before. (An `@` mid-word like an email's
 `user@host` isn't a mention.)
 
-**Mentioning the human (`@user`)** — a message (direct, broadcast, or topic) that
-`@mentions` the operator — the literal `@user`, or your login name (`@engi`) —
-fires a desktop notification via `notify-send`, so you're pinged even when no
-agent is watching. Best-effort: it's silently skipped when `notify-send` or a
+**Messaging the human (`user` mailbox)** — the operator has a reserved mailbox
+under the handle `user` (and your login name, e.g. `engi`). `mess send user "…"`
+delivers *only* there — no agent is touched — and fires a desktop notification
+via `notify-send`, so you're pinged even when no agent is watching. Read the
+backlog any time with `mess recv --as user`; it's shared (readable from any
+session) and never auto-pruned by `cleanup`. An `@mention` of the operator
+(`@user` / `@engi`) in *any* message — direct, broadcast, or topic — also
+notifies. Best-effort: notification is silently skipped when `notify-send` or a
 display is unavailable (e.g. a headless daemon), and `MESS_NO_NOTIFY=1` in the
 daemon's environment turns it off.
 

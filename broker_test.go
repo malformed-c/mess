@@ -419,8 +419,8 @@ func TestCleanupPrunesIdleNotListening(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()
 	b.now = func() time.Time { return now }
-	b.Register("old")        // lastSeen = 1000
-	b.AddListener("parked")  // listening; lastSeen = 1000
+	b.Register("old")       // lastSeen = 1000
+	b.AddListener("parked") // listening; lastSeen = 1000
 	now = now.Add(48 * time.Hour)
 	b.Register("recent") // fresh: lastSeen = now
 
@@ -513,6 +513,15 @@ func TestClaimIdentityGuard(t *testing.T) {
 	now = now.Add(3 * time.Minute)
 	if ok, _ := b.ClaimIdentity("alice", "sessB"); !ok {
 		t.Fatal("takeover of a non-live owner should be allowed")
+	}
+
+	// The shared human mailbox ("user") is exempt: any session may read/act on it
+	// (so the operator is never locked out of their own inbox).
+	if ok, _ := b.ClaimIdentity("user", "sessA"); !ok {
+		t.Fatal("user mailbox should be claimable")
+	}
+	if ok, _ := b.ClaimIdentity("user", "sessB"); !ok {
+		t.Fatal("a different session must still reach the shared user mailbox")
 	}
 }
 

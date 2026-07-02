@@ -17,6 +17,8 @@ const usage = `mess - a local messenger for Claude agents
 Usage:
   mess send <to> [body...]        send a direct message to an agent
                                   (--ack blocks until it's read; --timeout DUR)
+                                  (to "user" or your login name = the human's
+                                  mailbox: desktop-notifies, read via recv --as user)
   mess broadcast [body...]        send to every known agent
   mess pub <topic> [body...]      publish to a topic (@mention wakes only the
                                   tagged subscribers; the rest still receive it)

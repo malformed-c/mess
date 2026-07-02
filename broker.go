@@ -33,9 +33,9 @@ type Broker struct {
 	// recv'd, parked, ...). Drives `cleanup`, which prunes long-idle agents.
 	lastSeen map[string]time.Time
 
-	// owners records which host session (and terminal anchor) currently owns each
-	// name, so register can guard against two live sessions claiming one name
-	// while still allowing a rotated session (same anchor) to reclaim its own.
+	// owners records which host session currently owns each name, so register and
+	// the runtime identity gate can refuse a *different* live session acting under
+	// a name already in use.
 	owners map[string]ownerInfo
 
 	// warnings holds a transient status warning per agent (e.g. an API error set
@@ -56,7 +56,7 @@ type Broker struct {
 type agentState struct {
 	name    string
 	inbox   []Message
-	history []Message       // bounded ring of recently-consumed messages, for `replay`
+	history []Message // bounded ring of recently-consumed messages, for `replay`
 	topics  map[string]bool
 	state   string          // self-reported "what I'm working on"
 	waiters []chan struct{} // signaled (then dropped) on next delivery
@@ -241,8 +241,8 @@ func ownershipMsg(name string) string {
 // takes ownership. No session id (e.g. a bare MESS_AGENT run) means no
 // enforcement — the check is skipped.
 func (b *Broker) ClaimIdentity(name, session string) (bool, string) {
-	if name == "" || session == "" {
-		return true, ""
+	if name == "" || session == "" || isUserHandle(name) {
+		return true, "" // no id, or the shared human mailbox — never single-session-owned
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -704,6 +704,9 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 	for name, a := range b.agents {
 		if b.aliveLocked(name) {
 			continue // online (listening / working / recently active) — keep
+		}
+		if isUserHandle(name) {
+			continue // the human's mailbox — never prune unread pings
 		}
 		stale := false
 		if seen, ok := b.lastSeen[name]; ok && now.Sub(seen) > maxAge {

@@ -35,3 +35,24 @@ func TestMentionsUserLiteral(t *testing.T) {
 		t.Fatal("no mention should not match")
 	}
 }
+
+// userNotice pings the human on a direct send to their mailbox handle, or on an
+// @mention in the body, and stays quiet for ordinary agent-to-agent traffic.
+func TestUserNotice(t *testing.T) {
+	if _, ok := userNotice("alice", "user", "here is the report"); !ok {
+		t.Fatal("a direct send to @user's mailbox should notify")
+	}
+	if _, ok := userNotice("alice", "bob", "@user take a look"); !ok {
+		t.Fatal("an @user mention (to another agent) should still notify")
+	}
+	if _, ok := userNotice("alice", "bob", "regular status update"); ok {
+		t.Fatal("ordinary agent-to-agent traffic must not notify")
+	}
+	if _, ok := userNotice("alice", "", "broadcast with no mention"); ok {
+		t.Fatal("a broadcast with no mention must not notify")
+	}
+	// The sender is named in the summary; missing sender degrades gracefully.
+	if s, _ := userNotice("", "user", "x"); s == "" {
+		t.Fatal("expected a non-empty summary even without a sender")
+	}
+}
