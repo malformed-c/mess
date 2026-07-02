@@ -22,6 +22,12 @@ type Message struct {
 	// AckRequested marks a direct message whose sender is blocking for a read
 	// receipt. Set on send; the sender is notified when the message is consumed.
 	AckRequested bool `json:"ack,omitempty"`
+
+	// Quiet marks this recipient's copy as delivered-without-notifying — a topic
+	// message that @-mentioned other subscribers, not this one. It's still received
+	// (returned by recv), but it doesn't wake a parked recv or count toward the
+	// mid-turn steer notice.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // Request is one command sent from a client to the daemon.

@@ -171,10 +171,11 @@ func (a *agentState) deliver(m Message) {
 	a.waiters = nil
 }
 
-// deliverQuiet appends a message without signaling waiters, so a parked recv is
-// not woken. Used for a topic message that @-mentions only some subscribers: the
-// unmentioned ones still receive it (read on their next recv) but aren't woken.
+// deliverQuiet appends a message flagged Quiet (no waiter signal, and skipped by
+// the wake trigger and the steer notice), so an unmentioned subscriber still
+// receives a topic message but isn't woken or notified by it.
 func (a *agentState) deliverQuiet(m Message) {
+	m.Quiet = true
 	a.inbox = append(a.inbox, m)
 }
 
@@ -487,8 +488,15 @@ func matchKind(m Message, kinds map[string]bool) bool {
 	return kinds == nil || kinds[m.Kind]
 }
 
-// HasPending reports whether the agent has a queued message matching kinds
-// (nil = any kind).
+// wakes reports whether a message should wake/notify its recipient: it matches
+// the kind filter and isn't a Quiet (non-mention) delivery.
+func wakes(m Message, kinds map[string]bool) bool {
+	return matchKind(m, kinds) && !m.Quiet
+}
+
+// HasPending reports whether the agent has a queued message that should wake it
+// (matching kinds, not a quiet delivery). Quiet messages are received but never
+// trigger a wake.
 func (b *Broker) HasPending(name string, kinds map[string]bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -497,7 +505,7 @@ func (b *Broker) HasPending(name string, kinds map[string]bool) bool {
 		return false
 	}
 	for _, m := range a.inbox {
-		if matchKind(m, kinds) {
+		if wakes(m, kinds) {
 			return true
 		}
 	}
@@ -505,17 +513,17 @@ func (b *Broker) HasPending(name string, kinds map[string]bool) bool {
 }
 
 // waitChan registers a one-shot waiter and returns a channel signaled on the
-// next delivery to the agent. It fires immediately only if a message matching
-// kinds is already queued, so a non-matching leftover (e.g. an ignored
-// broadcast) doesn't busy-loop a filtered waiter.
+// next wake-worthy delivery to the agent. It fires immediately only if a matching
+// non-quiet message is already queued, so an ignored broadcast or a quiet topic
+// message doesn't busy-loop the waiter.
 func (b *Broker) waitChan(name string, kinds map[string]bool) <-chan struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	a := b.ensure(name)
 	ch := make(chan struct{}, 1)
 	for _, m := range a.inbox {
-		if matchKind(m, kinds) {
-			ch <- struct{}{} // already has a matching message; fire immediately
+		if wakes(m, kinds) {
+			ch <- struct{}{} // already has a wake-worthy message; fire immediately
 			return ch
 		}
 	}

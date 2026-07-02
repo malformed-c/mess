@@ -146,6 +146,29 @@ func TestTopicNoMentionWakesAll(t *testing.T) {
 	}
 }
 
+func TestQuietTopicMessageDoesNotTriggerWake(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("carol", "work")
+	b.Pub("alice", "work", "@bob only, not carol") // carol gets a quiet copy
+
+	topic := map[string]bool{KindTopic: true}
+	// A quiet topic message must NOT satisfy the wake trigger (so a later-parking
+	// recv doesn't wake, and the steer notice skips it).
+	if b.HasPending("carol", topic) {
+		t.Fatal("a quiet topic message must not trigger a wake")
+	}
+	ch := b.waitChan("carol", topic)
+	select {
+	case <-ch:
+		t.Fatal("quiet message should not fire waitChan immediately")
+	default:
+	}
+	// ...but carol still receives it on a normal recv.
+	if got := b.Drain("carol", false, 0); len(got) != 1 || !got[0].Quiet {
+		t.Fatalf("carol should still receive the (quiet) message: %+v", got)
+	}
+}
+
 func TestUnsubStopsDelivery(t *testing.T) {
 	b := newTestBroker()
 	b.Sub("bob", "builds")

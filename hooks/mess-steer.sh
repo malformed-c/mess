@@ -24,8 +24,9 @@ MESS=/home/engi/.local/bin/mess
 who=$("$MESS" whoami 2>/dev/null)
 [ -z "$who" ] && exit 0
 
-# Peek pending direct/topic messages (broadcasts ignored); derive count + newest id.
-json=$("$MESS" recv --kind direct,topic --peek --json 2>/dev/null)
+# Peek pending direct/topic messages (broadcasts ignored), dropping quiet ones
+# (a topic message that @-mentioned other subscribers, not me); derive count + id.
+json=$("$MESS" recv --kind direct,topic --peek --json 2>/dev/null | jq -c 'select(.quiet != true)' 2>/dev/null)
 n=$(printf '%s\n' "$json" | grep -c .)
 maxid=$(printf '%s\n' "$json" | jq -rs 'if length==0 then 0 else ([.[].id | ltrimstr("m") | tonumber] | max) end' 2>/dev/null)
 [ -z "$maxid" ] && maxid=0
