@@ -312,13 +312,19 @@ func (d *daemon) dispatch(req Request) Response {
 		elog("register %s", req.As)
 		return Response{OK: true}
 	case "send":
-		return d.send(req)
+		resp := d.send(req)
+		if resp.Error == "" {
+			notifyUserMention(req.As, req.Body) // ping the human on an @user/@<login> mention
+		}
+		return resp
 	case "broadcast":
 		_, n := b.Broadcast(req.As, req.Body)
+		notifyUserMention(req.As, req.Body)
 		elog("broadcast %s -> %d agent(s)", req.As, n)
 		return Response{OK: true, Count: n}
 	case "pub":
 		_, delivered, woke := b.Pub(req.As, req.Topic, req.Body)
+		notifyUserMention(req.As, req.Body)
 		if woke < delivered {
 			elog("pub %s #%s -> %d sub(s), woke %d (@mention)", req.As, req.Topic, delivered, woke)
 		} else {

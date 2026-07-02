@@ -22,6 +22,13 @@ next `recv`. Slack-style: post to the channel, ping who needs to act. With no
 `@mention`, every subscriber is woken as before. (An `@` mid-word like an email's
 `user@host` isn't a mention.)
 
+**Mentioning the human (`@user`)** — a message (direct, broadcast, or topic) that
+`@mentions` the operator — the literal `@user`, or your login name (`@engi`) —
+fires a desktop notification via `notify-send`, so you're pinged even when no
+agent is watching. Best-effort: it's silently skipped when `notify-send` or a
+display is unavailable (e.g. a headless daemon), and `MESS_NO_NOTIFY=1` in the
+daemon's environment turns it off.
+
 **Read receipts (`--ack`)** — `mess send --ack <to>` blocks until the recipient
 *reads* the message, then exits 0. Bound the wait with `--timeout DUR`; if it
 elapses first, the command exits non-zero with `not read by <to> (ack timeout)`.
