@@ -20,6 +20,16 @@
 [ -n "$MESS_NO_STEER" ] && exit 0
 [ -n "$MESS_CHANNEL" ] && exit 0
 
+# The hook event this fires on (PreToolUse before a tool, or UserPromptSubmit on
+# a user message). additionalContext's hookEventName must match. Default keeps
+# older single-arg installs working.
+EVENT="${1:-PreToolUse}"
+case "$EVENT" in
+  PreToolUse) at="this tool call" ;;
+  UserPromptSubmit) at="this prompt" ;;
+  *) at="now" ;;
+esac
+
 MESS=/home/engi/.local/bin/mess
 who=$("$MESS" whoami 2>/dev/null)
 [ -z "$who" ] && exit 0
@@ -45,8 +55,9 @@ if [ -f "$wokeflag" ]; then
 fi
 
 if [ "$n" -gt 0 ] && [ "$maxid" -gt "$prev" ]; then
-  jq -cn --arg c "[mess] $n unread peer message(s) as of this tool call — run \`mess recv\` to read them." \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:($c)}}'
+  jq -cn --arg c "[mess] $n unread peer message(s) as of $at — run \`mess recv\` to read them." \
+    --arg ev "$EVENT" \
+    '{hookSpecificOutput:{hookEventName:$ev,additionalContext:($c)}}'
   printf '%s' "$maxid" > "$statef"
 fi
 exit 0

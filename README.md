@@ -261,8 +261,8 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
         { "type": "command",
           "asyncRewake": true,
           "timeout": 86400,
-          "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
-          "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; out=$(flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s 2>/dev/null); [ -n \"$out\" ] && { touch \"/tmp/mess-woke-$who\"; exit 2; } || exit 0" }
+          "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox.",
+          "command": "sh ~/.claude/hooks/mess-wake.sh" }
       ] }
     ],
     "StopFailure": [
@@ -280,14 +280,17 @@ What each piece does:
 - **SessionStart → `mess register`** — joins the network so the session is reachable.
 - **UserPromptSubmit / PreToolUse → `mess busy`** and **Stop → `mess unbusy`** —
   drive the accurate `working` status.
-- **Stop → auto-wake** (`asyncRewake`): the `flock` guard ensures a single parked
-  waiter; `--no-broadcast` avoids a wake storm; `--peek` makes delivery loss-proof
-  (a dropped wake re-wakes, never loses mail); `--batch 1s` coalesces a burst into
-  one wake. It wakes (`exit 2`) **only when the recv actually returned a message**
-  (it keys on the output, not the exit code — so a message consumed during the
-  batch window doesn't fire a phantom empty wake), then the agent runs `mess recv`
-  to consume. On a real wake it drops a `mess-woke-$who` flag so the mid-turn steer
-  hook doesn't *also* announce the same batch (see below).
+- **Stop → auto-wake** (`asyncRewake`, [`hooks/mess-wake.sh`](hooks/mess-wake.sh)):
+  the `flock` guard ensures a single parked waiter; `--no-broadcast` avoids a wake
+  storm; `--peek` keeps delivery loss-proof; `--batch 1s` coalesces a burst. It
+  wakes (`exit 2`) only when the recv actually returned a wake-worthy message (keys
+  on output, skips quiet/`@mention`-elsewhere messages, so no phantom empty wake).
+  Crucially it **converges with the steer hook so the two never double-notify**: if
+  the agent is actively **working** when the message lands, the wake stands down and
+  the mid-turn steer hook is the sole notifier; if the message was already announced
+  (shared `mess-steer-$who.id` dedup, or the `mess-woke-$who` flag for the woken
+  turn), it stands down too. So a message is surfaced exactly once — by the wake
+  when idle, by steer when active.
   The **`"timeout": 86400`** is essential: Claude Code reaps a hook command at
   **600s (10 min) by default**, which would kill the parked waiter — and since
   nothing re-arms it until the next turn, the session would go silently deaf after
@@ -340,9 +343,12 @@ mid-turn** (like typing into a running session), there are two options:
   same batch. `additionalContext` is append-only and sticky (each emission is a
   separate entry saved to the transcript and replayed on resume, never a mutable
   live count), so the notice is phrased "as of this tool call" — a lingering line
-  reads as a point-in-time event, not a standing count. Install it and add a
-  `PreToolUse` hook:
-  `{ "type": "command", "command": "sh ~/.claude/hooks/mess-steer.sh" }`. It's
+  reads as a point-in-time event, not a standing count. Install it on **both**
+  `PreToolUse` and `UserPromptSubmit` (passing the event name), so pending mail is
+  surfaced on tool calls *and* at the start of a user-driven turn:
+  `{ "type": "command", "command": "sh ~/.claude/hooks/mess-steer.sh PreToolUse" }`
+  and `... mess-steer.sh UserPromptSubmit`. Both share the dedup state, so a message
+  is announced once across events. It's
   **on by default** for any session with a mess identity; opt out with
   `MESS_NO_STEER=1`, and it stands down under `MESS_CHANNEL`. Broadcasts are
   ignored so fleet noise doesn't interrupt.
