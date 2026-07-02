@@ -131,6 +131,7 @@ mess pub builds "green light"        # publish to a topic (wakes all subscribers
 mess pub builds "@alice green light" # ...@mention: all receive, only alice wakes
 
 mess recv                            # drain queued messages now, exit
+mess replay 5                        # reprint the last 5 you already consumed (recover a lost wake)
 mess recv --wait                     # block until a message arrives
 mess recv 30s                        # block up to 30s (trailing duration implies --wait)
 mess recv --peek                     # look without consuming
@@ -292,9 +293,10 @@ What each piece does:
   hook** so a message is surfaced exactly once: if the agent is actively **working**
   when the message lands, the wake stands down (leaves it queued) and the mid-turn
   steer hook is the sole notifier; consuming on an idle wake empties the inbox, so
-  the woken turn's steer has nothing to re-announce. (Trade-off: consume-on-wake
-  isn't loss-proof — if the harness ever drops the exit-2 injection, a consumed
-  message isn't re-delivered; peek-then-`recv` was the loss-proof alternative.)
+  the woken turn's steer has nothing to re-announce. (If the harness ever drops
+  the exit-2 injection, the consumed message is still recoverable with
+  **`mess replay`** — a bounded per-agent history of recently-consumed messages —
+  so consume-on-wake stays recoverable rather than lossy.)
   The **`"timeout": 86400`** is essential: Claude Code reaps a hook command at
   **600s (10 min) by default**, which would kill the parked waiter — and since
   nothing re-arms it until the next turn, the session would go silently deaf after

@@ -344,6 +344,9 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("drain %s -> %d", req.As, len(msgs))
 		}
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
+	case "replay":
+		msgs := b.Replay(req.As, req.Max) // recently-consumed history (recover a lost wake)
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "unregister":
 		if b.RemoveAgent(req.As) {
 			elog("unregister %s", req.As)

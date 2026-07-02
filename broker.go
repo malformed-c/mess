@@ -56,10 +56,14 @@ type Broker struct {
 type agentState struct {
 	name    string
 	inbox   []Message
+	history []Message       // bounded ring of recently-consumed messages, for `replay`
 	topics  map[string]bool
 	state   string          // self-reported "what I'm working on"
 	waiters []chan struct{} // signaled (then dropped) on next delivery
 }
+
+// maxHistory bounds the per-agent replay history (recently-consumed messages).
+const maxHistory = 50
 
 // ownerInfo identifies the host session that registered a name, and its stable
 // terminal anchor (empty when unavailable).
@@ -452,6 +456,10 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 			}
 		}
 		a.inbox = keep
+		a.history = append(a.history, out...) // keep for `replay` (recovers a lost wake)
+		if len(a.history) > maxHistory {
+			a.history = a.history[len(a.history)-maxHistory:]
+		}
 		b.changed()
 	}
 	return out
@@ -481,6 +489,25 @@ func (b *Broker) DrainQuiet(name string, max int) []Message {
 		a.inbox = keep
 		b.changed()
 	}
+	return out
+}
+
+// Replay returns the last n messages the agent has already consumed (from its
+// bounded history), so a message lost to a dropped wake injection can still be
+// recovered. n<=0 returns the whole history (oldest first).
+func (b *Broker) Replay(name string, n int) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return nil
+	}
+	h := a.history
+	if n > 0 && n < len(h) {
+		h = h[len(h)-n:]
+	}
+	out := make([]Message, len(h))
+	copy(out, h)
 	return out
 }
 

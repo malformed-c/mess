@@ -650,6 +650,33 @@ func TestCleanupPrunesByStaleMail(t *testing.T) {
 	}
 }
 
+func TestReplayReturnsConsumedHistory(t *testing.T) {
+	b := newTestBroker()
+	for _, body := range []string{"one", "two", "three"} {
+		b.Send("peer", "bob", body)
+	}
+	// Nothing consumed yet -> empty history.
+	if got := b.Replay("bob", 0); len(got) != 0 {
+		t.Fatalf("no history before consume, got %d", len(got))
+	}
+	// Consume them (like a recv / wake) -> they enter history.
+	b.Drain("bob", false, 0)
+	if got := b.Replay("bob", 0); len(got) != 3 || got[0].Body != "one" || got[2].Body != "three" {
+		t.Fatalf("replay should return the 3 consumed in order, got %+v", got)
+	}
+	// A peek must NOT add to history.
+	b.Send("peer", "bob", "four")
+	b.Drain("bob", true, 0) // peek
+	if got := b.Replay("bob", 0); len(got) != 3 {
+		t.Fatalf("peek should not extend history, got %d", len(got))
+	}
+	// Last-N.
+	b.Drain("bob", false, 0) // consumes "four"
+	if got := b.Replay("bob", 2); len(got) != 2 || got[0].Body != "three" || got[1].Body != "four" {
+		t.Fatalf("replay 2 should return the last two, got %+v", got)
+	}
+}
+
 func TestLastSeenPersists(t *testing.T) {
 	b := newTestBroker() // now fixed at Unix(0,0)
 	b.Register("bob")

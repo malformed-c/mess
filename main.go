@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,6 +40,8 @@ Usage:
   mess whoami                     print your resolved identity (empty if none)
   mess islistening                exit 0 if you have an active listener, else 1
   mess recv [duration]            receive queued messages
+  mess replay [N]                 reprint the last N messages you already consumed
+                                  (recover a message lost to a dropped wake)
   mess listen [idle-timeout]      run continuously (bg): print messages as they
                                   arrive until interrupted (alias: recv --follow)
   mess ps                         list agents and topics (online/offline +
@@ -121,6 +124,8 @@ func main() {
 		err = cmdIsListening(p, args)
 	case "recv":
 		err = cmdRecv(p, args)
+	case "replay":
+		err = cmdReplay(p, args)
 	case "listen":
 		// listen == recv --follow: a continuous background listener.
 		err = cmdRecv(p, append([]string{"--follow"}, args...))
@@ -524,6 +529,31 @@ func cmdDrain(p paths, args []string) error {
 	if !*asJSON {
 		fmt.Printf("drained %d message(s) from %s\n", resp.Count, target)
 	}
+	return nil
+}
+
+// cmdReplay reprints the last messages this agent already consumed (from a
+// bounded history) — a recovery path if a consume-on-wake injection was dropped.
+// `mess replay` shows the whole history; `mess replay N` the last N.
+func cmdReplay(p paths, args []string) error {
+	fs, as := newFlags("replay")
+	asJSON := fs.Bool("json", false, "print messages as JSON lines")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	n := 0
+	if rest := fs.Args(); len(rest) > 0 {
+		if n, err = strconv.Atoi(rest[0]); err != nil {
+			return fmt.Errorf("invalid count %q", rest[0])
+		}
+	}
+	resp, err := call(p, Request{Op: "replay", As: name, Max: n})
+	if err != nil {
+		return err
+	}
+	printMessages(resp.Messages, *asJSON)
 	return nil
 }
 
