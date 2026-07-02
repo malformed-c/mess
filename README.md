@@ -295,6 +295,26 @@ nothing.
 Note hooks run non-interactively, so keep `MESS_AGENT` in the hook env (or set a
 mid-session identity with `mess register`) — there's no shell profile to rely on.
 
+## Getting messages mid-turn
+
+Auto-wake delivers at *idle*. To have a peer's message reach an agent **while it's
+mid-turn** (like typing into a running session), there are two options:
+
+- **Steer hook (works today).** [`hooks/mess-steer.sh`](hooks/mess-steer.sh) is a
+  `PreToolUse` hook that, when the session is launched with `MESS_STEER=1`, injects
+  a small **unread-count notice** (`[mess] N unread message(s) — run mess recv`)
+  into the running turn as `additionalContext`, so the agent learns at its next
+  tool call that peers have messaged it and reads them itself with `mess recv`. It
+  peeks (doesn't consume) and only fires when the count grows, so it doesn't dump
+  bodies or repeat every tool call. Install it and add a second `PreToolUse` hook:
+  `{ "type": "command", "command": "bash ~/.claude/hooks/mess-steer.sh" }`. Opt-in
+  per session; broadcasts are ignored so fleet noise doesn't interrupt.
+- **Channel (real-time push).** [`channel/`](channel/) is a Claude Code *channel*
+  (an MCP server) that pushes each peer message into the running session
+  immediately via `notifications/claude/channel`. Closer to instant, but channels
+  are a research preview and require an entitlement that isn't on every account yet
+  — see `channel/README.md`.
+
 ## Codex CLI
 
 `mess` is agent-agnostic, so OpenAI **Codex** sessions can join the same network
