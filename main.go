@@ -24,6 +24,8 @@ Usage:
                                   session's identity (persists across turns)
   mess unregister                 leave the network and clear this session's
                                   identity (inverse of register)
+  mess rename [--force] <name>    rename yourself, migrating your inbox and
+                                  subscriptions to the new name
   mess cleanup [maxage]           prune agents idle longer than maxage (default
                                   24h) and not listening; --dry-run to preview
   mess state [text...]            set your working state (shown in ps); --clear to clear
@@ -92,6 +94,8 @@ func main() {
 		err = cmdRegister(p, args)
 	case "unregister":
 		err = cmdUnregister(p, args)
+	case "rename":
+		err = cmdRename(p, args)
 	case "cleanup":
 		err = cmdCleanup(p, args)
 	case "state":
@@ -358,6 +362,31 @@ func cmdUnregister(p paths, args []string) error {
 	if env := os.Getenv("MESS_AGENT"); env != "" {
 		fmt.Printf("note: MESS_AGENT=%s is still set; this session will re-register as %q on its next action\n", env, env)
 	}
+	return nil
+}
+
+// cmdRename renames the calling agent, migrating its inbox and subscriptions to
+// the new name and repointing this session's persisted identity.
+func cmdRename(p paths, args []string) error {
+	fs, as := newFlags("rename")
+	force := fs.Bool("force", false, "take over the new name if held by another live session")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess rename [--force] <new-name>")
+	}
+	newName := rest[0]
+	old, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	if _, err := call(p, Request{Op: "rename", As: old, To: newName, Session: sessionID(), Anchor: stableAnchor(), Force: *force}); err != nil {
+		return err // includes the collision message + the --force hint
+	}
+	if err := writeIdentity(p, newName); err != nil {
+		return err
+	}
+	fmt.Printf("renamed %s -> %s\n", old, newName)
 	return nil
 }
 

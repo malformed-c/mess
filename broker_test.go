@@ -406,6 +406,54 @@ func TestRegisterOwnedGuard(t *testing.T) {
 	}
 }
 
+func TestRenameMigratesInboxAndSubscriptions(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned("old", "sessX", "termX", false)
+	b.Send("peer", "old", "queued for old")
+	b.Sub("old", "builds")
+
+	if ok, msg := b.Rename("old", "new", "sessX", "termX", false); !ok {
+		t.Fatalf("rename should succeed: %s", msg)
+	}
+	if _, ok := b.agents["old"]; ok {
+		t.Fatal("old agent should be gone after rename")
+	}
+	// Inbox followed the rename.
+	got := b.Drain("new", false, 0)
+	if len(got) != 1 || got[0].Body != "queued for old" {
+		t.Fatalf("inbox not migrated: %+v", got)
+	}
+	// Subscription moved: new is subscribed, old is not.
+	if !b.topics["builds"]["new"] || b.topics["builds"]["old"] {
+		t.Fatalf("subscription not migrated: %+v", b.topics["builds"])
+	}
+	// Ownership moved.
+	if b.owners["new"].session != "sessX" {
+		t.Fatal("owner not carried to new name")
+	}
+	if _, ok := b.owners["old"]; ok {
+		t.Fatal("old owner should be cleared")
+	}
+}
+
+func TestRenameHonorsCollisionGuard(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.RegisterOwned("me", "s1", "t1", false)
+	b.RegisterOwned("taken", "s2", "t2", false) // a different live session
+
+	if ok, msg := b.Rename("me", "taken", "s1", "t1", false); ok || msg == "" {
+		t.Fatalf("rename onto a live name should be refused, got ok=%v", ok)
+	}
+	if ok, _ := b.Rename("me", "taken", "s1", "t1", true); !ok {
+		t.Fatal("--force rename should take the name over")
+	}
+	if _, ok := b.agents["me"]; ok {
+		t.Fatal("source name should be gone after a forced rename")
+	}
+}
+
 func TestLastSeenPersists(t *testing.T) {
 	b := newTestBroker() // now fixed at Unix(0,0)
 	b.Register("bob")

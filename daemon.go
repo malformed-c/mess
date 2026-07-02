@@ -331,6 +331,13 @@ func (d *daemon) dispatch(req Request) Response {
 			return Response{OK: true, Count: 1}
 		}
 		return Response{OK: true, Count: 0} // idempotent
+	case "rename":
+		if ok, msg := b.Rename(req.As, req.To, req.Session, req.Anchor, req.Force); !ok {
+			elog("rename %s -> %s refused: %s", req.As, req.To, msg)
+			return Response{Error: msg}
+		}
+		elog("rename %s -> %s", req.As, req.To)
+		return Response{OK: true}
 	case "cleanup":
 		maxAge := 24 * time.Hour
 		if req.Timeout != "" {

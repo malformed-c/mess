@@ -144,6 +144,59 @@ func (b *Broker) RegisterOwned(name, session, anchor string, force bool) (bool, 
 	return true, ""
 }
 
+// Rename moves an agent from old to new, migrating its inbox, topic
+// subscriptions, state, and busy/last-seen bookkeeping, then removing old. It
+// honors the same collision guard as RegisterOwned on the destination name
+// (refuses a different live session's name unless force). Returns ok=false and a
+// message on collision.
+func (b *Broker) Rename(old, newName, session, anchor string, force bool) (bool, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if newName == "" {
+		return false, "new name required"
+	}
+	if old == newName {
+		b.ensure(newName)
+		b.touch(newName)
+		b.owners[newName] = ownerInfo{session: session, anchor: anchor}
+		b.changed()
+		return true, ""
+	}
+	if cur, ok := b.owners[newName]; ok && !force && cur.session != session {
+		sameTerminal := anchor != "" && anchor == cur.anchor
+		if !sameTerminal && b.aliveLocked(newName) {
+			return false, fmt.Sprintf("name %q is in use by another live session; choose a different name or pass --force to take it over", newName)
+		}
+	}
+
+	dst := b.ensure(newName)
+	if src := b.agents[old]; src != nil {
+		dst.inbox = append(dst.inbox, src.inbox...)
+		if dst.state == "" {
+			dst.state = src.state
+		}
+		for topic := range src.topics {
+			dst.topics[topic] = true
+			if b.topics[topic] == nil {
+				b.topics[topic] = map[string]bool{}
+			}
+			b.topics[topic][newName] = true
+		}
+	}
+	// Carry over activity/turn markers (keep the fresher of the two).
+	if t, ok := b.lastSeen[old]; ok && t.After(b.lastSeen[newName]) {
+		b.lastSeen[newName] = t
+	}
+	if t, ok := b.busyUntil[old]; ok && t.After(b.busyUntil[newName]) {
+		b.busyUntil[newName] = t
+	}
+	b.removeAgentLocked(old) // also unsubscribes old from topics and clears its maps
+	b.touch(newName)
+	b.owners[newName] = ownerInfo{session: session, anchor: anchor}
+	b.changed()
+	return true, ""
+}
+
 // aliveLocked reports whether an agent looks currently reachable — parked
 // (listening), in a turn (busy), or active in the last couple of minutes. Held
 // lock. Used by the register collision guard to tell a live owner from a dead
