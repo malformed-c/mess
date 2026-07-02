@@ -490,6 +490,10 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// the duration of the wait so it shows as listening and is not flagged idle.
 	b.AddListener(req.As)
 	defer b.RemoveListener(req.As)
+	// Stop waiting if this name is removed/renamed, so the hook exits cleanly
+	// instead of lingering as a ghost listener (and being resurrected on restart).
+	evicted := b.WatchEvict(req.As)
+	defer b.UnwatchEvict(req.As, evicted)
 	elog("recv %s parked (waiting on %s)", req.As, kindsLabel(req.Kinds))
 	for {
 		ch := b.waitChan(req.As, trigger)
@@ -498,6 +502,9 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 			if b.HasPending(req.As, trigger) {
 				return finish()
 			}
+		case <-evicted:
+			elog("recv %s evicted (removed/renamed)", req.As)
+			return Response{OK: true, Messages: nil, Count: 0} // empty -> hook won't wake or re-park
 		case <-timeout:
 			elog("recv %s wait timed out (unparked)", req.As)
 			return Response{OK: true, Messages: nil, Count: 0}

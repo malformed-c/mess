@@ -173,7 +173,10 @@ disambiguates the `idle` ones (between-turns-alive vs gone).
 
 `mess ps` is honest about reachability: the count of parked (`listening`) agents
 always equals the daemon's live client connections — no phantom "listening" for a
-dead client. When an agent has unread mail it also shows the **age of the oldest
+dead client. Removing or renaming an agent (`rm`, `rename`, `unregister`,
+`cleanup`) **evicts** its parked waiter, so its auto-wake hook exits cleanly
+instead of lingering as a ghost listener under the old name (and being resurrected
+on a daemon restart). When an agent has unread mail it also shows the **age of the oldest
 unread message** (e.g. `2 pending (oldest 3m)`).
 
 ## The daemon

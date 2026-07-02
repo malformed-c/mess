@@ -42,6 +42,11 @@ type Broker struct {
 	// self-expires, so stale warnings don't linger in `ps`.
 	warnings map[string]warnInfo
 
+	// evicts holds channels, per agent name, that are closed when the agent is
+	// removed or renamed — so a parked recv waiting on that name stops instead of
+	// lingering as a ghost listener (and being resurrected on a daemon restart).
+	evicts map[string][]chan struct{}
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
@@ -79,7 +84,34 @@ func NewBroker() *Broker {
 		lastSeen:    map[string]time.Time{},
 		owners:      map[string]ownerInfo{},
 		warnings:    map[string]warnInfo{},
+		evicts:      map[string][]chan struct{}{},
 		now:         time.Now,
+	}
+}
+
+// WatchEvict returns a channel that is closed when name is removed or renamed, so
+// a parked recv can stop waiting instead of becoming a ghost listener.
+func (b *Broker) WatchEvict(name string) chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ch := make(chan struct{})
+	b.evicts[name] = append(b.evicts[name], ch)
+	return ch
+}
+
+// UnwatchEvict deregisters an eviction channel (on recv return).
+func (b *Broker) UnwatchEvict(name string, ch chan struct{}) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	chans := b.evicts[name]
+	for i, c := range chans {
+		if c == ch {
+			b.evicts[name] = append(chans[:i], chans[i+1:]...)
+			break
+		}
+	}
+	if len(b.evicts[name]) == 0 {
+		delete(b.evicts, name)
 	}
 }
 
@@ -518,6 +550,10 @@ func (b *Broker) removeAgentLocked(name string) bool {
 	delete(b.busyUntil, name)
 	delete(b.lastSeen, name)
 	delete(b.owners, name)
+	for _, ch := range b.evicts[name] {
+		close(ch) // wake any parked recv on this name so it stops instead of ghosting
+	}
+	delete(b.evicts, name)
 	for topic, subs := range b.topics {
 		delete(subs, name)
 		if len(subs) == 0 {

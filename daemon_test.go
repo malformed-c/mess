@@ -60,3 +60,36 @@ func TestRecvReleasesListenerOnDisconnect(t *testing.T) {
 		t.Fatal("listener leaked after client disconnect (false 'listening')")
 	}
 }
+
+// A parked recv --wait must stop (not linger as a ghost listener) when its agent
+// is removed or renamed out from under it.
+func TestRecvEvictedOnRemove(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	_, server := net.Pipe()
+
+	done := make(chan Response, 1)
+	go func() { done <- d.recv(server, Request{Op: "recv", As: "ghost", Wait: true}) }()
+
+	deadline := time.Now().Add(time.Second)
+	for !d.broker.IsListening("ghost") {
+		if time.Now().After(deadline) {
+			t.Fatal("recv never registered as listening")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Removing the agent (rm / rename / cleanup) must evict the parked waiter.
+	d.broker.RemoveAgent("ghost")
+
+	select {
+	case resp := <-done:
+		if resp.Count != 0 { // evicted returns empty so the hook won't wake/re-park
+			t.Fatalf("evicted recv should return empty, got %d messages", resp.Count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parked recv did not stop after its agent was removed (ghost listener)")
+	}
+	if d.broker.IsListening("ghost") {
+		t.Fatal("listener still present after eviction")
+	}
+}
