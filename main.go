@@ -17,7 +17,8 @@ Usage:
   mess send <to> [body...]        send a direct message to an agent
                                   (--ack blocks until it's read; --timeout DUR)
   mess broadcast [body...]        send to every known agent
-  mess pub <topic> [body...]      publish to a topic
+  mess pub <topic> [body...]      publish to a topic (@mention wakes only the
+                                  tagged subscribers; the rest still receive it)
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
   mess register [name]            join the network; with a name, set this
@@ -38,15 +39,17 @@ Usage:
   mess recv [duration]            receive queued messages
   mess listen [idle-timeout]      run continuously (bg): print messages as they
                                   arrive until interrupted (alias: recv --follow)
-  mess ps                         list agents and topics
+  mess ps                         list agents and topics (online/offline +
+                                  working/listening/idle status)
   mess ping                       check the daemon
   mess daemon                     run the daemon in the foreground
   mess stop                       shut the daemon down
 
 Identity (resolved in this order):
   1. --as NAME on the command
-  2. a mid-session name set via "mess register <name>" (kept per Claude Code
-     session, so it survives across turns)
+  2. a mid-session name set via "mess register <name>" — persisted per host
+     session (keyed on the first of $MESS_SESSION_ID, $CLAUDE_CODE_SESSION_ID,
+     or $CODEX_THREAD_ID), so it survives across turns and a session-id rotation
   3. the MESS_AGENT environment variable (set at launch)
 
 If no body args are given, the body is read from stdin.
