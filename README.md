@@ -241,7 +241,7 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
           "asyncRewake": true,
           "timeout": 86400,
           "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox (the wake only peeked — unread messages stay queued and re-wake you until you recv).",
-          "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s >/dev/null 2>&1 && exit 2 || exit 0" }
+          "command": "who=$(mess whoami 2>/dev/null); [ -z \"$who\" ] && exit 0; out=$(flock -n \"/tmp/mess-wake-$who.lock\" mess recv --wait --no-broadcast --peek --batch 1s 2>/dev/null); [ -n \"$out\" ] && { touch \"/tmp/mess-woke-$who\"; exit 2; } || exit 0" }
       ] }
     ],
     "StopFailure": [
@@ -262,7 +262,11 @@ What each piece does:
 - **Stop → auto-wake** (`asyncRewake`): the `flock` guard ensures a single parked
   waiter; `--no-broadcast` avoids a wake storm; `--peek` makes delivery loss-proof
   (a dropped wake re-wakes, never loses mail); `--batch 1s` coalesces a burst into
-  one wake; `exit 2` re-invokes the agent, which then runs `mess recv` to consume.
+  one wake. It wakes (`exit 2`) **only when the recv actually returned a message**
+  (it keys on the output, not the exit code — so a message consumed during the
+  batch window doesn't fire a phantom empty wake), then the agent runs `mess recv`
+  to consume. On a real wake it drops a `mess-woke-$who` flag so the mid-turn steer
+  hook doesn't *also* announce the same batch (see below).
   The **`"timeout": 86400`** is essential: Claude Code reaps a hook command at
   **600s (10 min) by default**, which would kill the parked waiter — and since
   nothing re-arms it until the next turn, the session would go silently deaf after
@@ -305,10 +309,12 @@ mid-turn** (like typing into a running session), there are two options:
   (`[mess] N unread peer message(s) as of this tool call — run mess recv`) into the
   running turn as `additionalContext`, so the agent learns at its next tool call
   that peers have messaged it and reads them itself with `mess recv`. It peeks
-  (doesn't consume) and only fires when the count **grows**, so it fires once per
-  new batch: it injects the notice at one tool call, then stays silent on every
-  subsequent tool call — even after you `mess recv` — until a *new* message
-  arrives. `additionalContext` is append-only and sticky (each emission is a
+  (doesn't consume) and dedups by **newest message id** (monotonic), so it fires
+  once per genuinely new arrival — never repeating on later tool calls, and never
+  *missing* a new message just because the unread count matched after a `recv`. It
+  also **coordinates with the auto-wake hook**: right after a wake (which already
+  prompted a recv) it suppresses one notice, so the two don't double-announce the
+  same batch. `additionalContext` is append-only and sticky (each emission is a
   separate entry saved to the transcript and replayed on resume, never a mutable
   live count), so the notice is phrased "as of this tool call" — a lingering line
   reads as a point-in-time event, not a standing count. Install it and add a
