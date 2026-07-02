@@ -54,7 +54,7 @@ Identity (resolved in this order):
   1. --as NAME on the command
   2. a mid-session name set via "mess register <name>" — persisted per host
      session (keyed on the first of $MESS_SESSION_ID, $CLAUDE_CODE_SESSION_ID,
-     or $CODEX_THREAD_ID), so it survives across turns and a session-id rotation
+     or $CODEX_THREAD_ID), so it survives across turns, compaction, and resume
   3. the MESS_AGENT environment variable (set at launch)
 
 If no body args are given, the body is read from stdin.

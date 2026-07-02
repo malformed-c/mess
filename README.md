@@ -105,18 +105,17 @@ mess register alice          # ...join mid-session; sticks for the session
 mess whoami                  # print resolved identity (empty if none)
 ```
 
-**Surviving a session-id rotation.** A resumed/relaunched host session gets a
-*new* session id, which would orphan a mid-session `register`. So the identity is
-*also* persisted under a stable **terminal anchor** — the first of `$MESS_ANCHOR`,
-`$TMUX_PANE`, `$STY`, `$TERM_SESSION_ID`, `$KONSOLE_DBUS_SESSION`, `$WINDOWID` —
-and `whoami` falls back to it. A relaunch in the *same terminal* recovers the
-name; a different terminal doesn't inherit it. (Headless, with no anchor and a
-rotating id, use `MESS_AGENT` for a stable identity.)
+**Persistence.** A mid-session `register` is keyed on the host session id, which
+is **stable for the whole session** — it does not change across turns, `/compact`,
+`claude --continue`, or `claude --resume`, so the name sticks the entire time. A
+*brand-new* session (a fresh `claude`, even in the same terminal) correctly gets
+no inherited name — identity never leaks between sessions or across a reused/
+recycled terminal tab. (Headless or when you want a fixed name from launch, set
+`MESS_AGENT`.)
 
 **Name-collision guard.** `mess register <name>` refuses a name already held by a
 different, still-live session in a different terminal — so two agents can't both
-grab `alice` and share an inbox. Pass `--force` to take over. A rotated session
-that shares the anchor reclaims its own name automatically, and a name whose owner
+grab `alice` and share an inbox. Pass `--force` to take over. A name whose owner
 has gone offline can be taken without `--force`.
 
 ## Usage
