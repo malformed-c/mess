@@ -305,9 +305,12 @@ mid-turn** (like typing into a running session), there are two options:
   (`[mess] N unread peer message(s) as of this tool call — run mess recv`) into the
   running turn as `additionalContext`, so the agent learns at its next tool call
   that peers have messaged it and reads them itself with `mess recv`. It peeks
-  (doesn't consume) and only fires when the count grows, so it doesn't dump bodies
-  or repeat every tool call. `additionalContext` is sticky (saved to the
-  transcript), so the notice is phrased "as of this tool call" — a lingering line
+  (doesn't consume) and only fires when the count **grows**, so it fires once per
+  new batch: it injects the notice at one tool call, then stays silent on every
+  subsequent tool call — even after you `mess recv` — until a *new* message
+  arrives. `additionalContext` is append-only and sticky (each emission is a
+  separate entry saved to the transcript and replayed on resume, never a mutable
+  live count), so the notice is phrased "as of this tool call" — a lingering line
   reads as a point-in-time event, not a standing count. Install it and add a
   `PreToolUse` hook:
   `{ "type": "command", "command": "sh ~/.claude/hooks/mess-steer.sh" }`. It's
