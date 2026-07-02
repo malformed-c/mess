@@ -44,16 +44,9 @@ maxid=$(printf '%s\n' "$json" | jq -rs 'if length==0 then 0 else ([.[].id | ltri
 statef="${TMPDIR:-/tmp}/mess-steer-$who.id"
 prev=$(cat "$statef" 2>/dev/null || echo 0)
 
-# Coordinate with the auto-wake hook: if it just woke this agent it already
-# prompted a recv for this batch, so suppress one notice and record the batch as
-# announced.
-wokeflag="${TMPDIR:-/tmp}/mess-woke-$who"
-if [ -f "$wokeflag" ]; then
-  rm -f "$wokeflag"
-  printf '%s' "$maxid" > "$statef"
-  exit 0
-fi
-
+# (The auto-wake hook consumes on an idle wake, so a woken turn's inbox is empty
+# here — no flag coordination needed. When the agent is working, the wake stands
+# down and this hook is the sole notifier.)
 if [ "$n" -gt 0 ] && [ "$maxid" -gt "$prev" ]; then
   jq -cn --arg c "[mess] $n unread peer message(s) as of $at — run \`mess recv\` to read them." \
     --arg ev "$EVENT" \

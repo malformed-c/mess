@@ -261,7 +261,7 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
         { "type": "command",
           "asyncRewake": true,
           "timeout": 86400,
-          "rewakeMessage": "A peer messaged you on mess. Run `mess recv` now to read and clear your inbox.",
+          "rewakeMessage": "A peer messaged you on mess — the message(s) are shown below (already delivered; no need to run mess recv).",
           "command": "sh ~/.claude/hooks/mess-wake.sh" }
       ] }
     ],
@@ -282,15 +282,19 @@ What each piece does:
   drive the accurate `working` status.
 - **Stop → auto-wake** (`asyncRewake`, [`hooks/mess-wake.sh`](hooks/mess-wake.sh)):
   the `flock` guard ensures a single parked waiter; `--no-broadcast` avoids a wake
-  storm; `--peek` keeps delivery loss-proof; `--batch 1s` coalesces a burst. It
-  wakes (`exit 2`) only when the recv actually returned a wake-worthy message (keys
-  on output, skips quiet/`@mention`-elsewhere messages, so no phantom empty wake).
-  Crucially it **converges with the steer hook so the two never double-notify**: if
-  the agent is actively **working** when the message lands, the wake stands down and
-  the mid-turn steer hook is the sole notifier; if the message was already announced
-  (shared `mess-steer-$who.id` dedup, or the `mess-woke-$who` flag for the woken
-  turn), it stands down too. So a message is surfaced exactly once — by the wake
-  when idle, by steer when active.
+  storm; `--batch 1s` coalesces a burst; it parks with `--peek` and only wakes on a
+  real wake-worthy message (skips quiet/`@mention`-elsewhere ones — no phantom
+  wake). On an idle wake it then **consumes** the inbox and prints the messages to
+  **stderr**, which `asyncRewake` injects into the woken turn as a system reminder
+  ([docs](https://code.claude.com/docs/en/hooks.md): *"the hook's stderr … is shown
+  to Claude as a system reminder"*). So the woken agent **sees the message content
+  directly** — no separate `mess recv`, and acks fire. It **converges with the steer
+  hook** so a message is surfaced exactly once: if the agent is actively **working**
+  when the message lands, the wake stands down (leaves it queued) and the mid-turn
+  steer hook is the sole notifier; consuming on an idle wake empties the inbox, so
+  the woken turn's steer has nothing to re-announce. (Trade-off: consume-on-wake
+  isn't loss-proof — if the harness ever drops the exit-2 injection, a consumed
+  message isn't re-delivered; peek-then-`recv` was the loss-proof alternative.)
   The **`"timeout": 86400`** is essential: Claude Code reaps a hook command at
   **600s (10 min) by default**, which would kill the parked waiter — and since
   nothing re-arms it until the next turn, the session would go silently deaf after
