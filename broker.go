@@ -37,6 +37,11 @@ type Broker struct {
 	// while still allowing a rotated session (same anchor) to reclaim its own.
 	owners map[string]ownerInfo
 
+	// warnings holds a transient status warning per agent (e.g. an API error set
+	// by a lifecycle hook). It auto-clears when the agent is next active and
+	// self-expires, so stale warnings don't linger in `ps`.
+	warnings map[string]warnInfo
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
@@ -57,6 +62,12 @@ type ownerInfo struct {
 	anchor  string
 }
 
+// warnInfo is a transient status warning and its expiry.
+type warnInfo struct {
+	text  string
+	until time.Time
+}
+
 // NewBroker returns an empty broker.
 func NewBroker() *Broker {
 	return &Broker{
@@ -67,8 +78,30 @@ func NewBroker() *Broker {
 		busyUntil:   map[string]time.Time{},
 		lastSeen:    map[string]time.Time{},
 		owners:      map[string]ownerInfo{},
+		warnings:    map[string]warnInfo{},
 		now:         time.Now,
 	}
+}
+
+// SetWarn sets (or, with empty text, clears) an agent's transient status warning,
+// auto-clearing after ttl.
+func (b *Broker) SetWarn(name, text string, ttl time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensure(name)
+	if text == "" {
+		delete(b.warnings, name)
+	} else {
+		b.warnings[name] = warnInfo{text: text, until: b.now().Add(ttl)}
+		b.touch(name)
+	}
+	b.changed()
+}
+
+// clearWarnLocked drops an agent's warning (called when it becomes active again,
+// so a recovered agent's stale warning disappears). Holds the lock.
+func (b *Broker) clearWarnLocked(name string) {
+	delete(b.warnings, name)
 }
 
 // touch records that an agent was just active (for cleanup). Call with the lock
@@ -139,6 +172,7 @@ func (b *Broker) RegisterOwned(name, session, anchor string, force bool) (bool, 
 	}
 	b.ensure(name)
 	b.touch(name)
+	b.clearWarnLocked(name) // re-registering (fresh/resumed session) clears a stale warning
 	b.owners[name] = ownerInfo{session: session, anchor: anchor}
 	b.changed()
 	return true, ""
@@ -440,6 +474,7 @@ func (b *Broker) SetBusy(name string, dur time.Duration) {
 	defer b.mu.Unlock()
 	b.ensure(name)
 	b.touch(name)
+	b.clearWarnLocked(name) // becoming active means any prior warning is stale
 	b.busyUntil[name] = b.now().Add(dur)
 }
 
@@ -536,7 +571,11 @@ func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 		if len(a.inbox) > 0 {
 			oldest = a.inbox[0].Time // inbox is in arrival order; [0] is oldest
 		}
-		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, Working: b.busyUntil[a.name].After(b.now()), State: a.state, Oldest: oldest})
+		warning := ""
+		if w, ok := b.warnings[a.name]; ok && w.until.After(b.now()) {
+			warning = w.text // expired warnings are simply not reported
+		}
+		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, Working: b.busyUntil[a.name].After(b.now()), State: a.state, Warning: warning, Oldest: oldest})
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 

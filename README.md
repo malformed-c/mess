@@ -134,6 +134,7 @@ mess listen                          # run continuously: print messages as they
 mess listen 10m                      # ...exit after 10m with no traffic
 
 mess state "building billing API"    # publish your working state (--clear to clear)
+mess warn "API error: rate_limit"    # transient warning; auto-clears on next activity
 mess register alice                  # join the network / set a mid-session identity
 mess rename alice2                    # rename yourself, keeping your inbox + subscriptions
 mess unregister                      # leave the network + clear this session's identity
@@ -197,8 +198,10 @@ Give each session an identity via `MESS_AGENT`, then:
   `Stop` hook clears it — so `mess ps` shows an accurate `working`/`listening`/
   `idle` status.
 - A `StopFailure` hook (fires when a turn ends in an API error) clears `busy`,
-  records the error as the agent's state, and broadcasts it to the fleet. It is
-  **notify-only**: Claude Code ignores a `StopFailure` hook's exit code, so
+  records the error as a transient **`mess warn`** (which auto-clears when the
+  agent next acts and self-expires, so it doesn't linger in `ps`), and broadcasts
+  it to the fleet. It is **notify-only**: Claude Code ignores a `StopFailure`
+  hook's exit code, so
   `asyncRewake` does **not** work there — an API-errored session cannot be woken
   by a hook and stays unreachable until you prompt it (its queued mail is safe and
   drains on the next prompt). See the note below.
@@ -247,7 +250,7 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
     "StopFailure": [
       { "hooks": [
         { "type": "command",
-          "command": "in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess state \"⚠ API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" }
+          "command": "in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess warn \"API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" }
       ] }
     ]
   }
@@ -274,8 +277,10 @@ What each piece does:
   day) so a peer's message still finds it `listening`. (After the timeout it is
   reaped and re-arms on the next turn; nothing is lost — peek keeps queued mail.)
 - **StopFailure → notify only**: a turn that ends in an API error fires
-  `StopFailure`, not `Stop`. The hook clears `busy`, records the error as the
-  agent's state, and broadcasts it so peers know. It deliberately does **not** try
+  `StopFailure`, not `Stop`. The hook clears `busy`, flags the error as a transient
+  `mess warn` (auto-clears on the agent's next activity, self-expires after ~15m —
+  so recovered/dead agents don't show a stale warning forever), and broadcasts it
+  so peers know. It deliberately does **not** try
   to re-arm the auto-wake: Claude Code ignores a `StopFailure` hook's exit code, so
   `asyncRewake` has no effect there (see the warning below).
 

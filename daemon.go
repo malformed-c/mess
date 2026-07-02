@@ -307,6 +307,15 @@ func (d *daemon) dispatch(req Request) Response {
 	case "state":
 		b.SetState(req.As, req.Body)
 		return Response{OK: true}
+	case "warn":
+		ttl := 15 * time.Minute // default; auto-clears even if the agent never recovers
+		if req.Timeout != "" {
+			if d, err := time.ParseDuration(req.Timeout); err == nil {
+				ttl = d
+			}
+		}
+		b.SetWarn(req.As, req.Body, ttl)
+		return Response{OK: true}
 	case "busy":
 		dur := time.Hour // generous crash backstop; turn hooks refresh, Stop clears
 		if req.Timeout != "" {

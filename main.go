@@ -29,6 +29,8 @@ Usage:
   mess cleanup [maxage]           prune agents idle longer than maxage (default
                                   24h) and not listening; --dry-run to preview
   mess state [text...]            set your working state (shown in ps); --clear to clear
+  mess warn [text...]             set a transient status warning (auto-clears when
+                                  you're next active; --ttl DUR, --clear)
   mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
   mess rm <agent>                 remove an agent (e.g. a dead session) from the network
   mess whoami                     print your resolved identity (empty if none)
@@ -100,6 +102,8 @@ func main() {
 		err = cmdCleanup(p, args)
 	case "state":
 		err = cmdState(p, args)
+	case "warn":
+		err = cmdWarn(p, args)
 	case "busy", "unbusy":
 		err = cmdBusy(p, cmd, args)
 	case "rm":
@@ -446,6 +450,35 @@ func cmdState(p paths, args []string) error {
 	return nil
 }
 
+// cmdWarn sets a transient status warning (shown in ps) that auto-clears when
+// the agent is next active and self-expires after --ttl (default 15m). Used by
+// the StopFailure hook to flag an API error without it lingering forever.
+func cmdWarn(p paths, args []string) error {
+	fs, as := newFlags("warn")
+	ttl := fs.String("ttl", "", "auto-clear after this long (default 15m)")
+	clear := fs.Bool("clear", false, "clear your warning")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	text := ""
+	if !*clear {
+		if text, err = bodyFrom(fs.Args()); err != nil {
+			return err
+		}
+	}
+	if _, err := call(p, Request{Op: "warn", As: name, Body: text, Timeout: *ttl}); err != nil {
+		return err
+	}
+	if text == "" {
+		fmt.Println("warning cleared")
+	} else {
+		fmt.Printf("⚠ %s\n", text)
+	}
+	return nil
+}
+
 // cmdBusy marks (busy) or clears (unbusy) the calling agent's in-a-turn flag,
 // which drives the "working" status in ps. Driven by lifecycle hooks.
 func cmdBusy(p paths, op string, args []string) error {
@@ -686,6 +719,9 @@ func cmdPs(p paths, args []string) error {
 			}
 			if a.State != "" {
 				line += "  — " + a.State
+			}
+			if a.Warning != "" {
+				line += "  ⚠ " + a.Warning
 			}
 			fmt.Println(line)
 		}

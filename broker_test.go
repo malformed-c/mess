@@ -454,6 +454,51 @@ func TestRenameHonorsCollisionGuard(t *testing.T) {
 	}
 }
 
+func TestWarningAutoClearsAndExpires(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Register("bob")
+	warn := func() string {
+		agents, _ := b.Ps()
+		for _, a := range agents {
+			if a.Name == "bob" {
+				return a.Warning
+			}
+		}
+		return ""
+	}
+
+	b.SetWarn("bob", "API error", time.Minute)
+	if warn() != "API error" {
+		t.Fatalf("warning not reported, got %q", warn())
+	}
+	// Becoming active (a new turn) clears the stale warning.
+	b.SetBusy("bob", time.Minute)
+	if warn() != "" {
+		t.Fatalf("warning should clear on activity, got %q", warn())
+	}
+	// Re-registering (a resumed session) also clears it.
+	b.SetWarn("bob", "again", time.Minute)
+	b.RegisterOwned("bob", "s", "a", false)
+	if warn() != "" {
+		t.Fatalf("warning should clear on re-register, got %q", warn())
+	}
+	// And it self-expires even if the agent never recovers.
+	b.SetWarn("bob", "still down", time.Minute)
+	now = now.Add(2 * time.Minute)
+	if warn() != "" {
+		t.Fatalf("expired warning should not be reported, got %q", warn())
+	}
+	// Empty text clears explicitly.
+	now = now.Add(-2 * time.Minute) // back within TTL
+	b.SetWarn("bob", "x", time.Minute)
+	b.SetWarn("bob", "", time.Minute)
+	if warn() != "" {
+		t.Fatalf("empty SetWarn should clear, got %q", warn())
+	}
+}
+
 func TestLastSeenPersists(t *testing.T) {
 	b := newTestBroker() // now fixed at Unix(0,0)
 	b.Register("bob")

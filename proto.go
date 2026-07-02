@@ -51,6 +51,7 @@ type AgentInfo struct {
 	Listening bool      `json:"listening,omitempty"` // has an active streaming listener
 	Working   bool      `json:"working,omitempty"`   // currently in a turn (busy)
 	State     string    `json:"state,omitempty"`     // self-reported working state
+	Warning   string    `json:"warning,omitempty"`   // transient status warning (auto-clears)
 	Oldest    time.Time `json:"oldest,omitzero"`     // arrival time of the oldest pending message
 }
 
