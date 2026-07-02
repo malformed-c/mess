@@ -516,7 +516,7 @@ func cmdDrain(p paths, args []string) error {
 		return fmt.Errorf("usage: mess drain <agent>")
 	}
 	target := rest[0]
-	resp, err := call(p, Request{Op: "recv", As: target}) // non-blocking drain of target's inbox
+	resp, err := call(p, Request{Op: "drain", As: target}) // clear target's inbox (no touch, no ack)
 	if err != nil {
 		return err
 	}

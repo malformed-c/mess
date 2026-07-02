@@ -582,6 +582,32 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	}
 }
 
+func TestDrainQuietNoTouchNoAck(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	_, ackCh, _ := b.SendAck("peer", "dead", "did you read this?") // ack-requested
+
+	got := b.DrainQuiet("dead", 0)
+	if len(got) != 1 {
+		t.Fatalf("drain should return the queued message, got %d", len(got))
+	}
+	// It must NOT mark the target active (so it stays eligible for cleanup).
+	if _, ok := b.lastSeen["dead"]; ok {
+		t.Fatal("drain must not touch the target agent")
+	}
+	// It must NOT fire the read receipt (the operator read it, not the agent).
+	select {
+	case <-ackCh:
+		t.Fatal("drain must not fire the ack")
+	default:
+	}
+	// Inbox is cleared.
+	if len(b.DrainQuiet("dead", 0)) != 0 {
+		t.Fatal("inbox should be empty after drain")
+	}
+}
+
 func TestCleanupPrunesByStaleMail(t *testing.T) {
 	now := time.Unix(0, 0)
 	b := NewBroker()

@@ -456,6 +456,33 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 	return out
 }
 
+// DrainQuiet consumes and returns an agent's whole inbox WITHOUT marking it
+// active or firing read receipts — for an operator clearing another agent's
+// stuck backlog (`mess drain`). Unlike a real recv it doesn't touch the agent
+// (so it stays offline / eligible for cleanup) and doesn't ack (the operator
+// read it, not the agent). Returns nil for an unknown agent.
+func (b *Broker) DrainQuiet(name string, max int) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return nil
+	}
+	var out, keep []Message
+	for _, m := range a.inbox {
+		if max <= 0 || len(out) < max {
+			out = append(out, m)
+		} else {
+			keep = append(keep, m)
+		}
+	}
+	if len(out) > 0 {
+		a.inbox = keep
+		b.changed()
+	}
+	return out
+}
+
 func matchKind(m Message, kinds map[string]bool) bool {
 	return kinds == nil || kinds[m.Kind]
 }

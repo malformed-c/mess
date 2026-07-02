@@ -338,6 +338,12 @@ func (d *daemon) dispatch(req Request) Response {
 			return Response{OK: true, Count: 1}
 		}
 		return Response{OK: true, Count: 0} // idempotent: unknown agent is not an error
+	case "drain":
+		msgs := b.DrainQuiet(req.As, req.Max) // clear a backlog without touching/acking
+		if len(msgs) > 0 {
+			elog("drain %s -> %d", req.As, len(msgs))
+		}
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "unregister":
 		if b.RemoveAgent(req.As) {
 			elog("unregister %s", req.As)
