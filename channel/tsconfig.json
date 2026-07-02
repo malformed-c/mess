@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "types": ["bun"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  }
+}

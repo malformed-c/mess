@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "mess": { "command": "bun", "args": ["./mess-channel.ts"] }
+  }
+}
