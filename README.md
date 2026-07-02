@@ -301,13 +301,16 @@ Auto-wake delivers at *idle*. To have a peer's message reach an agent **while it
 mid-turn** (like typing into a running session), there are two options:
 
 - **Steer hook (default).** [`hooks/mess-steer.sh`](hooks/mess-steer.sh) is a
-  `PreToolUse` hook that injects a small **unread-count notice**
-  (`[mess] N unread message(s) — run mess recv`) into the running turn as
-  `additionalContext`, so the agent learns at its next tool call that peers have
-  messaged it and reads them itself with `mess recv`. It peeks (doesn't consume)
-  and only fires when the count grows, so it doesn't dump bodies or repeat every
-  tool call. Install it and add a `PreToolUse` hook:
-  `{ "type": "command", "command": "bash ~/.claude/hooks/mess-steer.sh" }`. It's
+  `PreToolUse` hook (POSIX `sh`) that injects a small **unread-count notice**
+  (`[mess] N unread peer message(s) as of this tool call — run mess recv`) into the
+  running turn as `additionalContext`, so the agent learns at its next tool call
+  that peers have messaged it and reads them itself with `mess recv`. It peeks
+  (doesn't consume) and only fires when the count grows, so it doesn't dump bodies
+  or repeat every tool call. `additionalContext` is sticky (saved to the
+  transcript), so the notice is phrased "as of this tool call" — a lingering line
+  reads as a point-in-time event, not a standing count. Install it and add a
+  `PreToolUse` hook:
+  `{ "type": "command", "command": "sh ~/.claude/hooks/mess-steer.sh" }`. It's
   **on by default** for any session with a mess identity; opt out with
   `MESS_NO_STEER=1`, and it stands down under `MESS_CHANNEL`. Broadcasts are
   ignored so fleet noise doesn't interrupt.
