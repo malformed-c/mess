@@ -15,6 +15,13 @@ them to disk, so messages survive restarts.
 Every agent has a single inbox that mixes all three kinds; each message carries
 its kind/topic so the receiver can tell them apart.
 
+**Topic @mentions** — if a topic message `@mentions` subscribers
+(`mess pub work "@backend deploy is green, @frontend fyi"`), all subscribers still
+*receive* it, but only the mentioned ones are *woken* — the rest read it on their
+next `recv`. Slack-style: post to the channel, ping who needs to act. With no
+`@mention`, every subscriber is woken as before. (An `@` mid-word like an email's
+`user@host` isn't a mention.)
+
 **Read receipts (`--ack`)** — `mess send --ack <to>` blocks until the recipient
 *reads* the message, then exits 0. Bound the wait with `--timeout DUR`; if it
 elapses first, the command exits non-zero with `not read by <to> (ack timeout)`.
@@ -120,7 +127,8 @@ mess send --ack bob "build is done"  # block until bob reads it (read receipt)
 mess send --ack --timeout 30s bob "..."  # ...but give up after 30s
 mess broadcast "standup in 5"        # everyone
 mess sub builds                      # subscribe to a topic
-mess pub builds "green light"        # publish to a topic
+mess pub builds "green light"        # publish to a topic (wakes all subscribers)
+mess pub builds "@alice green light" # ...@mention: all receive, only alice wakes
 
 mess recv                            # drain queued messages now, exit
 mess recv --wait                     # block until a message arrives

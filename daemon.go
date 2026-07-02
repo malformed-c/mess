@@ -295,9 +295,13 @@ func (d *daemon) dispatch(req Request) Response {
 		elog("broadcast %s -> %d agent(s)", req.As, n)
 		return Response{OK: true, Count: n}
 	case "pub":
-		_, n := b.Pub(req.As, req.Topic, req.Body)
-		elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, n)
-		return Response{OK: true, Count: n}
+		_, delivered, woke := b.Pub(req.As, req.Topic, req.Body)
+		if woke < delivered {
+			elog("pub %s #%s -> %d sub(s), woke %d (@mention)", req.As, req.Topic, delivered, woke)
+		} else {
+			elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, delivered)
+		}
+		return Response{OK: true, Count: delivered}
 	case "sub":
 		b.Sub(req.As, req.Topic)
 		return Response{OK: true}

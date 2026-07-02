@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -170,6 +171,13 @@ func (a *agentState) deliver(m Message) {
 	a.waiters = nil
 }
 
+// deliverQuiet appends a message without signaling waiters, so a parked recv is
+// not woken. Used for a topic message that @-mentions only some subscribers: the
+// unmentioned ones still receive it (read on their next recv) but aren't woken.
+func (a *agentState) deliverQuiet(m Message) {
+	a.inbox = append(a.inbox, m)
+}
+
 // changed builds a snapshot and fires the persistence hook. Call with lock held.
 func (b *Broker) changed() {
 	if b.onChange != nil {
@@ -336,22 +344,49 @@ func (b *Broker) Broadcast(from, body string) (Message, int) {
 	return m, n
 }
 
-// Pub delivers to every subscriber of a topic except the sender.
-func (b *Broker) Pub(from, topic, body string) (Message, int) {
+// mentionRe matches an @name mention at a word boundary (so it doesn't fire on
+// things like an email's "user@host"). Names are letters/digits/_/- (matching
+// agent names like "peri-sonnet-5").
+var mentionRe = regexp.MustCompile(`(?:^|\s)@([A-Za-z0-9][A-Za-z0-9_-]*)`)
+
+// mentionsIn returns the set of @-mentioned names in body, or nil if none.
+func mentionsIn(body string) map[string]bool {
+	matches := mentionRe.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(matches))
+	for _, g := range matches {
+		set[g[1]] = true
+	}
+	return set
+}
+
+// Pub delivers to every subscriber of a topic except the sender, and returns the
+// delivery count and how many were *woken*. If the body @-mentions subscribers,
+// only the mentioned ones are woken (the rest still receive it, read on their
+// next recv); with no mentions, everyone is woken as before.
+func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	m := Message{ID: b.nextID(), From: from, Topic: topic, Kind: KindTopic, Body: body, Time: b.now()}
+	m = Message{ID: b.nextID(), From: from, Topic: topic, Kind: KindTopic, Body: body, Time: b.now()}
 	b.touch(from)
-	n := 0
+	mentions := mentionsIn(body)
 	for name := range b.topics[topic] {
 		if name == from {
 			continue
 		}
-		b.ensure(name).deliver(m)
-		n++
+		a := b.ensure(name)
+		if len(mentions) == 0 || mentions[name] {
+			a.deliver(m) // wake
+			woke++
+		} else {
+			a.deliverQuiet(m) // queue, don't wake
+		}
+		delivered++
 	}
 	b.changed()
-	return m, n
+	return m, delivered, woke
 }
 
 // Sub subscribes an agent to a topic.

@@ -84,7 +84,7 @@ func TestTopicPubSub(t *testing.T) {
 	b.Sub("bob", "builds")
 	b.Sub("carol", "builds")
 	b.Sub("alice", "builds")
-	_, n := b.Pub("alice", "builds", "green")
+	_, n, _ := b.Pub("alice", "builds", "green")
 	if n != 2 { // alice is a subscriber but also the sender; excluded
 		t.Fatalf("expected 2 deliveries, got %d", n)
 	}
@@ -94,11 +94,63 @@ func TestTopicPubSub(t *testing.T) {
 	}
 }
 
+func TestTopicMentionWakesOnlyMentioned(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("bob", "work")
+	b.Sub("carol", "work")
+	bobCh := b.waitChan("bob", nil)
+	carolCh := b.waitChan("carol", nil)
+
+	_, delivered, woke := b.Pub("alice", "work", "@bob please handle the deploy")
+	if delivered != 2 || woke != 1 {
+		t.Fatalf("want delivered=2 woke=1, got delivered=%d woke=%d", delivered, woke)
+	}
+	select { // mentioned bob is woken
+	case <-bobCh:
+	default:
+		t.Fatal("mentioned bob should be woken")
+	}
+	select { // unmentioned carol is NOT woken
+	case <-carolCh:
+		t.Fatal("unmentioned carol should not be woken")
+	default:
+	}
+	// ...but carol still receives the message.
+	if got := b.Drain("carol", false, 0); len(got) != 1 {
+		t.Fatalf("carol should still receive the topic message: %+v", got)
+	}
+	if got := b.Drain("bob", false, 0); len(got) != 1 {
+		t.Fatalf("bob should receive it too: %+v", got)
+	}
+}
+
+func TestTopicNoMentionWakesAll(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("bob", "work")
+	b.Sub("carol", "work")
+	bobCh := b.waitChan("bob", nil)
+	carolCh := b.waitChan("carol", nil)
+	_, delivered, woke := b.Pub("alice", "work", "email me at me@host — no mentions")
+	if delivered != 2 || woke != 2 {
+		t.Fatalf("no @mention should wake all: got delivered=%d woke=%d", delivered, woke)
+	}
+	select {
+	case <-bobCh:
+	default:
+		t.Fatal("bob should wake")
+	}
+	select {
+	case <-carolCh:
+	default:
+		t.Fatal("carol should wake")
+	}
+}
+
 func TestUnsubStopsDelivery(t *testing.T) {
 	b := newTestBroker()
 	b.Sub("bob", "builds")
 	b.Unsub("bob", "builds")
-	_, n := b.Pub("alice", "builds", "green")
+	_, n, _ := b.Pub("alice", "builds", "green")
 	if n != 0 {
 		t.Fatalf("expected no deliveries after unsub, got %d", n)
 	}
