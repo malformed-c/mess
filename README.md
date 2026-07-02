@@ -147,7 +147,8 @@ mess register alice                  # join the network / set a mid-session iden
 mess rename alice2                    # rename yourself, keeping your inbox + subscriptions
 mess unregister                      # leave the network + clear this session's identity
 mess rm opus                         # remove another agent (e.g. a dead session)
-mess cleanup                         # prune agents idle >24h and not listening
+mess drain periapsis                 # clear another agent's stuck inbox (keeps it registered)
+mess cleanup                         # prune dead agents (idle >24h, or mail undrained >24h)
 mess cleanup 2h --dry-run            # ...custom age; preview without removing
 mess ps                              # who's around: status (listening/working),
                                      # queue depth + age of oldest unread, topics, state

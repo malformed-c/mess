@@ -34,6 +34,8 @@ Usage:
                                   you're next active; --ttl DUR, --clear)
   mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
   mess rm <agent>                 remove an agent (e.g. a dead session) from the network
+  mess drain <agent>              clear another agent's inbox (prints what was queued;
+                                  leaves the agent registered — for a stuck backlog)
   mess whoami                     print your resolved identity (empty if none)
   mess islistening                exit 0 if you have an active listener, else 1
   mess recv [duration]            receive queued messages
@@ -111,6 +113,8 @@ func main() {
 		err = cmdBusy(p, cmd, args)
 	case "rm":
 		err = cmdRm(p, args)
+	case "drain":
+		err = cmdDrain(p, args)
 	case "whoami":
 		err = cmdWhoami(p)
 	case "islistening":
@@ -498,6 +502,29 @@ func cmdBusy(p paths, op string, args []string) error {
 	}
 	_, err = call(p, req)
 	return err
+}
+
+// cmdDrain consumes (clears) another agent's inbox and prints what was there —
+// an operator tool to clear a stuck/dead agent's backlog. Unlike `rm` it leaves
+// the agent registered.
+func cmdDrain(p paths, args []string) error {
+	fs := flag.NewFlagSet("drain", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print messages as JSON lines")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess drain <agent>")
+	}
+	target := rest[0]
+	resp, err := call(p, Request{Op: "recv", As: target}) // non-blocking drain of target's inbox
+	if err != nil {
+		return err
+	}
+	printMessages(resp.Messages, *asJSON)
+	if !*asJSON {
+		fmt.Printf("drained %d message(s) from %s\n", resp.Count, target)
+	}
+	return nil
 }
 
 // cmdRm removes an agent from the network (its inbox, subscriptions, presence).

@@ -598,24 +598,32 @@ func (b *Broker) removeAgentLocked(name string) bool {
 	return true
 }
 
-// Cleanup prunes agents idle longer than maxAge — last active over maxAge ago
-// (or never seen) and not currently listening, so live/parked sessions are kept.
-// With dryRun it only reports who is eligible without removing anything. Returns
-// the affected agent names, sorted.
+// Cleanup prunes agents that look dead: not currently alive (not listening,
+// working, or active in the last couple of minutes) AND stale — either no
+// activity for longer than maxAge, or mail sitting undrained longer than maxAge.
+// The undrained-mail signal is restart-proof (message timestamps persist and
+// aren't reset), so it catches long-dead agents even when lastSeen was reset by
+// the load-time grace. With dryRun it only reports eligibility. Returns the
+// affected agent names, sorted.
 func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
 	var names []string
-	for name := range b.agents {
-		if b.listeners[name] > 0 {
-			continue // reachable right now — never prune
+	for name, a := range b.agents {
+		if b.aliveLocked(name) {
+			continue // online (listening / working / recently active) — keep
 		}
-		seen, ok := b.lastSeen[name]
-		if ok && now.Sub(seen) <= maxAge {
-			continue // active recently enough
+		stale := false
+		if seen, ok := b.lastSeen[name]; ok && now.Sub(seen) > maxAge {
+			stale = true // no activity for too long
 		}
-		names = append(names, name)
+		if len(a.inbox) > 0 && now.Sub(a.inbox[0].Time) > maxAge {
+			stale = true // mail undrained for too long — a dead session accumulating
+		}
+		if stale {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	if !dryRun && len(names) > 0 {

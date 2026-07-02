@@ -582,6 +582,25 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	}
 }
 
+func TestCleanupPrunesByStaleMail(t *testing.T) {
+	now := time.Unix(0, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	// "dead" never acts (no lastSeen) but has mail sitting in its inbox.
+	b.Send("peer", "dead", "old mail")
+	now = now.Add(48 * time.Hour) // the mail is now 48h old; dead is offline
+	removed := b.Cleanup(24*time.Hour, false)
+	found := false
+	for _, n := range removed {
+		if n == "dead" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("agent with 48h-old undrained mail should be pruned, got %v", removed)
+	}
+}
+
 func TestLastSeenPersists(t *testing.T) {
 	b := newTestBroker() // now fixed at Unix(0,0)
 	b.Register("bob")
