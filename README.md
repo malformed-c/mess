@@ -271,7 +271,10 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
     ],
     "PreToolUse": [
       { "hooks": [ { "type": "command",
-        "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess busy 2>/dev/null; true" } ] }
+        "command": "who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess busy 2>/dev/null; true" } ] },
+      { "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [ { "type": "command",
+          "command": "sh ~/.claude/hooks/mess-ask-notify.sh" } ] }
     ],
     "Stop": [
       { "hooks": [
@@ -328,6 +331,16 @@ What each piece does:
   so peers know. It deliberately does **not** try
   to re-arm the auto-wake: Claude Code ignores a `StopFailure` hook's exit code, so
   `asyncRewake` has no effect there (see the warning below).
+- **PreToolUse (matcher `AskUserQuestion|ExitPlanMode`) → desktop notify**:
+  [`hooks/mess-ask-notify.sh`](hooks/mess-ask-notify.sh) fires the moment an agent
+  presents a choices list or a plan for approval, since both are a hard block on
+  you that neither the wake nor steer hook would otherwise surface (neither is a
+  mess message). Scoped to just those two tools via the hook's `matcher`, so it
+  doesn't fire on every tool call like the other `PreToolUse` entry. Pulls the
+  first question's text (or the plan body) out of `tool_input` for the
+  notification, falling back to a generic line if the shape ever changes. Shares
+  `MESS_NO_NOTIFY` with the message-to-human notifier (one switch silences both),
+  and is a no-op for sessions without a mess identity.
 
 To wake a peer, just `mess send <them> "..."` — they wake at their next idle. Every
 hook is guarded by `mess whoami`, so a session launched without an identity does
