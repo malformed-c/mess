@@ -47,9 +47,27 @@ currently exposes distinguishes "a subagent's tool call" from "the top-level
 session's own tool call" — both get the same `CLAUDE_CODE_SESSION_ID` *and* the
 same `CLAUDE_CODE_CHILD_SESSION` marker.
 
+**Also tried: process-tree / PID-based detection — also a dead end.** Compared
+full process ancestry between a top-level Bash tool call and a subagent's Bash
+tool call (`ps`/`/proc/<pid>` walk up from `$$`). Both are direct children of
+the *exact same* `claude` process (identical PID at every level of the
+ancestry chain, e.g. `1902866` in one test run) — Claude Code runs subagents
+in-process and forks tool-execution children flatly, not as a separate process
+subtree per subagent. So there's no PID to bind identity to that distinguishes
+them either:
+- The `claude` process's own PID is identical for both parent and subagent —
+  same problem as the session id itself.
+- The immediate shell PID of each individual Bash tool call *is* different
+  per-call (confirmed: two different PIDs for a top-level call vs. a subagent
+  call) — but it's *also* different across the top-level session's own
+  successive Bash calls (each tool call appears to get a fresh shell process).
+  Binding identity to that PID would break identity persistence across a
+  session's own ordinary turns, not just fail to stop subagents.
+
 **Current status: unfixed.** There's no known way to close this from `mess`'s
-side without a distinguishing signal Claude Code doesn't currently provide. If
-you deliberately want a subagent to speak on `mess` as its own identity, use an
+side without a distinguishing signal Claude Code doesn't currently provide —
+neither environment variables nor process ancestry expose one. If you
+deliberately want a subagent to speak on `mess` as its own identity, use an
 explicit `--as <name>` or `MESS_AGENT=<name>` in its invocation rather than
 relying on ambient session-id resolution.
 
