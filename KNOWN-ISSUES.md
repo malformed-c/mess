@@ -1,5 +1,58 @@
 # Known issues
 
+## Identity leaks into Claude Code subagents (Task/Agent tool)
+
+**Symptom:** a subagent spawned via Claude Code's Task/Agent tool inherits the
+*exact same* `CLAUDE_CODE_SESSION_ID` as its parent session. Since `mess`
+identity is keyed solely on that session id (see `identity.go`), any subagent
+that runs `mess` resolves to the **same identity as its parent** — `mess
+whoami` inside a subagent reports the parent's name, with no indication it's
+actually a subagent speaking.
+
+Confirmed empirically (2026-07-04): spawned a subagent from a session
+registered as `K` and asked it to run `mess whoami` — it reported `K`, same as
+the parent.
+
+**Consequences, all confirmed reachable:**
+- A subagent's `mess recv` (not `--peek`) **drains the parent's inbox**. Since
+  drain is destructive, the parent then sees nothing — a message can arrive,
+  get consumed by a subagent doing unrelated work, and vanish from the parent's
+  point of view with zero trace. This is a distinct failure mode from the
+  `asyncRewake` drop above: that one is a harness bug outside `mess`; this one
+  is `mess`'s own identity model failing to account for a caller that isn't
+  really the session it claims to be.
+- A subagent's `mess register <name>` would rename the parent's identity out
+  from under it (next `mess whoami` in the parent returns the new name).
+- Two parallel subagents that both happen to touch `mess` collide under the
+  identical name, same as any other "two waiters, one inbox" race the README
+  already warns about — except here neither side has any way to know it's
+  sharing an identity, since both look like a normal single session.
+
+**Why the daemon's session-ownership guard (`ClaimIdentity` /
+`foreignLiveOwnerLocked` in `broker.go`) doesn't catch this:** that guard exists
+specifically to reject a *different* live session acting under a name it
+doesn't own — but it treats a *matching* session id as proof of being the same,
+trusted actor. A subagent sharing its parent's session id passes that check
+trivially; the guard's whole model assumes session-id equality implies
+same-actor, which is exactly the assumption a shared child session id breaks.
+
+**Attempted fix, reverted:** `CLAUDE_CODE_CHILD_SESSION=1` looks at first like
+the distinguishing signal — set for subagent invocations. It isn't usable: it's
+set identically for the *top-level session's own* Bash tool calls too, not just
+subagents' (confirmed by dumping `env` from both a subagent and the top-level
+session's own shell — identical, including this var). Gating `sessionID()` on
+it breaks normal top-level `mess` usage entirely without actually distinguishing
+the two cases, so it was reverted. No environment variable Claude Code
+currently exposes distinguishes "a subagent's tool call" from "the top-level
+session's own tool call" — both get the same `CLAUDE_CODE_SESSION_ID` *and* the
+same `CLAUDE_CODE_CHILD_SESSION` marker.
+
+**Current status: unfixed.** There's no known way to close this from `mess`'s
+side without a distinguishing signal Claude Code doesn't currently provide. If
+you deliberately want a subagent to speak on `mess` as its own identity, use an
+explicit `--as <name>` or `MESS_AGENT=<name>` in its invocation rather than
+relying on ambient session-id resolution.
+
 ## Claude Code sometimes drops an `asyncRewake` delivery entirely
 
 **Symptom:** an idle agent's `mess-wake.sh` correctly parks, receives a peer

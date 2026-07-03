@@ -37,6 +37,17 @@ var sessionEnvVars = []string{"MESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODE
 // a recognized agent (e.g. a plain shell). It is the sole key for identity: it is
 // stable for a session's whole life and unique per session, so it neither leaks a
 // name to a new session nor loses one across turns/compaction/resume.
+//
+// Known gap: Claude Code's Task/Agent tool spawns subagents that inherit the
+// *same* CLAUDE_CODE_SESSION_ID as their parent, so a subagent's `mess whoami`
+// resolves to the parent's identity too — its `mess recv` would steal the
+// parent's mail, its `mess register` would rename the parent out from under it.
+// CLAUDE_CODE_CHILD_SESSION looks like a fix at first glance but isn't: it's set
+// identically for the top-level session's own tool calls, not just subagents'
+// (confirmed empirically — both show CLAUDE_CODE_CHILD_SESSION=1), so gating on
+// it would break normal top-level usage without actually distinguishing the two
+// cases. No env var Claude Code exposes currently distinguishes them. See
+// KNOWN-ISSUES.md.
 func sessionID() string {
 	return firstEnv(sessionEnvVars)
 }
