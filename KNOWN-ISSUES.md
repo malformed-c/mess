@@ -58,14 +58,28 @@ different, working delivery path. This is *not* what happened to dwarf-main —
 there was no human input anywhere near its 106-second gap, and the daemon log
 shows the wake script reached full completion (not a stand-down).
 
-### Conclusion
+### Conclusion — confirmed upstream, root cause identified
 
-This looks like an intermittent bug in Claude Code's own `asyncRewake` handling
-— the harness occasionally fails to enqueue a `task-notification` for a
-background hook that exited correctly, with no corresponding error or trace on
-the Claude Code side. It's on the harness side, not in `mess`'s own code: the
-daemon-level mechanics (idle detection, park, wake, full drain) all worked
-exactly as designed.
+This matches a known (if under-reported) Claude Code bug:
+[anthropics/claude-code#39632](https://github.com/anthropics/claude-code/issues/39632),
+"stream-json: background-task notification doesn't wake idle session (race in
+`runAsyncAgentLifecycle`)". Traced there in v2.1.86-dev: `completeAgentTask()`
+flips the task to "completed" (so `hasRunningBg` reads false) *before*
+`enqueueAgentNotification()` runs — and two `await`s sit in between (a handoff
+classification and a worktree lookup). `runHeadlessStreaming`'s idle-poll loop
+checks `hasRunningBg || hasQueued` every 100ms; if a poll tick lands in that gap,
+it sees both false, exits the loop, and goes idle *before* the notification is
+enqueued. The later enqueue (priority `"later"`) does fire a queue-changed
+signal, but the stream-json handler only aborts idle for priority `"now"` — so
+it's never picked up until something else (a new user prompt) starts a fresh
+turn. A follow-up comment on that issue reports a **23% drop rate** (3/13) for
+async completions under concurrent load in a headless pipeline. The issue was
+closed only by a stale-bot for inactivity — never fixed.
+
+So: not a `mess` bug, not a race with a concurrent user prompt (ruled out
+separately below) — it's this exact upstream timing hole. The daemon-level
+mechanics (idle detection, park, wake, full drain) all worked exactly as
+designed on the `mess` side.
 
 ### Mitigation
 
