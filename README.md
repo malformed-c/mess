@@ -317,7 +317,10 @@ What each piece does:
   the woken turn's steer has nothing to re-announce. (If the harness ever drops
   the exit-2 injection, the consumed message is still recoverable with
   **`mess replay`** — a bounded per-agent history of recently-consumed messages —
-  so consume-on-wake stays recoverable rather than lossy.)
+  so consume-on-wake stays recoverable rather than lossy.) This isn't
+  theoretical — see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md) for a confirmed case of
+  Claude Code silently dropping an asyncRewake delivery despite the daemon and
+  hook script completing correctly.
   The **`"timeout": 86400`** is essential: Claude Code reaps a hook command at
   **600s (10 min) by default**, which would kill the parked waiter — and since
   nothing re-arms it until the next turn, the session would go silently deaf after
