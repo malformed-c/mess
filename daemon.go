@@ -376,9 +376,14 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return resp
 	case "broadcast":
-		_, n := b.Broadcast(who, req.Body)
-		notifyUser(req.As, "", req.Body)
-		elog("broadcast %s -> %d agent(s)", req.As, n)
+		_, n := b.Broadcast(who, req.Body, req.Loud)
+		if req.Loud {
+			notifyUserLoud(req.As, req.Body)
+			elog("broadcast %s -> %d agent(s) (loud)", req.As, n)
+		} else {
+			notifyUser(req.As, "", req.Body)
+			elog("broadcast %s -> %d agent(s)", req.As, n)
+		}
 		return Response{OK: true, Count: n}
 	case "pub":
 		_, delivered, woke := b.PubThreaded(who, topic, req.Body, req.ThreadID)

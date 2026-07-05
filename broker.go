@@ -495,12 +495,14 @@ func (b *Broker) CancelAck(id string) {
 // sender itself. from is a composite key (agentKey(room, name)); the room it
 // decomposes to is the scope — an agent in the global room broadcasts to the
 // rest of the global room, an agent in a joined room broadcasts only to that
-// room's other members.
-func (b *Broker) Broadcast(from, body string) (Message, int) {
+// room's other members. loud (mess broadcast --loud) marks the message so
+// wakes() wakes recipients even if their parked wake hook filters out
+// KindBroadcast (the standard auto-wake hook parks with --no-broadcast).
+func (b *Broker) Broadcast(from, body string, loud bool) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	room, fromName := splitAgentKey(from)
-	m := Message{ID: b.nextID(), From: fromName, Kind: KindBroadcast, Body: body, Time: b.now()}
+	m := Message{ID: b.nextID(), From: fromName, Kind: KindBroadcast, Body: body, Time: b.now(), Loud: loud}
 	b.touch(from)
 	n := 0
 	for key, a := range b.agents {
@@ -1003,10 +1005,11 @@ func matchKind(m Message, kinds map[string]bool) bool {
 	return kinds == nil || kinds[m.Kind]
 }
 
-// wakes reports whether a message should wake/notify its recipient: it matches
+// wakes reports whether a message should wake/notify its recipient: either
+// it's flagged Loud (an explicit override — see Message.Loud), or it matches
 // the kind filter and isn't a Quiet (non-mention) delivery.
 func wakes(m Message, kinds map[string]bool) bool {
-	return matchKind(m, kinds) && !m.Quiet
+	return m.Loud || (matchKind(m, kinds) && !m.Quiet)
 }
 
 // HasPending reports whether the agent has a queued message that should wake it

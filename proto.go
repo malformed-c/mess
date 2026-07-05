@@ -29,6 +29,14 @@ type Message struct {
 	// mid-turn steer notice.
 	Quiet bool `json:"quiet,omitempty"`
 
+	// Loud marks a message that must wake its recipient even if their parked
+	// wake hook is filtering out this Kind (the standard auto-wake hook parks
+	// with --no-broadcast, so a plain broadcast never actually wakes an idle
+	// agent through it — only a mid-turn steer notice or a manual recv sees
+	// it). Set via `mess broadcast --loud`. wakes() checks this before the
+	// kind filter, so it's a deliberate override for "this must be seen now."
+	Loud bool `json:"loud,omitempty"`
+
 	// ThreadID, when set, marks this message as a reply within a thread — its
 	// value is the thread root message's own ID (flat: replying to a reply still
 	// attaches to the same root). Empty means this message isn't part of a thread.
@@ -60,6 +68,7 @@ type Request struct {
 	Batch   string   `json:"batch,omitempty"`   // (recv --wait) coalesce a burst within this window
 	Session string   `json:"session,omitempty"` // host session id (stamped on every request), binds a name to its owning session
 	Force   bool     `json:"force,omitempty"`   // (register/rename/room join/bridge) take over a name/collision held by another live session
+	Loud    bool     `json:"loud,omitempty"`    // (broadcast) force a desktop notification to the human operator, regardless of @mention
 
 	Room string `json:"room,omitempty"` // room to act in ("" = global/default room)
 	All  bool   `json:"all,omitempty"`  // (ps) ignore Room, show every room

@@ -285,3 +285,30 @@ func TestDispatchThreadIDFlowsThroughPubAndRecv(t *testing.T) {
 		t.Fatalf("expected only the threaded reply, got %+v", threadOnly.Messages)
 	}
 }
+
+// req.Loud on "broadcast" both marks the delivered Message as Loud (verified
+// via the wake trigger, since dispatch doesn't expose Message directly) and
+// unconditionally pings the human operator, regardless of @mention.
+func TestDispatchBroadcastLoudWakesAndNotifies(t *testing.T) {
+	calls := mockNotifySend(t)
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.Register("bob")
+	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true}
+
+	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "quiet one"})
+	if d.broker.HasPending("bob", noBroadcast) {
+		t.Fatal("a plain broadcast must not satisfy a --no-broadcast wake trigger")
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("a plain, unmentioning broadcast must not notify the human: %v", *calls)
+	}
+	d.broker.DrainKinds("bob", false, 0, nil)
+
+	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "loud one", Loud: true})
+	if !d.broker.HasPending("bob", noBroadcast) {
+		t.Fatal("a --loud broadcast should satisfy the wake trigger even under --no-broadcast")
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("a --loud broadcast should notify the human unconditionally, got %v", *calls)
+	}
+}

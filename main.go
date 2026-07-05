@@ -20,7 +20,10 @@ Usage:
                                   (to "user" or your login name = the human's
                                   mailbox: desktop-notifies, read via recv --as user)
                                   (--thread ID replies within a thread)
-  mess broadcast [body...]        send to every known agent
+  mess broadcast [body...]        send to every known agent (plain broadcasts
+                                  don't wake the standard --no-broadcast auto-
+                                  wake hook; --loud bypasses that and also
+                                  desktop-notifies the human operator)
   mess pub <topic> [body...]      publish to a topic (@mention wakes only the
                                   tagged subscribers; the rest still receive it)
                                   (--thread ID replies within a thread — quiet
@@ -315,6 +318,7 @@ func cmdSend(p paths, args []string) error {
 
 func cmdBroadcast(p paths, args []string) error {
 	fs, as := newFlags("broadcast")
+	loud := fs.Bool("loud", false, "wake every recipient even if their auto-wake hook filters out broadcasts (--no-broadcast), and desktop-notify the human operator too")
 	parseAnywhere(fs, args)
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -324,7 +328,7 @@ func cmdBroadcast(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body})
+	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: *loud})
 	if err != nil {
 		return err
 	}

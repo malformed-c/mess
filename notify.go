@@ -83,6 +83,21 @@ func notifyUser(from, to, body string) {
 	desktopNotify(summary, body)
 }
 
+// notifyUserLoud unconditionally pings the human operator regardless of
+// whether the message mentions them — for a caller-flagged "make sure a human
+// sees this" broadcast (mess broadcast --loud), since a plain broadcast only
+// reaches other agents and easily gets missed for something significant
+// (e.g. a live daemon restart).
+func notifyUserLoud(from, body string) {
+	if !notifyEnabled {
+		return
+	}
+	if from == "" {
+		from = "someone"
+	}
+	desktopNotify(fmt.Sprintf("mess: %s broadcast (loud)", from), body)
+}
+
 // desktopNotify runs notify-send without blocking the daemon. A missing notifier
 // or display is skipped; a start error is logged at debug level. Delegates to the
 // overridable notifySend so tests can assert on calls without spawning a real

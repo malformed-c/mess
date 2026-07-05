@@ -68,7 +68,7 @@ func TestBroadcastExcludesSender(t *testing.T) {
 	b.Register("alice")
 	b.Register("bob")
 	b.Register("carol")
-	_, n := b.Broadcast("alice", "hello all")
+	_, n := b.Broadcast("alice", "hello all", false)
 	if n != 2 {
 		t.Fatalf("expected 2 recipients, got %d", n)
 	}
@@ -77,6 +77,33 @@ func TestBroadcastExcludesSender(t *testing.T) {
 	}
 	if got := b.Drain("bob", false, 0); len(got) != 1 || got[0].Kind != KindBroadcast {
 		t.Fatalf("bob should have broadcast: %+v", got)
+	}
+}
+
+// A plain broadcast doesn't satisfy a wake trigger that's filtered out
+// KindBroadcast (the standard auto-wake hook parks with --no-broadcast) --
+// --loud (Message.Loud) is the override that bypasses the kind filter.
+func TestLoudBroadcastBypassesKindFilter(t *testing.T) {
+	b := newTestBroker()
+	b.Register("bob")
+	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
+
+	b.Broadcast("alice", "quiet to a --no-broadcast waiter", false)
+	if b.HasPending("bob", noBroadcast) {
+		t.Fatal("a plain broadcast must not satisfy a --no-broadcast wake trigger")
+	}
+	b.Drain("bob", false, 0)
+
+	b.Broadcast("alice", "loud, should wake anyway", true)
+	if !b.HasPending("bob", noBroadcast) {
+		t.Fatal("a --loud broadcast should satisfy the wake trigger even under --no-broadcast")
+	}
+	ch := b.waitChan("bob", noBroadcast)
+	select {
+	case <-ch:
+		// expected: fires immediately since a loud broadcast is already pending
+	default:
+		t.Fatal("waitChan should fire immediately for a pending loud broadcast")
 	}
 }
 
@@ -269,7 +296,7 @@ func TestDrainKindsFiltersAndPreserves(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
 	b.Send("alice", "bob", "direct one")
-	b.Broadcast("alice", "shout") // bob is registered, receives it
+	b.Broadcast("alice", "shout", false) // bob is registered, receives it
 	b.Send("alice", "bob", "direct two")
 	// bob now has: direct, broadcast, direct (broadcast excludes sender alice)
 
@@ -291,7 +318,7 @@ func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	directOnly := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
 	// A broadcast alone must NOT satisfy a direct/topic wake trigger.
-	b.Broadcast("alice", "fyi")
+	b.Broadcast("alice", "fyi", false)
 	if b.HasPending("bob", directOnly) {
 		t.Fatal("a broadcast should not trigger a --no-broadcast waiter")
 	}
@@ -814,7 +841,7 @@ func TestBroadcastScopedToRoom(t *testing.T) {
 	b.Register(agentKey("A", "bob"))
 	b.Register(agentKey("B", "carol")) // different room, must not receive
 
-	_, n := b.Broadcast(agentKey("A", "alice"), "hello room A")
+	_, n := b.Broadcast(agentKey("A", "alice"), "hello room A", false)
 	if n != 1 {
 		t.Fatalf("expected 1 same-room recipient, got %d", n)
 	}
