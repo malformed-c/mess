@@ -1,9 +1,21 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+// TestMain replaces notifySend for the ENTIRE test binary run, not just the
+// tests in this file — any test in the package that exercises dispatch/send
+// (e.g. a daemon_test.go case sending to "user") would otherwise spawn a real
+// notify-send process. A real notify_test.go test that wants to assert on
+// calls still overrides notifySend itself (see mockNotifySend); this default
+// just no-ops instead of touching the OS.
+func TestMain(m *testing.M) {
+	notifySend = func(string, string) {}
+	os.Exit(m.Run())
+}
 
 func TestMatchesTargets(t *testing.T) {
 	targets := map[string]bool{"user": true, "engi": true}

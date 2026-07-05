@@ -498,13 +498,80 @@ func mentionsIn(body string) map[string]bool {
 	return set
 }
 
+// publishLocalLocked delivers m to every subscriber of the composite topic key
+// key except skip (the original sender; pass "" for a relay hop, where nobody
+// is skipped). isRelay forces every recipient to be quiet-delivered (no wake)
+// unless individually @mentioned — used for bridge relay hops, so a bridge
+// between two busy rooms can't become a wake-storm amplifier; a direct
+// (non-relay) publish keeps today's behavior (no mention -> wake everyone).
+// Returns the delivery/wake counts. Caller must hold b.mu.
+func (b *Broker) publishLocalLocked(key string, m Message, skip string, isRelay bool) (delivered, woke int) {
+	mentions := mentionsIn(m.Body)
+	for subKey := range b.topics[key] {
+		if subKey == skip {
+			continue
+		}
+		_, name := splitAgentKey(subKey)
+		a := b.ensure(subKey)
+		switch {
+		case len(mentions) > 0 && mentions[name]:
+			a.deliver(m) // wake: explicitly mentioned
+			woke++
+		case isRelay || len(mentions) > 0:
+			a.deliverQuiet(m) // relay hop, or an unmentioned subscriber of a mentioning publish
+		default:
+			a.deliver(m) // no mentions at all: wake everyone, as before
+			woke++
+		}
+		delivered++
+	}
+	return delivered, woke
+}
+
+// maxBridgeHops hard-caps how far a single publish can relay across a chain of
+// bridges, even if the visited-set cycle guard below ever has a bug.
+const maxBridgeHops = 8
+
+// relayLocked walks every bridge touching the composite topic key, delivering
+// m to the far side (stamping bridge provenance) and recursing so a publish
+// can cross a chain of bridges (A<->B<->C), not just one hop. visited prevents
+// re-entering a topic already hit by this publish, so a cycle (A<->B<->A)
+// can't ping-pong forever. Every relay hop is quiet-delivered (see
+// publishLocalLocked's isRelay) unless individually @mentioned. Caller must
+// hold b.mu.
+func (b *Broker) relayLocked(key string, m Message, visited map[string]bool, depth int) {
+	if depth >= maxBridgeHops {
+		elog("bridge relay: hop cap reached for message %s at %s, stopping (possible cycle)", m.ID, key)
+		return
+	}
+	for _, br := range b.bridgesByTopic[key] {
+		if br.expired(b.now()) {
+			continue
+		}
+		other, ok := br.otherSide(key)
+		if !ok || visited[other] {
+			continue
+		}
+		visited[other] = true
+		rm := m
+		rm.BridgeID = br.id
+		if rm.OriginTopic == "" { // stamp true origin only once, at the first hop
+			rm.OriginRoom, rm.OriginTopic = splitTopicKey(key)
+		}
+		b.publishLocalLocked(other, rm, "", true)
+		b.relayLocked(other, rm, visited, depth+1)
+	}
+}
+
 // Pub delivers to every subscriber of a topic except the sender, and returns the
 // delivery count and how many were *woken*. If the body @-mentions subscribers,
 // only the mentioned ones are woken (the rest still receive it, read on their
 // next recv); with no mentions, everyone is woken as before. from/topic are
 // composite keys (agentKey/topicKey(room, ...)); b.topics[topic]'s subscriber
 // set holds composite agent keys too, since every subscriber of a room-scoped
-// topic is necessarily a member of that same room.
+// topic is necessarily a member of that same room. Also relays to any bridged
+// topic (possibly in another room) — see relayLocked; the returned
+// delivered/woke counts cover only the direct local audience, not relay hops.
 func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -512,21 +579,8 @@ func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) 
 	_, topicName := splitAgentKey(topic)
 	m = Message{ID: b.nextID(), From: fromName, Topic: topicName, Kind: KindTopic, Body: body, Time: b.now()}
 	b.touch(from)
-	mentions := mentionsIn(body)
-	for key := range b.topics[topic] {
-		if key == from {
-			continue
-		}
-		_, name := splitAgentKey(key)
-		a := b.ensure(key)
-		if len(mentions) == 0 || mentions[name] {
-			a.deliver(m) // wake
-			woke++
-		} else {
-			a.deliverQuiet(m) // queue, don't wake
-		}
-		delivered++
-	}
+	delivered, woke = b.publishLocalLocked(topic, m, from, false)
+	b.relayLocked(topic, m, map[string]bool{topic: true}, 0)
 	b.changed()
 	return m, delivered, woke
 }
@@ -561,6 +615,122 @@ func (b *Broker) Unsub(name, topic string) {
 		}
 	}
 	b.changed()
+}
+
+// maxBridges caps the number of live bridges, guarding against runaway
+// creation; --force bypasses it for the rare legitimate case.
+const maxBridges = 200
+
+func (b *Broker) nextBridgeID() string {
+	b.seq++
+	return fmt.Sprintf("br%d", b.seq)
+}
+
+// findBridgeLocked returns an existing bridge between composite topic keys a
+// and b with the given direction, if any (creation is idempotent unless
+// force). Caller must hold b.mu.
+func (b *Broker) findBridgeLocked(a, bKey string, dir bridgeDirection) *bridge {
+	for _, br := range b.bridges {
+		if br.dir == dir && ((br.a == a && br.b == bKey) || (br.a == bKey && br.b == a)) {
+			return br
+		}
+	}
+	return nil
+}
+
+// Bridge links localRoom/localTopic to remoteRoom/remoteTopic so a publish to
+// either side also relays to subscribers on the other (see relayLocked) — the
+// explicit escape hatch for cross-room coordination now that topics are
+// room-scoped. Creation is idempotent (returns the existing bridge) unless
+// force, which also bypasses the maxBridges cap. Every creation is logged
+// loudly (elog, never hidden by MESS_DEBUG) since a bridge crosses an
+// otherwise-hard isolation boundary and there's no consent from the far room
+// to gate on — audit visibility (mess room bridges, ps's Bridged field) is the
+// mitigation instead.
+func (b *Broker) Bridge(localRoom, localTopic, remoteRoom, remoteTopic string, dir bridgeDirection, creator string, ttl time.Duration, force bool) (*bridge, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ak, bk := topicKey(localRoom, localTopic), topicKey(remoteRoom, remoteTopic)
+	if ak == bk {
+		return nil, fmt.Errorf("cannot bridge a topic to itself")
+	}
+	if !force {
+		if existing := b.findBridgeLocked(ak, bk, dir); existing != nil {
+			return existing, nil // idempotent
+		}
+		if len(b.bridges) >= maxBridges {
+			return nil, fmt.Errorf("bridge limit reached (%d); pass --force or unbridge an unused one", maxBridges)
+		}
+	}
+	id := b.nextBridgeID()
+	br := &bridge{
+		id: id, a: ak, b: bk,
+		aRoom: localRoom, aTopic: localTopic, bRoom: remoteRoom, bTopic: remoteTopic,
+		dir: dir, creator: creator, createdAt: b.now(),
+	}
+	if ttl > 0 {
+		br.expiresAt = b.now().Add(ttl)
+	}
+	b.bridges[id] = br
+	b.bridgesByTopic[ak] = append(b.bridgesByTopic[ak], br)
+	b.bridgesByTopic[bk] = append(b.bridgesByTopic[bk], br)
+	b.changed()
+	elog("BRIDGE created: id=%s creator=%s %s <-%s-> %s", id, creator, ak, br.dir.String(), bk)
+	return br, nil
+}
+
+// Unbridge tears down a bridge by ID. Unilateral and idempotent, like
+// unregister/rm — knowing a bridge's ID already means it was learned about
+// through the audit surface (mess room bridges / ps). Returns false (no
+// error) for an unknown ID.
+func (b *Broker) Unbridge(id string) (bool, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	br, ok := b.bridges[id]
+	if !ok {
+		return false, ""
+	}
+	delete(b.bridges, id)
+	b.bridgesByTopic[br.a] = removeBridge(b.bridgesByTopic[br.a], br)
+	b.bridgesByTopic[br.b] = removeBridge(b.bridgesByTopic[br.b], br)
+	if len(b.bridgesByTopic[br.a]) == 0 {
+		delete(b.bridgesByTopic, br.a)
+	}
+	if len(b.bridgesByTopic[br.b]) == 0 {
+		delete(b.bridgesByTopic, br.b)
+	}
+	desc := fmt.Sprintf("%s <-%s-> %s", br.a, br.dir.String(), br.b)
+	b.changed()
+	return true, desc
+}
+
+func removeBridge(list []*bridge, target *bridge) []*bridge {
+	out := list[:0]
+	for _, br := range list {
+		if br != target {
+			out = append(out, br)
+		}
+	}
+	return out
+}
+
+// ListBridges reports every live (non-expired) bridge, sorted by ID.
+func (b *Broker) ListBridges() []BridgeInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	var out []BridgeInfo
+	for _, br := range b.bridges {
+		if br.expired(now) {
+			continue
+		}
+		out = append(out, BridgeInfo{
+			ID: br.id, ARoom: br.aRoom, ATopic: br.aTopic, BRoom: br.bRoom, BTopic: br.bTopic,
+			Direction: br.dir.String(), Creator: br.creator, CreatedAt: br.createdAt, ExpiresAt: br.expiresAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // Drain returns queued messages for an agent. With peek, messages are left in
@@ -837,6 +1007,30 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 			b.removeAgentLocked(key)
 		}
 		b.changed()
+	}
+
+	// Opportunistically sweep expired bridges (opt-in via --ttl; most never
+	// expire). relayLocked already skips an expired bridge lazily, so this is
+	// housekeeping, not a correctness fix — just avoids unbounded growth of the
+	// bridges map from a long-running daemon accumulating short-lived bridges.
+	if !dryRun {
+		var expiredIDs []string
+		for id, br := range b.bridges {
+			if br.expired(now) {
+				expiredIDs = append(expiredIDs, id)
+			}
+		}
+		if len(expiredIDs) > 0 {
+			sort.Strings(expiredIDs)
+			for _, id := range expiredIDs {
+				br := b.bridges[id]
+				delete(b.bridges, id)
+				b.bridgesByTopic[br.a] = removeBridge(b.bridgesByTopic[br.a], br)
+				b.bridgesByTopic[br.b] = removeBridge(b.bridgesByTopic[br.b], br)
+			}
+			elog("cleanup swept %d expired bridge(s): %v", len(expiredIDs), expiredIDs)
+			b.changed()
+		}
 	}
 	return names
 }

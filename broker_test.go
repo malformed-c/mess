@@ -983,3 +983,23 @@ func TestLoadLegacySnapshotTopicsMapMigrates(t *testing.T) {
 		t.Fatalf("legacy topic not loaded: %+v", topics)
 	}
 }
+
+// --- bridges (smoke test; full coverage lives in task 6's test additions) ---
+
+func TestBridgeRelaysToOtherRoomTopic(t *testing.T) {
+	b := newTestBroker()
+	b.Sub(agentKey("A", "alice"), topicKey("A", "deploy"))
+	b.Sub(agentKey("B", "bob"), topicKey("B", "ops"))
+
+	if _, err := b.Bridge("A", "deploy", "B", "ops", bridgeBoth, "alice", 0, false); err != nil {
+		t.Fatalf("bridge creation failed: %v", err)
+	}
+	_, delivered, _ := b.Pub(agentKey("A", "alice"), topicKey("A", "deploy"), "shipping v2")
+	if delivered != 0 {
+		t.Fatalf("no other local subscriber in room A, expected 0 direct deliveries, got %d", delivered)
+	}
+	got := b.Drain(agentKey("B", "bob"), false, 0)
+	if len(got) != 1 || got[0].Body != "shipping v2" || got[0].OriginRoom != "A" || got[0].OriginTopic != "deploy" {
+		t.Fatalf("bridge did not relay correctly: %+v", got)
+	}
+}
