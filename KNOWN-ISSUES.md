@@ -1,5 +1,53 @@
 # Known issues
 
+## An orphaned wake-hook process can make a dead session look falsely online
+
+**Symptom:** `mess ps` reports an agent `online`/`listening` (or `working`) long
+after its actual Claude Code session has exited — the human sees the terminal
+is gone, but mess still thinks the agent is reachable.
+
+**Confirmed (2026-07-05):** `breeze-notify-test` showed `online working` in
+`mess ps` after its session had already ended. The parked wake process was
+still alive and holding its lock:
+
+```
+ps ancestry for the parked `flock ... mess recv --wait` process:
+  flock (2697367) -> sh mess-wake.sh (2697364) -> sh (2697345) -> systemd --user (1025)
+```
+
+No `claude` process anywhere in that chain — it's been reparented straight to
+the user's systemd, i.e. orphaned. The actual session died (crash, killed
+terminal, etc.) without a clean `Stop` event, so nothing ever killed its
+`asyncRewake` background hook (`mess-wake.sh`'s parked `mess recv --wait`
+child). That process is independent of the parent once spawned, so it keeps
+running, keeps holding the flock, and keeps parking/waking on `mess recv
+--wait` — with nothing behind it to actually receive or act on an injection
+even if a message arrives (there's no live Claude Code turn to inject into).
+
+Separately, `Working` can also read stale: `mess busy` defaults to a **1 hour**
+backstop TTL (`cmdBusy` in `main.go`), refreshed on every `UserPromptSubmit`/
+`PreToolUse`. If a session dies without the `Stop`-hook's `mess unbusy` firing,
+`busyUntil` stays in the future for up to an hour, and `aliveLocked` treats
+"busy in the future" as alive — so a genuinely dead session can show `working`
+for up to an hour with no process behind it at all, independent of the orphaned
+wake-process issue above.
+
+**Why this happens:** there's no `SessionEnd` hook wired up (only `SessionStart`,
+`UserPromptSubmit`, `PreToolUse`, `Stop`, `StopFailure` — see the README's hooks
+section), so an unclean exit (closed terminal, crash, kill) never runs `mess
+unregister`/`mess unbusy`. `aliveLocked` (`broker.go`) has three ways to call an
+agent alive — `listeners[name] > 0`, `busyUntil` in the future, or `lastSeen`
+within 2 minutes — and an orphaned wake process or a not-yet-expired busy TTL
+each independently satisfy one of those with nothing real behind it.
+
+**Current status: unfixed.** No code changes made. Possible directions (not
+attempted): a `SessionEnd` hook that best-effort `unregister`s/`unbusy`s; having
+`mess-wake.sh` periodically verify its own parent is still a live `claude`
+process and self-exit if not; or a real liveness probe (PID-based, per the
+"harden identity" discussion above) instead of the current listening/busy/
+lastSeen heuristic. `mess rm`/`cleanup` already exist as a manual remedy once
+noticed.
+
 ## Identity leaks into Claude Code subagents (Task/Agent tool)
 
 **Symptom:** a subagent spawned via Claude Code's Task/Agent tool inherits the
