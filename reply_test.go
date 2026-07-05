@@ -81,6 +81,26 @@ func TestUpdateLastMsgSkipsBroadcastsAndPicksNewest(t *testing.T) {
 	}
 }
 
+// If the newest message is itself a threaded reply, updateLastMsg must target
+// the thread's root — not the reply's own ID — so a further `mess reply` stays
+// flat under the same root instead of spawning a reply-to-a-reply sub-thread.
+func TestUpdateLastMsgTargetsThreadRootNotReplyID(t *testing.T) {
+	t.Setenv("MESS_DIR", t.TempDir())
+	clearSessionEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-5")
+	p := resolvePaths()
+
+	msgs := []Message{
+		{ID: "m5", Kind: KindTopic, Topic: "eng", From: "alice"},                 // root
+		{ID: "m6", Kind: KindTopic, Topic: "eng", From: "alice", ThreadID: "m5"}, // reply
+	}
+	updateLastMsg(p, msgs)
+	got, ok := readLastMsg(p)
+	if !ok || got.ID != "m5" {
+		t.Fatalf("expected the thread root m5, got %+v ok=%v", got, ok)
+	}
+}
+
 // If the newest message is a broadcast, updateLastMsg falls back to the
 // newest non-broadcast one instead of recording nothing.
 func TestUpdateLastMsgFallsBackPastTrailingBroadcast(t *testing.T) {

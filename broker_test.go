@@ -68,7 +68,7 @@ func TestBroadcastExcludesSender(t *testing.T) {
 	b.Register("alice")
 	b.Register("bob")
 	b.Register("carol")
-	_, n := b.Broadcast("alice", "hello all", false)
+	_, n := b.Broadcast("alice", "hello all", false, false)
 	if n != 2 {
 		t.Fatalf("expected 2 recipients, got %d", n)
 	}
@@ -88,13 +88,13 @@ func TestLoudBroadcastBypassesKindFilter(t *testing.T) {
 	b.Register("bob")
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
-	b.Broadcast("alice", "quiet to a --no-broadcast waiter", false)
+	b.Broadcast("alice", "quiet to a --no-broadcast waiter", false, false)
 	if b.HasPending("bob", noBroadcast) {
 		t.Fatal("a plain broadcast must not satisfy a --no-broadcast wake trigger")
 	}
 	b.Drain("bob", false, 0)
 
-	b.Broadcast("alice", "loud, should wake anyway", true)
+	b.Broadcast("alice", "loud, should wake anyway", true, false)
 	if !b.HasPending("bob", noBroadcast) {
 		t.Fatal("a --loud broadcast should satisfy the wake trigger even under --no-broadcast")
 	}
@@ -296,7 +296,7 @@ func TestDrainKindsFiltersAndPreserves(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
 	b.Send("alice", "bob", "direct one")
-	b.Broadcast("alice", "shout", false) // bob is registered, receives it
+	b.Broadcast("alice", "shout", false, false) // bob is registered, receives it
 	b.Send("alice", "bob", "direct two")
 	// bob now has: direct, broadcast, direct (broadcast excludes sender alice)
 
@@ -318,7 +318,7 @@ func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	directOnly := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
 	// A broadcast alone must NOT satisfy a direct/topic wake trigger.
-	b.Broadcast("alice", "fyi", false)
+	b.Broadcast("alice", "fyi", false, false)
 	if b.HasPending("bob", directOnly) {
 		t.Fatal("a broadcast should not trigger a --no-broadcast waiter")
 	}
@@ -841,7 +841,7 @@ func TestBroadcastScopedToRoom(t *testing.T) {
 	b.Register(agentKey("A", "bob"))
 	b.Register(agentKey("B", "carol")) // different room, must not receive
 
-	_, n := b.Broadcast(agentKey("A", "alice"), "hello room A", false)
+	_, n := b.Broadcast(agentKey("A", "alice"), "hello room A", false, false)
 	if n != 1 {
 		t.Fatalf("expected 1 same-room recipient, got %d", n)
 	}
@@ -850,6 +850,39 @@ func TestBroadcastScopedToRoom(t *testing.T) {
 	}
 	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
 		t.Fatalf("a different room must not leak the broadcast: %+v", got)
+	}
+}
+
+func TestLoudHostWideBroadcastCrossesRooms(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Register(agentKey("A", "bob"))
+	b.Register(agentKey("B", "carol"))
+
+	// Plain --loud (not --loud-room) sets hostWide: true and must reach every
+	// room, unlike an ordinary or --loud-room broadcast (TestBroadcastScopedToRoom).
+	_, n := b.Broadcast(agentKey("A", "alice"), "restarting the daemon", true, true)
+	if n != 2 {
+		t.Fatalf("expected 2 host-wide recipients (bob + carol), got %d", n)
+	}
+	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 1 || !got[0].Loud {
+		t.Fatalf("carol in a different room should still receive a host-wide loud broadcast: %+v", got)
+	}
+}
+
+func TestLoudRoomBroadcastStaysRoomScoped(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Register(agentKey("A", "bob"))
+	b.Register(agentKey("B", "carol"))
+
+	// --loud-room: loud, but hostWide stays false, so it must NOT cross rooms.
+	_, n := b.Broadcast(agentKey("A", "alice"), "loud but room-scoped", true, false)
+	if n != 1 {
+		t.Fatalf("expected 1 same-room recipient, got %d", n)
+	}
+	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
+		t.Fatalf("--loud-room must not leak across rooms: %+v", got)
 	}
 }
 
@@ -1347,5 +1380,82 @@ func TestExportTopicSnapshotRoundTripSurvivesNoSubscribers(t *testing.T) {
 		if top.Name == "eng" && len(top.Subscribers) != 0 {
 			t.Fatalf("restored topic should have zero subscribers, got %+v", top)
 		}
+	}
+}
+
+// --- thread list ---
+
+func TestListThreadsSummarizesTopicThread(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("alice", "eng")
+	b.Sub("bob", "eng")
+	root, _, _ := b.Pub("alice", "eng", "root message")
+	b.PubThreaded("alice", "eng", "reply one", root.ID)
+	b.Pub("alice", "eng", "unrelated message") // must not appear as its own thread
+	b.PubThreaded("alice", "eng", "reply two", root.ID)
+
+	got := b.ListThreads("bob")
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 thread, got %d: %+v", len(got), got)
+	}
+	th := got[0]
+	if th.ID != root.ID || th.Kind != KindTopic || th.Topic != "eng" || th.RootBody != "root message" {
+		t.Fatalf("unexpected thread summary: %+v", th)
+	}
+	if th.Replies != 2 {
+		t.Fatalf("expected 2 replies, got %d: %+v", th.Replies, th)
+	}
+}
+
+func TestListThreadsSummarizesDirectThread(t *testing.T) {
+	b := newTestBroker()
+	root, err := b.Send("alice", "bob", "root dm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The root itself has no ThreadID; make it discoverable as a thread by
+	// having a reply reference its own ID, exactly like `mess reply` does.
+	if _, err := b.SendThreaded("alice", "bob", "a reply", root.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	got := b.ListThreads("bob")
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 thread, got %d: %+v", len(got), got)
+	}
+	th := got[0]
+	if th.Kind != KindDirect || th.Peer != "alice" || th.Replies != 1 {
+		t.Fatalf("unexpected direct thread summary: %+v", th)
+	}
+}
+
+func TestListThreadsEmptyWhenNoThreadsSeen(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("bob", "eng")
+	b.Pub("alice", "eng", "just a plain message")
+
+	if got := b.ListThreads("bob"); len(got) != 0 {
+		t.Fatalf("expected no threads, got %+v", got)
+	}
+}
+
+func TestListThreadsOrdersByMostRecentActivity(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Sub("bob", "eng")
+	rootOld, _, _ := b.Pub("alice", "eng", "old root")
+	b.PubThreaded("alice", "eng", "old reply", rootOld.ID)
+
+	now = time.Unix(2000, 0)
+	rootNew, _, _ := b.Pub("alice", "eng", "new root")
+	b.PubThreaded("alice", "eng", "new reply", rootNew.ID)
+
+	got := b.ListThreads("bob")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 threads, got %d: %+v", len(got), got)
+	}
+	if got[0].ID != rootNew.ID {
+		t.Fatalf("expected most-recently-active thread first, got %+v", got)
 	}
 }

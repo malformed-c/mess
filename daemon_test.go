@@ -312,3 +312,43 @@ func TestDispatchBroadcastLoudWakesAndNotifies(t *testing.T) {
 		t.Fatalf("a --loud broadcast should notify the human unconditionally, got %v", *calls)
 	}
 }
+
+// req.HostWide (plain `mess broadcast --loud`, as opposed to --loud-room)
+// crosses room boundaries; without it a loud broadcast still stays room-scoped.
+func TestDispatchBroadcastHostWideCrossesRooms(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.Register(agentKey("A", "alice"))
+	d.broker.Register(agentKey("B", "carol"))
+
+	resp := d.dispatch(Request{Op: "broadcast", As: agentKey("A", "alice"), Body: "room-scoped loud", Loud: true})
+	if resp.Count != 0 {
+		t.Fatalf("--loud-room (HostWide false) must not cross rooms, got count %d", resp.Count)
+	}
+
+	resp = d.dispatch(Request{Op: "broadcast", As: agentKey("A", "alice"), Body: "host-wide loud", Loud: true, HostWide: true})
+	if resp.Count != 1 {
+		t.Fatalf("--loud should reach carol in room B, got count %d", resp.Count)
+	}
+}
+
+func TestDispatchThreadList(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.dispatch(Request{Op: "sub", As: "bob", Topic: "eng"})
+	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "root message"})
+
+	msgs := d.broker.DrainKinds("bob", true, 0, nil) // peek: leave it queued for thread-list to see too
+	if len(msgs) != 1 {
+		t.Fatalf("expected bob to have received the root, got %+v", msgs)
+	}
+	rootID := msgs[0].ID
+	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "a reply", ThreadID: rootID})
+
+	resp := d.dispatch(Request{Op: "thread-list", As: "bob"})
+	if !resp.OK || len(resp.Threads) != 1 {
+		t.Fatalf("expected exactly 1 thread, got %+v", resp)
+	}
+	th := resp.Threads[0]
+	if th.ID != rootID || th.Topic != "eng" || th.Replies != 1 {
+		t.Fatalf("unexpected thread summary: %+v", th)
+	}
+}

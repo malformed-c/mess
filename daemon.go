@@ -307,7 +307,7 @@ func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
 		"busy", "unbusy", "recv", "listen", "replay", "unregister", "room-leave",
-		"bridge", "unbridge", "export":
+		"bridge", "unbridge", "export", "thread-list":
 		return true
 	}
 	return false
@@ -376,10 +376,14 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return resp
 	case "broadcast":
-		_, n := b.Broadcast(who, req.Body, req.Loud)
+		_, n := b.Broadcast(who, req.Body, req.Loud, req.HostWide)
 		if req.Loud {
 			notifyUserLoud(req.As, req.Body)
-			elog("broadcast %s -> %d agent(s) (loud)", req.As, n)
+			if req.HostWide {
+				elog("broadcast %s -> %d agent(s) (loud, host-wide)", req.As, n)
+			} else {
+				elog("broadcast %s -> %d agent(s) (loud)", req.As, n)
+			}
 		} else {
 			notifyUser(req.As, "", req.Body)
 			elog("broadcast %s -> %d agent(s)", req.As, n)
@@ -447,6 +451,9 @@ func (d *daemon) dispatch(req Request) Response {
 			return Response{Error: "export requires --topic, --thread, or --to"}
 		}
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
+	case "thread-list":
+		threads := b.ListThreads(who)
+		return Response{OK: true, Threads: threads, Count: len(threads)}
 	case "state":
 		b.SetState(who, req.Body)
 		return Response{OK: true}

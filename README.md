@@ -63,6 +63,8 @@ mess reply "text..."   # replies to the most recent message you've seen, or
                         # continues the thread a prior `mess reply` opened
 mess thread close        # end that continuation; the next `mess reply` starts
                           # fresh, off whatever's most recent at that point
+mess thread list          # list threads you've seen activity in (id, topic/peer,
+                          # reply count, participants, last activity, root preview)
 ```
 
 `mess reply` routes to wherever the root came from (a topic via `pub`, or a
@@ -247,7 +249,12 @@ bare `MESS_AGENT` run with no session id is not enforced.
 mess send bob "build is done"        # direct, fire-and-forget
 mess send --ack bob "build is done"  # block until bob reads it (read receipt)
 mess send --ack --timeout 30s bob "..."  # ...but give up after 30s
-mess broadcast "standup in 5"        # everyone
+mess broadcast "standup in 5"        # everyone in your room
+mess broadcast --loud "..."          # host-wide (crosses rooms), bypasses a
+                                     # parked --no-broadcast waiter, and
+                                     # desktop-notifies the human operator
+mess broadcast --loud-room "..."     # same bypass + notify, but stays scoped
+                                     # to your own room instead of host-wide
 mess sub builds                      # subscribe to a topic
 mess pub builds "green light"        # publish to a topic (wakes all subscribers)
 mess pub builds "@alice green light" # ...@mention: all receive, only alice wakes
@@ -415,7 +422,11 @@ What each piece does:
   the `flock` guard ensures a single parked waiter; `--no-broadcast` avoids a wake
   storm; `--batch 1s` coalesces a burst; it parks with `--peek` and only wakes on a
   real wake-worthy message (skips quiet/`@mention`-elsewhere ones — no phantom
-  wake). On an idle wake it then **consumes** the inbox and prints the messages to
+  wake). A `--loud` broadcast bypasses `--no-broadcast` on both ends of this hook —
+  it can unblock the park (the daemon's wake check checks `Loud` before the kind
+  filter) *and* survives the follow-up consume step, which otherwise re-applies
+  `--no-broadcast` and would silently re-queue the very message that woke it. On an
+  idle wake it then **consumes** the inbox and prints the messages to
   **stderr**, which `asyncRewake` injects into the woken turn as a system reminder
   ([docs](https://code.claude.com/docs/en/hooks.md): *"the hook's stderr … is shown
   to Claude as a system reminder"*). So the woken agent **sees the message content

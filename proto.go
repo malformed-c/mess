@@ -54,21 +54,22 @@ type Message struct {
 
 // Request is one command sent from a client to the daemon.
 type Request struct {
-	Op      string   `json:"op"`
-	As      string   `json:"as,omitempty"`      // identity of the calling agent
-	To      string   `json:"to,omitempty"`      // direct recipient
-	Topic   string   `json:"topic,omitempty"`   // topic for pub/sub
-	Body    string   `json:"body,omitempty"`    // message body
-	Ack     bool     `json:"ack,omitempty"`     // (send) block until recipient reads it
-	Wait    bool     `json:"wait,omitempty"`    // block until a message arrives
-	Timeout string   `json:"timeout,omitempty"` // optional wait timeout (duration); also (room bridge) the TTL duration
-	Peek    bool     `json:"peek,omitempty"`    // recv without consuming
-	Max     int      `json:"max,omitempty"`     // recv at most N messages (0 = all)
-	Kinds   []string `json:"kinds,omitempty"`   // recv only these kinds (nil = all)
-	Batch   string   `json:"batch,omitempty"`   // (recv --wait) coalesce a burst within this window
-	Session string   `json:"session,omitempty"` // host session id (stamped on every request), binds a name to its owning session
-	Force   bool     `json:"force,omitempty"`   // (register/rename/room join/bridge) take over a name/collision held by another live session
-	Loud    bool     `json:"loud,omitempty"`    // (broadcast) force a desktop notification to the human operator, regardless of @mention
+	Op       string   `json:"op"`
+	As       string   `json:"as,omitempty"`       // identity of the calling agent
+	To       string   `json:"to,omitempty"`       // direct recipient
+	Topic    string   `json:"topic,omitempty"`    // topic for pub/sub
+	Body     string   `json:"body,omitempty"`     // message body
+	Ack      bool     `json:"ack,omitempty"`      // (send) block until recipient reads it
+	Wait     bool     `json:"wait,omitempty"`     // block until a message arrives
+	Timeout  string   `json:"timeout,omitempty"`  // optional wait timeout (duration); also (room bridge) the TTL duration
+	Peek     bool     `json:"peek,omitempty"`     // recv without consuming
+	Max      int      `json:"max,omitempty"`      // recv at most N messages (0 = all)
+	Kinds    []string `json:"kinds,omitempty"`    // recv only these kinds (nil = all)
+	Batch    string   `json:"batch,omitempty"`    // (recv --wait) coalesce a burst within this window
+	Session  string   `json:"session,omitempty"`  // host session id (stamped on every request), binds a name to its owning session
+	Force    bool     `json:"force,omitempty"`    // (register/rename/room join/bridge) take over a name/collision held by another live session
+	Loud     bool     `json:"loud,omitempty"`     // (broadcast) force a desktop notification to the human operator, regardless of @mention
+	HostWide bool     `json:"hostWide,omitempty"` // (broadcast --loud) skip room scoping, reach every room on the host
 
 	Room string `json:"room,omitempty"` // room to act in ("" = global/default room)
 	All  bool   `json:"all,omitempty"`  // (ps) ignore Room, show every room
@@ -117,6 +118,19 @@ type BridgeInfo struct {
 	ExpiresAt time.Time `json:"expiresAt,omitzero"` // zero = never
 }
 
+// ThreadInfo summarizes one thread from a calling agent's own received view
+// (see ListThreads) — the root message plus whatever replies it has seen.
+type ThreadInfo struct {
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"`            // direct | topic
+	Topic        string    `json:"topic,omitempty"` // set for a topic thread
+	Peer         string    `json:"peer,omitempty"`  // set for a direct thread: the other party
+	RootBody     string    `json:"rootBody,omitempty"`
+	Replies      int       `json:"replies"`      // replies seen, not counting the root
+	Participants int       `json:"participants"` // total known posters, server-wide
+	LastActivity time.Time `json:"lastActivity"`
+}
+
 // Response is the daemon's reply to a Request.
 type Response struct {
 	OK       bool         `json:"ok"`
@@ -126,6 +140,7 @@ type Response struct {
 	Agents   []AgentInfo  `json:"agents,omitempty"`
 	Topics   []TopicInfo  `json:"topics,omitempty"`
 	Bridges  []BridgeInfo `json:"bridges,omitempty"`
+	Threads  []ThreadInfo `json:"threads,omitempty"`
 	Count    int          `json:"count,omitempty"`
 	Removed  []string     `json:"removed,omitempty"` // (cleanup) agents pruned (or, with dry-run, eligible)
 }

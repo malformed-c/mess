@@ -20,10 +20,12 @@ Usage:
                                   (to "user" or your login name = the human's
                                   mailbox: desktop-notifies, read via recv --as user)
                                   (--thread ID replies within a thread)
-  mess broadcast [body...]        send to every known agent (plain broadcasts
-                                  don't wake the standard --no-broadcast auto-
-                                  wake hook; --loud bypasses that and also
-                                  desktop-notifies the human operator)
+  mess broadcast [body...]        send to every known agent in your room (plain
+                                  broadcasts don't wake the standard --no-broadcast
+                                  auto-wake hook; --loud bypasses that, goes
+                                  host-wide across rooms, and desktop-notifies the
+                                  human operator; --loud-room does the same but
+                                  stays scoped to your own room)
   mess pub <topic> [body...]      publish to a topic (@mention wakes only the
                                   tagged subscribers; the rest still receive it)
                                   (--thread ID replies within a thread — quiet
@@ -54,6 +56,7 @@ Usage:
                                   no need to know/pass a message id
   mess thread close                end the thread "mess reply" is continuing;
                                   the next reply starts a fresh one
+  mess thread list                 list threads you've seen activity in
   mess replay [N]                 reprint the last N messages you already consumed
                                   (recover a message lost to a dropped wake)
   mess export --topic NAME | --thread ID | --to AGENT
@@ -327,8 +330,12 @@ func cmdSend(p paths, args []string) error {
 
 func cmdBroadcast(p paths, args []string) error {
 	fs, as := newFlags("broadcast")
-	loud := fs.Bool("loud", false, "wake every recipient even if their auto-wake hook filters out broadcasts (--no-broadcast), and desktop-notify the human operator too")
+	loud := fs.Bool("loud", false, "wake every recipient host-wide (crosses room boundaries) even if their auto-wake hook filters out broadcasts (--no-broadcast), and desktop-notify the human operator too")
+	loudRoom := fs.Bool("loud-room", false, "like --loud, but stays scoped to your own room instead of going host-wide")
 	parseAnywhere(fs, args)
+	if *loud && *loudRoom {
+		return fmt.Errorf("--loud and --loud-room are mutually exclusive")
+	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
@@ -337,7 +344,7 @@ func cmdBroadcast(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: *loud})
+	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: *loud || *loudRoom, HostWide: *loud})
 	if err != nil {
 		return err
 	}
@@ -853,17 +860,58 @@ func sendReply(p paths, from, kind, topic, to, threadID, body string) error {
 	return nil
 }
 
-// cmdThread handles `mess thread ...` — currently just "close", ending the
-// thread `mess reply` is continuing so the next `mess reply` starts a fresh
-// one from whatever's most recent at that point.
+// cmdThread handles `mess thread ...`: "close" ends the thread `mess reply`
+// is continuing so the next `mess reply` starts fresh, and "list" shows every
+// thread the caller has seen activity in.
 func cmdThread(p paths, args []string) error {
-	if len(args) == 0 || args[0] != "close" {
-		return fmt.Errorf("usage: mess thread close")
+	if len(args) == 0 {
+		return fmt.Errorf("usage: mess thread close | mess thread list")
 	}
-	if err := clearOpenThread(p); err != nil {
+	switch args[0] {
+	case "close":
+		if err := clearOpenThread(p); err != nil {
+			return err
+		}
+		fmt.Println("thread closed; next `mess reply` starts a new one")
+		return nil
+	case "list":
+		return cmdThreadList(p, args[1:])
+	default:
+		return fmt.Errorf("usage: mess thread close | mess thread list")
+	}
+}
+
+func cmdThreadList(p paths, args []string) error {
+	fs, as := newFlags("thread list")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
 		return err
 	}
-	fmt.Println("thread closed; next `mess reply` starts a new one")
+	resp, err := call(p, Request{Op: "thread-list", As: name})
+	if err != nil {
+		return err
+	}
+	if len(resp.Threads) == 0 {
+		fmt.Println("no threads seen yet")
+		return nil
+	}
+	open, hasOpen := readOpenThread(p)
+	for _, th := range resp.Threads {
+		where := "#" + th.Topic
+		if th.Kind == KindDirect {
+			where = th.Peer
+		}
+		marker := ""
+		if hasOpen && open.ThreadID == th.ID {
+			marker = " (open)"
+		}
+		fmt.Printf("%s  %-12s %d repl(y/ies), %d participant(s), last %s%s\n",
+			th.ID, where, th.Replies, th.Participants, th.LastActivity.Format("15:04:05"), marker)
+		if th.RootBody != "" {
+			fmt.Printf("    %s\n", truncate(th.RootBody, 100))
+		}
+	}
 	return nil
 }
 
@@ -1054,12 +1102,19 @@ func cmdRecv(p paths, args []string) error {
 func updateLastMsg(p paths, msgs []Message) {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
+		// If the newest message is itself a reply, target its thread's root —
+		// not the reply's own ID — so a further `mess reply` stays flat under
+		// the same root instead of spawning a reply-to-a-reply sub-thread.
+		root := m.ID
+		if m.ThreadID != "" {
+			root = m.ThreadID
+		}
 		switch m.Kind {
 		case KindTopic:
-			writeLastMsg(p, lastMsgInfo{ID: m.ID, Kind: m.Kind, Topic: m.Topic, From: m.From})
+			writeLastMsg(p, lastMsgInfo{ID: root, Kind: m.Kind, Topic: m.Topic, From: m.From})
 			return
 		case KindDirect:
-			writeLastMsg(p, lastMsgInfo{ID: m.ID, Kind: m.Kind, From: m.From})
+			writeLastMsg(p, lastMsgInfo{ID: root, Kind: m.Kind, From: m.From})
 			return
 		}
 	}

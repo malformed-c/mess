@@ -103,7 +103,7 @@ type warnInfo struct {
 type bridgeDirection int
 
 const (
-	bridgeBoth  bridgeDirection = iota // relay both ways (default)
+	bridgeBoth bridgeDirection = iota // relay both ways (default)
 	bridgeAToB                        // relay only a -> b
 	bridgeBToA                        // relay only b -> a
 )
@@ -491,14 +491,18 @@ func (b *Broker) CancelAck(id string) {
 	delete(b.pendingAcks, id)
 }
 
-// Broadcast delivers to every known agent in the sender's room except the
-// sender itself. from is a composite key (agentKey(room, name)); the room it
-// decomposes to is the scope — an agent in the global room broadcasts to the
-// rest of the global room, an agent in a joined room broadcasts only to that
-// room's other members. loud (mess broadcast --loud) marks the message so
-// wakes() wakes recipients even if their parked wake hook filters out
-// KindBroadcast (the standard auto-wake hook parks with --no-broadcast).
-func (b *Broker) Broadcast(from, body string, loud bool) (Message, int) {
+// Broadcast delivers to every known agent except the sender itself. from is a
+// composite key (agentKey(room, name)); by default the room it decomposes to
+// is the scope — an agent in the global room broadcasts to the rest of the
+// global room, an agent in a joined room broadcasts only to that room's other
+// members. loud (mess broadcast --loud) marks the message so wakes() wakes
+// recipients even if their parked wake hook filters out KindBroadcast (the
+// standard auto-wake hook parks with --no-broadcast). hostWide (plain --loud,
+// as opposed to --loud-room) skips the room filter entirely, reaching every
+// room on the host — for host-wide events like a daemon restart, where a
+// room boundary would silently leave other rooms unwarned; hostWide is only
+// ever true alongside loud (a non-loud broadcast is always room-scoped).
+func (b *Broker) Broadcast(from, body string, loud, hostWide bool) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	room, fromName := splitAgentKey(from)
@@ -509,8 +513,10 @@ func (b *Broker) Broadcast(from, body string, loud bool) (Message, int) {
 		if key == from {
 			continue
 		}
-		if r, _ := splitAgentKey(key); r != room {
-			continue
+		if !hostWide {
+			if r, _ := splitAgentKey(key); r != room {
+				continue
+			}
 		}
 		a.deliver(m)
 		n++
@@ -998,6 +1004,81 @@ func (b *Broker) exportOwn(name string, max int, match func(Message) bool) []Mes
 	if max > 0 && max < len(out) {
 		out = out[len(out)-max:]
 	}
+	return out
+}
+
+// ListThreads summarizes every thread name has seen activity in — from their
+// own received view (same history+inbox scan as exportOwn), most recently
+// active first. A thread is only discovered once at least one reply (a
+// message with ThreadID set) has passed through name's view; the root itself
+// (ThreadID=="", ID==threadID) fills in Topic/Peer/RootBody when it's also
+// been seen, but its absence doesn't hide the thread — only the two Kind
+// classifications below actually differ from the root and never appear until
+// the root is present, RootBody/Peer stay best-effort. Participants counts
+// server-wide, not just who name has personally seen.
+func (b *Broker) ListThreads(name string) []ThreadInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return nil
+	}
+	_, myName := splitAgentKey(name)
+
+	all := make([]Message, 0, len(a.history)+len(a.inbox))
+	all = append(all, a.history...)
+	all = append(all, a.inbox...)
+
+	ids := map[string]bool{}
+	for _, m := range all {
+		if m.ThreadID != "" {
+			ids[m.ThreadID] = true
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	infos := make(map[string]*ThreadInfo, len(ids))
+	for id := range ids {
+		infos[id] = &ThreadInfo{ID: id}
+	}
+	for _, m := range all {
+		id := m.ThreadID
+		isRoot := false
+		if id == "" {
+			if !ids[m.ID] {
+				continue // an ordinary message, not part of any thread we're tracking
+			}
+			id, isRoot = m.ID, true
+		}
+		info := infos[id]
+		if info.Kind == "" {
+			info.Kind, info.Topic = m.Kind, m.Topic
+		}
+		if isRoot {
+			info.RootBody = m.Body
+		} else {
+			info.Replies++
+		}
+		if info.Kind == KindDirect && info.Peer == "" {
+			if m.From != myName {
+				info.Peer = m.From
+			} else {
+				info.Peer = m.To
+			}
+		}
+		if m.Time.After(info.LastActivity) {
+			info.LastActivity = m.Time
+		}
+	}
+
+	out := make([]ThreadInfo, 0, len(infos))
+	for id, info := range infos {
+		info.Participants = len(b.threadParticipants[id])
+		out = append(out, *info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastActivity.After(out[j].LastActivity) })
 	return out
 }
 
