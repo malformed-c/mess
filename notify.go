@@ -84,13 +84,22 @@ func notifyUser(from, to, body string) {
 }
 
 // desktopNotify runs notify-send without blocking the daemon. A missing notifier
-// or display is skipped; a start error is logged at debug level.
+// or display is skipped; a start error is logged at debug level. Delegates to the
+// overridable notifySend so tests can assert on calls without spawning a real
+// notifier or depending on one being installed/reachable (e.g. a headless CI box).
 func desktopNotify(summary, body string) {
+	notifySend(summary, truncate(body, 200))
+}
+
+// notifySend is the actual notify-send invocation, factored out as a package
+// variable so tests can swap it for a recording stub (see notify_test.go) —
+// mirrors the injectable-clock pattern already used for Broker.now.
+var notifySend = func(summary, body string) {
 	path, err := exec.LookPath("notify-send")
 	if err != nil {
 		return // no notifier available (e.g. headless) — best effort
 	}
-	cmd := exec.Command(path, "-a", "mess", "-i", "dialog-information", summary, truncate(body, 200))
+	cmd := exec.Command(path, "-a", "mess", "-i", "dialog-information", summary, body)
 	if err := cmd.Start(); err != nil {
 		dlog("notify-send failed: %v", err)
 		return
