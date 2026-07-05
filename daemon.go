@@ -381,10 +381,10 @@ func (d *daemon) dispatch(req Request) Response {
 		elog("broadcast %s -> %d agent(s)", req.As, n)
 		return Response{OK: true, Count: n}
 	case "pub":
-		_, delivered, woke := b.Pub(who, topic, req.Body)
+		_, delivered, woke := b.PubThreaded(who, topic, req.Body, req.ThreadID)
 		notifyUser(req.As, "", req.Body)
 		if woke < delivered {
-			elog("pub %s #%s -> %d sub(s), woke %d (@mention)", req.As, req.Topic, delivered, woke)
+			elog("pub %s #%s -> %d sub(s), woke %d (@mention/thread)", req.As, req.Topic, delivered, woke)
 		} else {
 			elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, delivered)
 		}
@@ -537,7 +537,7 @@ func timerFor(spec string) (<-chan time.Time, func(), error) {
 func (d *daemon) send(req Request, who, to string) Response {
 	b := d.broker
 	if !req.Ack {
-		if _, err := b.Send(who, to, req.Body); err != nil {
+		if _, err := b.SendThreaded(who, to, req.Body, req.ThreadID); err != nil {
 			return Response{Error: err.Error()}
 		}
 		pending, listening := b.Stat(to)
@@ -546,7 +546,7 @@ func (d *daemon) send(req Request, who, to string) Response {
 	}
 
 	// Blocking send: wait for a read receipt, honoring an optional timeout.
-	m, ackCh, err := b.SendAck(who, to, req.Body)
+	m, ackCh, err := b.SendAckThreaded(who, to, req.Body, req.ThreadID)
 	if err != nil {
 		return Response{Error: err.Error()}
 	}
@@ -575,7 +575,19 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	who := agentKey(req.Room, req.As)
 	trigger := kindSet(req.Kinds)
 
-	// Non-blocking drain: the kind filter acts as a result filter.
+	// Non-blocking drain: the kind filter acts as a result filter. A ThreadID
+	// filter takes over entirely (mess recv --thread is a "show me this
+	// conversation" query, not a wake-worthiness filter) — not combined with
+	// --wait, which stays kind-filtered as today.
+	if !req.Wait && req.ThreadID != "" {
+		msgs := b.DrainThread(who, req.ThreadID, req.Peek, req.Max)
+		if len(msgs) > 0 {
+			elog("recv %s drained %d (thread %s)%s", req.As, len(msgs), req.ThreadID, peekNote(req.Peek))
+		} else {
+			dlog("recv %s drained 0 (thread %s)", req.As, req.ThreadID)
+		}
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
+	}
 	if !req.Wait {
 		msgs := b.DrainKinds(who, req.Peek, req.Max, trigger)
 		if len(msgs) > 0 {

@@ -1147,3 +1147,101 @@ func TestBridgeSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("restored bridge should still relay: %+v", got)
 	}
 }
+
+// --- threads ---
+
+// A no-mention threaded reply is quiet-delivered to an uninvolved subscriber
+// (same class of fix as @mention: a reply shouldn't wake everyone the way a
+// fresh topic message does), but wakes an existing thread participant even
+// without naming them, same as an explicit @mention would.
+func TestThreadedReplyWakesParticipantsNotBystanders(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("alice", "eng")
+	b.Sub("bob", "eng")
+	b.Sub("carol", "eng") // never posts in the thread; should stay a bystander
+
+	root, _, _ := b.Pub("alice", "eng", "kicking off a discussion")
+	// bob replies in the thread -> he's now a participant.
+	b.PubThreaded("bob", "eng", "I have thoughts", root.ID)
+	// Drain everyone so waitChan's "already pending" fast path can't mask the
+	// real assertion below with leftover messages from this setup.
+	b.Drain("alice", false, 0)
+	b.Drain("bob", false, 0)
+	b.Drain("carol", false, 0)
+
+	// alice replies again, still no @mention -> bob (participant) should wake,
+	// carol (bystander) should not.
+	bobCh := b.waitChan("bob", nil)
+	carolCh := b.waitChan("carol", nil)
+	b.PubThreaded("alice", "eng", "responding to bob", root.ID)
+
+	select {
+	case <-bobCh:
+		// expected: bob is a thread participant
+	default:
+		t.Fatal("bob (thread participant) should be woken by a threaded reply")
+	}
+	select {
+	case <-carolCh:
+		t.Fatal("carol (never posted in the thread) should not be woken")
+	default:
+	}
+	got := b.Drain("carol", false, 0)
+	if len(got) != 1 || !got[0].Quiet {
+		t.Fatalf("carol should still receive the threaded reply, quietly: %+v", got)
+	}
+	got = b.Drain("bob", false, 0)
+	if len(got) != 1 || got[0].Quiet {
+		t.Fatalf("bob's copy should NOT be quiet (he's a participant): %+v", got)
+	}
+}
+
+// A direct (non-topic) threaded send is just metadata/participant-tracking —
+// it doesn't change wake behavior, since there's only one recipient.
+func TestSendThreadedTagsMessageAndTracksParticipant(t *testing.T) {
+	b := newTestBroker()
+	m, err := b.SendThreaded("alice", "bob", "starting a DM thread", "root123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ThreadID != "root123" {
+		t.Fatalf("expected ThreadID stamped on the message, got %q", m.ThreadID)
+	}
+	if !b.threadParticipants["root123"]["alice"] {
+		t.Fatal("sender should be tracked as a thread participant")
+	}
+	got := b.Drain("bob", false, 0)
+	if len(got) != 1 || got[0].Quiet {
+		t.Fatalf("a direct threaded send should still wake normally (only one recipient): %+v", got)
+	}
+}
+
+func TestDrainThreadFiltersToRootAndReplies(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("alice", "eng")
+	b.Sub("bob", "eng")
+	root, _, _ := b.Pub("alice", "eng", "root message")
+	b.PubThreaded("alice", "eng", "reply one", root.ID)
+	b.Pub("alice", "eng", "unrelated message") // no ThreadID; must NOT show up
+	b.PubThreaded("alice", "eng", "reply two", root.ID)
+
+	got := b.DrainThread("bob", root.ID, true, 0) // peek: leave the inbox intact
+	if len(got) != 3 {
+		t.Fatalf("expected root + 2 replies (3 messages), got %d: %+v", len(got), got)
+	}
+	bodies := map[string]bool{}
+	for _, m := range got {
+		bodies[m.Body] = true
+	}
+	if !bodies["root message"] || !bodies["reply one"] || !bodies["reply two"] {
+		t.Fatalf("missing expected thread messages: %+v", got)
+	}
+	if bodies["unrelated message"] {
+		t.Fatal("an unrelated (non-thread) message leaked into the thread view")
+	}
+	// The unrelated message and everything else should still be in the full inbox.
+	full := b.Drain("bob", false, 0)
+	if len(full) != 4 {
+		t.Fatalf("peek should not have consumed anything; expected 4 total, got %d", len(full))
+	}
+}

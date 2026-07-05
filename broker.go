@@ -413,7 +413,7 @@ func (b *Broker) aliveLocked(name string) bool {
 
 // Send delivers a direct message to a single recipient.
 func (b *Broker) Send(from, to, body string) (Message, error) {
-	m, _, err := b.send(from, to, body, false)
+	m, _, err := b.send(from, to, body, "", false)
 	return m, err
 }
 
@@ -421,13 +421,28 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 // recipient reads (consumes) it. The caller can block on the channel, with its
 // own timeout, to implement a read receipt.
 func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, true)
+	return b.send(from, to, body, "", true)
+}
+
+// SendThreaded is Send, tagging the message as a reply within threadID (the
+// thread root's own message ID; see PubThreaded). Direct messages have only
+// one recipient, so — unlike Pub — a thread tag never changes wake behavior
+// here, only participant bookkeeping (so the same person showing up in a
+// topic thread later is already recognized as a participant).
+func (b *Broker) SendThreaded(from, to, body, threadID string) (Message, error) {
+	m, _, err := b.send(from, to, body, threadID, false)
+	return m, err
+}
+
+// SendAckThreaded is SendAck with a thread tag (see SendThreaded).
+func (b *Broker) SendAckThreaded(from, to, body, threadID string) (Message, <-chan struct{}, error) {
+	return b.send(from, to, body, threadID, true)
 }
 
 // send's from/to are composite keys (agentKey(room, name)) except when to is
 // the bare human mailbox handle (never room-scoped — see dispatch). The
 // delivered Message always carries bare names.
-func (b *Broker) send(from, to, body string, ack bool) (Message, <-chan struct{}, error) {
+func (b *Broker) send(from, to, body, threadID string, ack bool) (Message, <-chan struct{}, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if to == "" {
@@ -435,8 +450,11 @@ func (b *Broker) send(from, to, body string, ack bool) (Message, <-chan struct{}
 	}
 	_, fromName := splitAgentKey(from)
 	_, toName := splitAgentKey(to)
-	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack}
+	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID}
 	b.touch(from)
+	if threadID != "" {
+		b.trackThreadParticipantLocked(threadID, from)
+	}
 	b.ensure(to).deliver(m)
 	var ackCh chan struct{}
 	if ack {
@@ -445,6 +463,16 @@ func (b *Broker) send(from, to, body string, ack bool) (Message, <-chan struct{}
 	}
 	b.changed()
 	return m, ackCh, nil
+}
+
+// trackThreadParticipantLocked records that key has posted in threadID, so a
+// later reply in the same thread wakes them (like an @mention) even without
+// explicitly naming them — see publishLocalLocked. Caller must hold b.mu.
+func (b *Broker) trackThreadParticipantLocked(threadID, key string) {
+	if b.threadParticipants[threadID] == nil {
+		b.threadParticipants[threadID] = map[string]bool{}
+	}
+	b.threadParticipants[threadID][key] = true
 }
 
 // CancelAck drops a pending read receipt (e.g. when the sender times out).
@@ -502,25 +530,32 @@ func mentionsIn(body string) map[string]bool {
 // key except skip (the original sender; pass "" for a relay hop, where nobody
 // is skipped). isRelay forces every recipient to be quiet-delivered (no wake)
 // unless individually @mentioned — used for bridge relay hops, so a bridge
-// between two busy rooms can't become a wake-storm amplifier; a direct
-// (non-relay) publish keeps today's behavior (no mention -> wake everyone).
-// Returns the delivery/wake counts. Caller must hold b.mu.
+// between two busy rooms can't become a wake-storm amplifier. A threaded
+// message (m.ThreadID != "") is quiet-delivered to everyone except an
+// @mention or an existing participant in that thread (someone who has
+// already posted in it) — the same noise fix as @mention, but for "a reply
+// shouldn't wake everyone the way a fresh topic message does." A direct
+// (non-relay, non-threaded) publish keeps today's behavior (no mention ->
+// wake everyone). Returns the delivery/wake counts. Caller must hold b.mu.
 func (b *Broker) publishLocalLocked(key string, m Message, skip string, isRelay bool) (delivered, woke int) {
 	mentions := mentionsIn(m.Body)
+	participants := b.threadParticipants[m.ThreadID] // nil if ThreadID=="" or nobody's posted yet
 	for subKey := range b.topics[key] {
 		if subKey == skip {
 			continue
 		}
 		_, name := splitAgentKey(subKey)
 		a := b.ensure(subKey)
+		mentioned := len(mentions) > 0 && mentions[name]
+		participant := m.ThreadID != "" && participants[subKey]
 		switch {
-		case len(mentions) > 0 && mentions[name]:
-			a.deliver(m) // wake: explicitly mentioned
+		case mentioned || participant:
+			a.deliver(m) // wake: explicitly mentioned, or already in this thread
 			woke++
-		case isRelay || len(mentions) > 0:
-			a.deliverQuiet(m) // relay hop, or an unmentioned subscriber of a mentioning publish
+		case isRelay || len(mentions) > 0 || m.ThreadID != "":
+			a.deliverQuiet(m) // relay hop, an unmentioned subscriber of a mentioning publish, or an uninvolved subscriber of a threaded reply
 		default:
-			a.deliver(m) // no mentions at all: wake everyone, as before
+			a.deliver(m) // no mentions, no thread: wake everyone, as before
 			woke++
 		}
 		delivered++
@@ -573,12 +608,23 @@ func (b *Broker) relayLocked(key string, m Message, visited map[string]bool, dep
 // topic (possibly in another room) — see relayLocked; the returned
 // delivered/woke counts cover only the direct local audience, not relay hops.
 func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) {
+	return b.PubThreaded(from, topic, body, "")
+}
+
+// PubThreaded is Pub, tagging the message as a reply within threadID (the
+// thread root's own message ID) — see publishLocalLocked for the resulting
+// wake-quieting behavior and trackThreadParticipantLocked for how a later
+// reply recognizes today's poster as a participant.
+func (b *Broker) PubThreaded(from, topic, body, threadID string) (m Message, delivered, woke int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	_, fromName := splitAgentKey(from)
 	_, topicName := splitAgentKey(topic)
-	m = Message{ID: b.nextID(), From: fromName, Topic: topicName, Kind: KindTopic, Body: body, Time: b.now()}
+	m = Message{ID: b.nextID(), From: fromName, Topic: topicName, Kind: KindTopic, Body: body, Time: b.now(), ThreadID: threadID}
 	b.touch(from)
+	if threadID != "" {
+		b.trackThreadParticipantLocked(threadID, from)
+	}
 	delivered, woke = b.publishLocalLocked(topic, m, from, false)
 	b.relayLocked(topic, m, map[string]bool{topic: true}, 0)
 	b.changed()
@@ -771,6 +817,43 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 		}
 		a.inbox = keep
 		a.history = append(a.history, out...) // keep for `replay` (recovers a lost wake)
+		if len(a.history) > maxHistory {
+			a.history = a.history[len(a.history)-maxHistory:]
+		}
+		b.changed()
+	}
+	return out
+}
+
+// DrainThread is Drain restricted to one thread: a message whose ThreadID
+// matches, plus the thread's root message itself (whose own ID equals
+// threadID, and which never carries a ThreadID — it isn't a reply to
+// anything). Non-matching messages are left in the inbox in order, same as
+// DrainKinds — reading a thread doesn't consume the rest of the inbox.
+func (b *Broker) DrainThread(name, threadID string, peek bool, max int) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.ensure(name)
+	b.touch(name)
+	var out, keep []Message
+	for _, m := range a.inbox {
+		if (m.ThreadID == threadID || m.ID == threadID) && (max <= 0 || len(out) < max) {
+			out = append(out, m)
+		} else {
+			keep = append(keep, m)
+		}
+	}
+	if !peek && len(out) > 0 {
+		for _, m := range out {
+			if m.AckRequested {
+				if ch := b.pendingAcks[m.ID]; ch != nil {
+					ch <- struct{}{}
+					delete(b.pendingAcks, m.ID)
+				}
+			}
+		}
+		a.inbox = keep
+		a.history = append(a.history, out...)
 		if len(a.history) > maxHistory {
 			a.history = a.history[len(a.history)-maxHistory:]
 		}

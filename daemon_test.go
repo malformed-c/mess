@@ -259,3 +259,29 @@ func TestDispatchUnbridgeAndBridgesList(t *testing.T) {
 		t.Fatalf("bridge should be gone from the list: %+v", list.Bridges)
 	}
 }
+
+// req.ThreadID flows through dispatch's "pub" case into PubThreaded, and
+// "recv" with a ThreadID filters to that thread instead of kind-filtering.
+func TestDispatchThreadIDFlowsThroughPubAndRecv(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
+	d.dispatch(Request{Op: "sub", As: "bob", Topic: "eng"})
+	root := d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "root"})
+	if !root.OK {
+		t.Fatalf("pub failed: %+v", root)
+	}
+	// Recover the root's ID via a plain recv, then reply in that thread.
+	got := d.recv(nil, Request{Op: "recv", As: "bob"})
+	if len(got.Messages) != 1 {
+		t.Fatalf("expected the root message, got %+v", got.Messages)
+	}
+	rootID := got.Messages[0].ID
+
+	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "reply", ThreadID: rootID})
+	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "unrelated"})
+
+	threadOnly := d.recv(nil, Request{Op: "recv", As: "bob", ThreadID: rootID, Peek: true})
+	if len(threadOnly.Messages) != 1 || threadOnly.Messages[0].Body != "reply" {
+		t.Fatalf("expected only the threaded reply, got %+v", threadOnly.Messages)
+	}
+}

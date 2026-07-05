@@ -276,10 +276,11 @@ func cmdSend(p paths, args []string) error {
 	fs, as := newFlags("send")
 	ack := fs.Bool("ack", false, "block until the recipient reads the message")
 	timeout := fs.String("timeout", "", "ack wait timeout (e.g. 30s); default: wait forever")
+	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] <to> [body...]")
+		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] <to> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -290,7 +291,7 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout})
+	resp, err := call(p, Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread})
 	if err != nil {
 		return err
 	}
@@ -324,10 +325,11 @@ func cmdBroadcast(p paths, args []string) error {
 
 func cmdPub(p paths, args []string) error {
 	fs, as := newFlags("pub")
+	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output) — quiet-delivered to everyone except an @mention or existing participant")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess pub <topic> [body...]")
+		return fmt.Errorf("usage: mess pub [--thread ID] <topic> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -337,7 +339,7 @@ func cmdPub(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "pub", As: from, Topic: rest[0], Body: body})
+	resp, err := call(p, Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread})
 	if err != nil {
 		return err
 	}
@@ -837,6 +839,7 @@ func cmdRecv(p paths, args []string) error {
 	kind := fs.String("kind", "", "only these kinds (comma-list: direct,broadcast,topic)")
 	noBroadcast := fs.Bool("no-broadcast", false, "ignore broadcasts (= --kind direct,topic)")
 	batch := fs.String("batch", "", "with --wait: coalesce a burst arriving within this window into one return")
+	thread := fs.String("thread", "", "show only this thread's messages (root + replies), not combined with --wait")
 	parseAnywhere(fs, args)
 	name, err := agentName(p, *as)
 	if err != nil {
@@ -870,7 +873,7 @@ func cmdRecv(p paths, args []string) error {
 		return followRecv(p, name, timeout, *max, *asJSON, kinds, *batch)
 	}
 
-	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch}
+	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch, ThreadID: *thread}
 	// A blocking wait uses the restart-resilient path so it survives a daemon
 	// bounce; a non-blocking drain is a plain one-shot call.
 	dispatch := call
@@ -1069,13 +1072,23 @@ func printMessages(msgs []Message, asJSON bool) {
 	}
 	for _, m := range msgs {
 		ts := m.Time.Format("15:04:05")
+		var line string
 		switch m.Kind {
 		case KindTopic:
-			fmt.Printf("%s %s #%s: %s\n", ts, m.From, m.Topic, m.Body)
+			line = fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
 		case KindBroadcast:
-			fmt.Printf("%s %s (broadcast): %s\n", ts, m.From, m.Body)
+			line = fmt.Sprintf("%s %s (broadcast): %s", ts, m.From, m.Body)
 		default:
-			fmt.Printf("%s %s: %s\n", ts, m.From, m.Body)
+			line = fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
 		}
+		// Tag the message ID so it can be used as `--thread <id>` to reply —
+		// there's no other way to discover it in the human-readable view.
+		// Also flag an existing reply with its thread root, for context.
+		if m.ThreadID != "" {
+			line += fmt.Sprintf("  [%s, thread %s]", m.ID, m.ThreadID)
+		} else {
+			line += fmt.Sprintf("  [%s]", m.ID)
+		}
+		fmt.Println(line)
 	}
 }
