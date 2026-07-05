@@ -46,16 +46,30 @@ does **not** fire the ack — the receipt fires when the recipient runs its own
 not just "was delivered."
 
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
-within thread `<id>` (the root message's own id, e.g. `m42` — shown as `[m42]`
-after every printed message, since there's no other way to discover it).
-Replies are Slack-style and flat: replying to a reply still uses the *root's*
-id, not the reply's, so every message in a thread shares one id. A threaded
-reply is quiet-delivered (like an unmentioned topic subscriber) to everyone
-except an `@mention` or someone who has *already posted* in that thread — the
-same noise fix `@mention` already gets, for "a reply shouldn't wake everyone
-the way a fresh topic message does." `mess recv --thread <id>` shows just that
+within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
+Slack-style and flat: replying to a reply still uses the *root's* id, not the
+reply's, so every message in a thread shares one id. A threaded reply is
+quiet-delivered (like an unmentioned topic subscriber) to everyone except an
+`@mention` or someone who has *already posted* in that thread — the same
+noise fix `@mention` already gets, for "a reply shouldn't wake everyone the
+way a fresh topic message does." `mess recv --thread <id>` shows just that
 thread (root + replies), leaving the rest of the inbox untouched; it isn't
-combined with `--wait`.
+combined with `--wait`. Only an actual reply is tagged in the printed output
+(`[thread m42] ...`, prepended) — a plain message shows no id, since you never
+need to read or type one:
+
+```
+mess reply "text..."   # replies to the most recent message you've seen, or
+                        # continues the thread a prior `mess reply` opened
+mess thread close        # end that continuation; the next `mess reply` starts
+                          # fresh, off whatever's most recent at that point
+```
+
+`mess reply` routes to wherever the root came from (a topic via `pub`, or a
+direct message via `send`) automatically. Once it opens a thread it keeps
+replying there on every subsequent call — regardless of what else arrives in
+the meantime — until you `mess thread close`; use `--thread <id>` directly on
+`send`/`pub` instead if you want a one-off reply without touching that state.
 
 ## Rooms
 

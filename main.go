@@ -49,6 +49,11 @@ Usage:
   mess islistening                exit 0 if you have an active listener, else 1
   mess recv [duration]            receive queued messages (--thread ID shows
                                   only that thread's messages, not with --wait)
+  mess reply [body...]            reply to the most recent message (or continue
+                                  the open thread — see "mess thread close");
+                                  no need to know/pass a message id
+  mess thread close                end the thread "mess reply" is continuing;
+                                  the next reply starts a fresh one
   mess replay [N]                 reprint the last N messages you already consumed
                                   (recover a message lost to a dropped wake)
   mess export --topic NAME | --thread ID | --to AGENT
@@ -155,6 +160,10 @@ func main() {
 		err = cmdRecv(p, args)
 	case "replay":
 		err = cmdReplay(p, args)
+	case "reply":
+		err = cmdReply(p, args)
+	case "thread":
+		err = cmdThread(p, args)
 	case "export":
 		err = cmdExport(p, args)
 	case "listen":
@@ -792,6 +801,72 @@ func cmdReplay(p paths, args []string) error {
 // independent of who's currently subscribed), a thread's root+replies from
 // your own view (--thread), or your direct-message history with a peer
 // (--to) — as text or JSON, to stdout or a file.
+// cmdReply replies within the currently open thread (see `mess thread
+// close`), or starts a new one from the most recently seen message if none is
+// open — so you never have to read or type a message id to reply to
+// whatever just arrived. Routes to a topic (pub) or a direct peer (send)
+// depending on what the root message was.
+func cmdReply(p paths, args []string) error {
+	fs, as := newFlags("reply")
+	parseAnywhere(fs, args)
+	body, err := bodyFrom(fs.Args())
+	if err != nil {
+		return err
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+
+	if open, ok := readOpenThread(p); ok {
+		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body)
+	}
+
+	last, ok := readLastMsg(p)
+	if !ok {
+		return fmt.Errorf("nothing to reply to yet — run `mess recv` first, or use `mess send`/`mess pub --thread ID` directly")
+	}
+	if err := writeOpenThread(p, openThreadInfo{ThreadID: last.ID, Kind: last.Kind, Topic: last.Topic, To: last.From}); err != nil {
+		return err
+	}
+	return sendReply(p, name, last.Kind, last.Topic, last.From, last.ID, body)
+}
+
+// sendReply posts body as a threaded reply, routing to a topic or a direct
+// peer depending on kind.
+func sendReply(p paths, from, kind, topic, to, threadID, body string) error {
+	switch kind {
+	case KindTopic:
+		resp, err := call(p, Request{Op: "pub", As: from, Topic: topic, Body: body, ThreadID: threadID})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("replied in #%s (thread %s) — delivered to %d subscriber(s)\n", topic, threadID, resp.Count)
+	case KindDirect:
+		if _, err := call(p, Request{Op: "send", As: from, To: to, Body: body, ThreadID: threadID}); err != nil {
+			return err
+		}
+		fmt.Printf("replied to %s (thread %s)\n", to, threadID)
+	default:
+		return fmt.Errorf("unsupported reply target kind %q", kind)
+	}
+	return nil
+}
+
+// cmdThread handles `mess thread ...` — currently just "close", ending the
+// thread `mess reply` is continuing so the next `mess reply` starts a fresh
+// one from whatever's most recent at that point.
+func cmdThread(p paths, args []string) error {
+	if len(args) == 0 || args[0] != "close" {
+		return fmt.Errorf("usage: mess thread close")
+	}
+	if err := clearOpenThread(p); err != nil {
+		return err
+	}
+	fmt.Println("thread closed; next `mess reply` starts a new one")
+	return nil
+}
+
 func cmdExport(p paths, args []string) error {
 	fs, as := newFlags("export")
 	topic := fs.String("topic", "", "export this topic's full history")
@@ -966,8 +1041,28 @@ func cmdRecv(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *thread == "" { // a --thread query is browsing history, not "new mail"
+		updateLastMsg(p, resp.Messages)
+	}
 	printMessages(resp.Messages, *asJSON)
 	return nil
+}
+
+// updateLastMsg records the most recent direct/topic message in msgs (skips
+// broadcasts, which have no coherent reply target) as the implicit root for a
+// future `mess reply`. Best-effort; called after a successful mess recv.
+func updateLastMsg(p paths, msgs []Message) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		switch m.Kind {
+		case KindTopic:
+			writeLastMsg(p, lastMsgInfo{ID: m.ID, Kind: m.Kind, Topic: m.Topic, From: m.From})
+			return
+		case KindDirect:
+			writeLastMsg(p, lastMsgInfo{ID: m.ID, Kind: m.Kind, From: m.From})
+			return
+		}
+	}
 }
 
 // resolveKinds turns --kind/--no-broadcast into an explicit kinds list, or nil
@@ -1027,6 +1122,7 @@ func warnIfAlreadyListening(p paths, name string) {
 // run as a long-lived background command so an agent can be woken by peers.
 func followRecv(p paths, name, timeout string, max int, asJSON bool, kinds []string, batch string) error {
 	return callStream(p, Request{Op: "listen", As: name, Timeout: timeout, Max: max, Kinds: kinds, Batch: batch}, func(resp Response) error {
+		updateLastMsg(p, resp.Messages)
 		printMessages(resp.Messages, asJSON)
 		return nil
 	})
@@ -1163,13 +1259,11 @@ func printMessages(msgs []Message, asJSON bool) {
 		default:
 			line = fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
 		}
-		// Tag the message ID so it can be used as `--thread <id>` to reply —
-		// there's no other way to discover it in the human-readable view.
-		// Also flag an existing reply with its thread root, for context.
+		// Only tag actual thread replies with their id — a plain message
+		// needs no id, since `mess reply` implicitly threads off the most
+		// recent message without you ever having to read/type one.
 		if m.ThreadID != "" {
-			line += fmt.Sprintf("  [%s, thread %s]", m.ID, m.ThreadID)
-		} else {
-			line += fmt.Sprintf("  [%s]", m.ID)
+			line = fmt.Sprintf("[thread %s] %s", m.ThreadID, line)
 		}
 		fmt.Println(line)
 	}
