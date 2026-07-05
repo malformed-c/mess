@@ -301,6 +301,11 @@ func actsAsSelf(op string) bool {
 
 func (d *daemon) dispatch(req Request) Response {
 	b := d.broker
+	// Strip an accidental leading "#" from a topic argument: topics are always
+	// displayed as #name (ps, README examples), so `mess sub #trail` is a natural
+	// typo for `mess sub trail` — without this, it silently creates/targets a
+	// distinct "#trail" topic instead of colliding with the intended "trail" one.
+	req.Topic = strings.TrimPrefix(req.Topic, "#")
 	switch req.Op {
 	case "ping":
 		return Response{OK: true}

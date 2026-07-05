@@ -93,3 +93,21 @@ func TestRecvEvictedOnRemove(t *testing.T) {
 		t.Fatal("listener still present after eviction")
 	}
 }
+
+// A leading "#" on a topic argument (a natural typo, since topics are always
+// *displayed* as #name) must be stripped so `sub #trail` and `pub trail` land on
+// the same topic instead of silently creating a distinct "#trail" one.
+func TestDispatchStripsLeadingHashFromTopic(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
+	if resp := d.dispatch(Request{Op: "sub", As: "bob", Topic: "#trail"}); !resp.OK {
+		t.Fatalf("sub failed: %+v", resp)
+	}
+	resp := d.dispatch(Request{Op: "pub", As: "alice", Topic: "trail", Body: "hi"})
+	if !resp.OK {
+		t.Fatalf("pub failed: %+v", resp)
+	}
+	if resp.Count != 1 {
+		t.Fatalf("got %d subscriber(s), want 1 (sub #trail and pub trail should be the same topic)", resp.Count)
+	}
+}
