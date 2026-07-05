@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -177,7 +178,7 @@ func TestUnsubStopsDelivery(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("expected no deliveries after unsub, got %d", n)
 	}
-	_, topics := b.Ps()
+	_, topics := b.Ps("", false)
 	if len(topics) != 0 {
 		t.Fatalf("empty topic should be removed: %+v", topics)
 	}
@@ -317,7 +318,7 @@ func TestPsReportsOldestPending(t *testing.T) {
 	b := newTestBroker() // clock fixed at time.Unix(0,0)
 	b.Register("bob")
 	find := func() AgentInfo {
-		agents, _ := b.Ps()
+		agents, _ := b.Ps("", false)
 		for _, a := range agents {
 			if a.Name == "bob" {
 				return a
@@ -342,7 +343,7 @@ func TestBusyStatusAndExpiry(t *testing.T) {
 	b.now = func() time.Time { return now }
 	b.Register("bob")
 	working := func() bool {
-		agents, _ := b.Ps()
+		agents, _ := b.Ps("", false)
 		for _, a := range agents {
 			if a.Name == "bob" {
 				return a.Working
@@ -381,7 +382,7 @@ func TestListenerTracking(t *testing.T) {
 		t.Fatal("expected listening after AddListener")
 	}
 	// agent becomes known so it shows in ps and gets broadcasts
-	agents, _ := b.Ps()
+	agents, _ := b.Ps("", false)
 	if len(agents) != 1 || !agents[0].Listening {
 		t.Fatalf("ps should report alice listening: %+v", agents)
 	}
@@ -580,7 +581,7 @@ func TestPsReportsOnline(t *testing.T) {
 	b.Register("stale")     // active now, but will go stale
 	b.AddListener("parked") // a live listener
 	online := func(name string) bool {
-		agents, _ := b.Ps()
+		agents, _ := b.Ps("", false)
 		for _, a := range agents {
 			if a.Name == name {
 				return a.Online
@@ -610,7 +611,7 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	b.now = func() time.Time { return now }
 	b.Register("bob")
 	warn := func() string {
-		agents, _ := b.Ps()
+		agents, _ := b.Ps("", false)
 		for _, a := range agents {
 			if a.Name == "bob" {
 				return a.Warning
@@ -746,7 +747,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if b2.seq != b.seq {
 		t.Fatalf("seq not restored: %d vs %d", b2.seq, b.seq)
 	}
-	_, topics := b2.Ps()
+	_, topics := b2.Ps("", false)
 	if len(topics) != 1 || topics[0].Name != "builds" {
 		t.Fatalf("topics not restored: %+v", topics)
 	}
@@ -760,5 +761,225 @@ func TestOnChangeFires(t *testing.T) {
 	b.Drain("b", false, 0)
 	if calls < 2 { // one for send, one for consuming drain
 		t.Fatalf("expected onChange to fire on mutations, got %d", calls)
+	}
+}
+
+// --- rooms ---
+
+func TestAgentKeyRoundTrip(t *testing.T) {
+	if got := agentKey("", "alice"); got != "alice" {
+		t.Fatalf("empty room should collapse to the bare name, got %q", got)
+	}
+	key := agentKey("teamA", "alice")
+	room, name := splitAgentKey(key)
+	if room != "teamA" || name != "alice" {
+		t.Fatalf("round trip failed: room=%q name=%q", room, name)
+	}
+	if room, name := splitAgentKey("alice"); room != "" || name != "alice" {
+		t.Fatalf("bare key should split to empty room: room=%q name=%q", room, name)
+	}
+}
+
+// The same name in two different rooms must be able to register independently
+// — this is the whole point of rooms, and it should fall out of the composite
+// key with no special-case collision code.
+func TestRoomedIdentitiesDontCollide(t *testing.T) {
+	b := newTestBroker()
+	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessA", false); !ok {
+		t.Fatalf("first room's admin should register: %s", msg)
+	}
+	if ok, msg := b.RegisterOwned(agentKey("B", "admin"), "sessB", false); !ok {
+		t.Fatalf("second room's admin should register independently: %s", msg)
+	}
+	// But within the SAME room, the usual collision guard still applies.
+	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessC", false); ok || msg == "" {
+		t.Fatalf("a different session claiming the same room's name should collide, got ok=%v", ok)
+	}
+
+	b.Send(agentKey("A", "admin"), agentKey("A", "bob"), "hi from room A")
+	b.Send(agentKey("B", "admin"), agentKey("B", "bob"), "hi from room B")
+	gotA := b.Drain(agentKey("A", "bob"), false, 0)
+	gotB := b.Drain(agentKey("B", "bob"), false, 0)
+	if len(gotA) != 1 || gotA[0].From != "admin" || gotA[0].Body != "hi from room A" {
+		t.Fatalf("room A delivery wrong: %+v", gotA)
+	}
+	if len(gotB) != 1 || gotB[0].From != "admin" || gotB[0].Body != "hi from room B" {
+		t.Fatalf("room B delivery wrong: %+v", gotB)
+	}
+}
+
+func TestBroadcastScopedToRoom(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Register(agentKey("A", "bob"))
+	b.Register(agentKey("B", "carol")) // different room, must not receive
+
+	_, n := b.Broadcast(agentKey("A", "alice"), "hello room A")
+	if n != 1 {
+		t.Fatalf("expected 1 same-room recipient, got %d", n)
+	}
+	if got := b.Drain(agentKey("A", "bob"), false, 0); len(got) != 1 {
+		t.Fatalf("room A's bob should receive the broadcast: %+v", got)
+	}
+	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
+		t.Fatalf("a different room must not leak the broadcast: %+v", got)
+	}
+}
+
+func TestPubTopicScopedToRoom(t *testing.T) {
+	b := newTestBroker()
+	b.Sub(agentKey("A", "bob"), topicKey("A", "deploy"))
+	b.Sub(agentKey("B", "carol"), topicKey("B", "deploy")) // same topic NAME, different room
+
+	_, delivered, _ := b.Pub(agentKey("A", "alice"), topicKey("A", "deploy"), "ship it")
+	if delivered != 1 {
+		t.Fatalf("expected 1 delivery within room A, got %d", delivered)
+	}
+	if got := b.Drain(agentKey("A", "bob"), false, 0); len(got) != 1 || got[0].Topic != "deploy" {
+		t.Fatalf("room A's bob should get the publish: %+v", got)
+	}
+	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
+		t.Fatalf("room B's carol (same topic name, different room) must not receive it: %+v", got)
+	}
+}
+
+func TestPsDefaultScopesToCallerRoom(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Register(agentKey("B", "bob"))
+	b.Register("global-carol")
+
+	agents, _ := b.Ps("A", false)
+	if len(agents) != 1 || agents[0].Name != "alice" || agents[0].Room != "A" {
+		t.Fatalf("expected only room A's alice, got %+v", agents)
+	}
+	agents, _ = b.Ps("", false) // the global/default room
+	if len(agents) != 1 || agents[0].Name != "global-carol" {
+		t.Fatalf("expected only the global room's carol, got %+v", agents)
+	}
+}
+
+func TestPsAllShowsEveryRoomWithRoomField(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Register(agentKey("B", "bob"))
+	b.Sub(agentKey("A", "alice"), topicKey("A", "deploy"))
+
+	agents, topics := b.Ps("", true)
+	if len(agents) != 2 {
+		t.Fatalf("expected both rooms' agents, got %+v", agents)
+	}
+	if len(topics) != 1 || topics[0].Room != "A" || topics[0].Name != "deploy" {
+		t.Fatalf("expected room A's deploy topic, got %+v", topics)
+	}
+}
+
+// A never-joined agent (room=="") sees exactly today's pre-rooms behavior: the
+// full global fleet, nothing missing, nothing extra — the backward-
+// compatibility bar this whole feature is held to.
+func TestPsUnjoinedAgentSeesFullGlobalFleetUnchanged(t *testing.T) {
+	b := newTestBroker()
+	b.Register("k")
+	b.Register("a")
+	b.Register("l")
+	b.Register(agentKey("someproject", "admin")) // a room-joined agent elsewhere
+
+	agents, _ := b.Ps("", false)
+	if len(agents) != 3 {
+		t.Fatalf("expected exactly the 3 global agents, got %+v", agents)
+	}
+	for _, a := range agents {
+		if a.Room != "" {
+			t.Fatalf("global-room ps leaked a room field: %+v", a)
+		}
+	}
+}
+
+// Regression test for a real bug class introduced by room-scoping: Cleanup's
+// "never prune the human's mailbox" guard must check the bare name, not the
+// composite map key (isUserHandle("A\x00user") is false, but isUserHandle on
+// the split bare name "user" is true).
+func TestCleanupNeverPrunesUserHandleInAnyRoom(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Register(agentKey("A", "user"))
+	now = now.Add(48 * time.Hour) // long past any maxAge, and never "alive"
+
+	removed := b.Cleanup(time.Hour, false)
+	if len(removed) != 0 {
+		t.Fatalf("the human mailbox must never be pruned, even room-scoped: %+v", removed)
+	}
+	if _, ok := b.agents[agentKey("A", "user")]; !ok {
+		t.Fatal("room-scoped user handle should still be present")
+	}
+}
+
+func TestRenameStaysWithinRoom(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned(agentKey("A", "old"), "sessX", false)
+	b.Send("peer", agentKey("A", "old"), "queued for old")
+	b.Sub(agentKey("A", "old"), topicKey("A", "builds"))
+
+	if ok, msg := b.Rename(agentKey("A", "old"), agentKey("A", "new"), "sessX", false); !ok {
+		t.Fatalf("rename should succeed: %s", msg)
+	}
+	if got := b.Drain(agentKey("A", "new"), false, 0); len(got) != 1 || got[0].Body != "queued for old" {
+		t.Fatalf("inbox not migrated within room: %+v", got)
+	}
+	tk := topicKey("A", "builds")
+	if !b.topics[tk][agentKey("A", "new")] || b.topics[tk][agentKey("A", "old")] {
+		t.Fatalf("subscription not migrated to the room-scoped topic key: %+v", b.topics[tk])
+	}
+}
+
+func TestSnapshotRoundTripsRooms(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Sub(agentKey("A", "alice"), topicKey("A", "deploy"))
+	b.Register("global-bob")
+	snap := b.snapshot()
+
+	b2 := newTestBroker()
+	b2.load(snap)
+	agents, topics := b2.Ps("", true)
+	if len(agents) != 2 {
+		t.Fatalf("expected both agents restored, got %+v", agents)
+	}
+	if len(topics) != 1 || topics[0].Room != "A" || topics[0].Name != "deploy" {
+		t.Fatalf("expected room A's topic restored, got %+v", topics)
+	}
+}
+
+// This is the single most important regression test given the live daemon's
+// on-disk state: an existing state.json written by a pre-rooms daemon has
+// "topics" as a bare {"name": ["sub", ...]} object, not the current room-aware
+// array. It must still load, with every legacy topic landing in the global
+// room.
+func TestLoadLegacySnapshotTopicsMapMigrates(t *testing.T) {
+	legacy := []byte(`{
+		"seq": 3,
+		"agents": [{"name": "bob", "topics": ["builds"]}],
+		"topics": {"builds": ["bob"]}
+	}`)
+	var s snapshot
+	if err := json.Unmarshal(legacy, &s); err != nil {
+		t.Fatalf("legacy snapshot failed to parse: %v", err)
+	}
+	if len(s.Topics) != 1 || s.Topics[0].Room != "" || s.Topics[0].Name != "builds" {
+		t.Fatalf("legacy topic did not migrate to the global room: %+v", s.Topics)
+	}
+	if len(s.Agents) != 1 || s.Agents[0].Room != "" || s.Agents[0].Name != "bob" {
+		t.Fatalf("legacy agent should default to the global room: %+v", s.Agents)
+	}
+
+	b := newTestBroker()
+	b.load(s)
+	agents, topics := b.Ps("", false)
+	if len(agents) != 1 || agents[0].Name != "bob" {
+		t.Fatalf("legacy agent not loaded: %+v", agents)
+	}
+	if len(topics) != 1 || topics[0].Name != "builds" || len(topics[0].Subscribers) != 1 || topics[0].Subscribers[0] != "bob" {
+		t.Fatalf("legacy topic not loaded: %+v", topics)
 	}
 }

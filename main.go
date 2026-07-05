@@ -46,8 +46,17 @@ Usage:
                                   (recover a message lost to a dropped wake)
   mess listen [idle-timeout]      run continuously (bg): print messages as they
                                   arrive until interrupted (alias: recv --follow)
-  mess ps                         list agents and topics (online/offline +
-                                  working/listening/idle status)
+  mess ps [--room NAME | --all]    list agents and topics (online/offline +
+                                  working/listening/idle status); scoped to
+                                  your own room by default
+  mess room [join <room> | leave] print your current room, or join/leave one —
+                                  an exclusive namespace isolating identities,
+                                  broadcast, ps, and topics from other rooms
+                                  (global/default room until you join one)
+  mess room bridge <topic> <room>/<topic> [--direction both|out|in] [--ttl DUR]
+                                  relay a local topic to a topic in another room
+  mess room unbridge <id>          tear down a bridge
+  mess room bridges                list active bridges
   mess ping                       check the daemon
   mess daemon                     run the daemon in the foreground
   mess stop                       shut the daemon down
@@ -58,6 +67,12 @@ Identity (resolved in this order):
      session (keyed on the first of $MESS_SESSION_ID, $CLAUDE_CODE_SESSION_ID,
      or $CODEX_THREAD_ID), so it survives across turns, compaction, and resume
   3. the MESS_AGENT environment variable (set at launch)
+
+Room (resolved the same way, independently of identity):
+  1. --room NAME on the command
+  2. a mid-session room set via "mess room join <room>" — persisted the same
+     way as identity
+  3. the MESS_ROOM environment variable
 
 If no body args are given, the body is read from stdin.
 
@@ -104,6 +119,8 @@ func main() {
 		err = cmdSubUnsub(p, cmd, args)
 	case "register":
 		err = cmdRegister(p, args)
+	case "room":
+		err = cmdRoom(p, args)
 	case "unregister":
 		err = cmdUnregister(p, args)
 	case "rename":
@@ -162,6 +179,22 @@ func agentName(p paths, flagVal string) (string, error) {
 		return env, nil
 	}
 	return "", fmt.Errorf("no identity: run `mess register <name>`, pass --as NAME, or set MESS_AGENT")
+}
+
+// resolveRoom resolves the room to act in: --room flag, then a mid-session
+// joined room, then MESS_ROOM. Unlike agentName, absence is never an error —
+// "" is the meaningful, valid global/default room, not a failure.
+func resolveRoom(p paths, flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if r := readRoom(p); r != "" {
+		return r
+	}
+	if env := os.Getenv("MESS_ROOM"); env != "" {
+		return env
+	}
+	return ""
 }
 
 // bodyFrom joins remaining args as the body, or reads stdin when none given.
@@ -325,6 +358,75 @@ func cmdSubUnsub(p paths, op string, args []string) error {
 	}
 	_, err = call(p, Request{Op: op, As: name, Topic: rest[0]})
 	return err
+}
+
+// cmdRoom handles the `mess room ...` subcommand family: bare "mess room"
+// prints the current room, "join"/"leave" delegate to cmdRoomJoinLeave.
+func cmdRoom(p paths, args []string) error {
+	if len(args) == 0 {
+		if r := resolveRoom(p, ""); r != "" {
+			fmt.Println(r)
+		} else {
+			fmt.Println("(global)")
+		}
+		return nil
+	}
+	switch args[0] {
+	case "join", "leave":
+		return cmdRoomJoinLeave(p, args[0], args[1:])
+	default:
+		return fmt.Errorf("usage: mess room [join <room> | leave]")
+	}
+}
+
+// cmdRoomJoinLeave mirrors cmdSubUnsub's shape: "mess room join [--force]
+// <room>" claims identity within that room (like register, deferring the
+// persisted-room-file write until the daemon accepts it); "mess room leave"
+// unregisters from the current room and reverts to global.
+func cmdRoomJoinLeave(p paths, op string, args []string) error {
+	fs, as := newFlags("room " + op)
+	force := fs.Bool("force", false, "take over a name already held in that room by another live session")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	if op == "join" {
+		rest := fs.Args()
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: mess room join [--force] <room>")
+		}
+		newRoom := rest[0]
+		if _, err := call(p, Request{Op: "room-join", As: name, Room: newRoom, Force: *force}); err != nil {
+			return err
+		}
+		if err := writeRoom(p, newRoom); err != nil {
+			return err
+		}
+		// Also persist the identity itself (like `mess register <name>`), so
+		// `room join <room> --as NAME` works as a one-shot "pick a name and join
+		// a room" even with no prior `mess register` — otherwise whoami and every
+		// future command would have no persisted identity to resolve.
+		if err := writeIdentity(p, name); err != nil {
+			return err
+		}
+		fmt.Printf("joined room %q as %s\n", newRoom, name)
+		return nil
+	}
+	// leave: unregister from the current room, then revert to global.
+	cur := resolveRoom(p, "")
+	if cur == "" {
+		fmt.Println("already in the global room")
+		return nil
+	}
+	if _, err := call(p, Request{Op: "room-leave", As: name, Room: cur}); err != nil {
+		return err
+	}
+	if err := clearRoom(p); err != nil {
+		return err
+	}
+	fmt.Printf("left room %q; back in the global room\n", cur)
+	return nil
 }
 
 func cmdRegister(p paths, args []string) error {
@@ -517,13 +619,14 @@ func cmdBusy(p paths, op string, args []string) error {
 func cmdDrain(p paths, args []string) error {
 	fs := flag.NewFlagSet("drain", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print messages as JSON lines")
+	room := fs.String("room", "", "room the target agent is in (default: your own room)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess drain <agent>")
 	}
 	target := rest[0]
-	resp, err := call(p, Request{Op: "drain", As: target}) // clear target's inbox (no touch, no ack)
+	resp, err := call(p, Request{Op: "drain", As: target, Room: *room}) // clear target's inbox (no touch, no ack)
 	if err != nil {
 		return err
 	}
@@ -562,12 +665,13 @@ func cmdReplay(p paths, args []string) error {
 // cmdRm removes an agent from the network (its inbox, subscriptions, presence).
 func cmdRm(p paths, args []string) error {
 	fs, _ := newFlags("rm")
+	room := fs.String("room", "", "room the target agent is in (default: your own room)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess rm <agent>")
 	}
-	resp, err := call(p, Request{Op: "rm", To: rest[0]})
+	resp, err := call(p, Request{Op: "rm", To: rest[0], Room: *room})
 	if err != nil {
 		return err
 	}
@@ -747,8 +851,10 @@ func compactDur(d time.Duration) string {
 func cmdPs(p paths, args []string) error {
 	fs := flag.NewFlagSet("ps", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	room := fs.String("room", "", "show this room instead of your own")
+	all := fs.Bool("all", false, "show every room")
 	parseAnywhere(fs, args)
-	resp, err := call(p, Request{Op: "ps"})
+	resp, err := call(p, Request{Op: "ps", Room: *room, All: *all})
 	if err != nil {
 		return err
 	}
@@ -756,6 +862,14 @@ func cmdPs(p paths, args []string) error {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(resp)
+	}
+	// displayAgent/displayTopic render "name" scoped to one room (the common
+	// case: identical to pre-rooms mess) or "room/name" when --all mixes rooms.
+	displayAgent := func(a AgentInfo) string { return a.Name }
+	displayTopic := func(t TopicInfo) string { return t.Name }
+	if *all {
+		displayAgent = func(a AgentInfo) string { return displayName(a.Room, a.Name) }
+		displayTopic = func(t TopicInfo) string { return displayName(t.Room, t.Name) }
 	}
 	if len(resp.Agents) == 0 {
 		fmt.Println("no agents")
@@ -778,7 +892,7 @@ func cmdPs(p paths, args []string) error {
 			if a.Online {
 				presence = "online"
 			}
-			line := fmt.Sprintf("  %-16s %-7s %-9s %d pending", a.Name, presence, status, a.Pending)
+			line := fmt.Sprintf("  %-16s %-7s %-9s %d pending", displayAgent(a), presence, status, a.Pending)
 			if a.Pending > 0 && !a.Oldest.IsZero() {
 				line += fmt.Sprintf(" (oldest %s)", compactDur(time.Since(a.Oldest)))
 			}
@@ -797,7 +911,22 @@ func cmdPs(p paths, args []string) error {
 	if len(resp.Topics) > 0 {
 		fmt.Println("topics:")
 		for _, t := range resp.Topics {
-			fmt.Printf("  #%-15s %s\n", t.Name, strings.Join(t.Subscribers, ", "))
+			line := fmt.Sprintf("  #%-15s %s", displayTopic(t), strings.Join(t.Subscribers, ", "))
+			if len(t.Bridged) > 0 {
+				line += "  <-> " + strings.Join(t.Bridged, ", ")
+			}
+			fmt.Println(line)
+		}
+	}
+	if len(resp.Bridges) > 0 {
+		fmt.Println("bridges:")
+		for _, br := range resp.Bridges {
+			expiry := "never"
+			if !br.ExpiresAt.IsZero() {
+				expiry = br.ExpiresAt.Format(time.RFC3339)
+			}
+			fmt.Printf("  %-6s %s <-%s-> %s  creator=%s expires=%s\n",
+				br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
 		}
 	}
 	return nil

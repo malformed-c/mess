@@ -117,3 +117,42 @@ func clearIdentity(p paths) error {
 	}
 	return nil
 }
+
+// roomPath returns the file storing this session's joined room, or "" if
+// there's no session id to key on. Mirrors identityPath exactly, in a sibling
+// "room/" directory next to "ident/".
+func roomPath(p paths) string {
+	sid := sessionID()
+	if sid == "" {
+		return ""
+	}
+	return filepath.Join(p.dir, "room", filepath.Base(sid))
+}
+
+// readRoom returns the persisted room for this session id, or "" (the
+// global/default room — a meaningful value, not an error, unlike identity).
+func readRoom(p paths) string {
+	return readIdentFile(roomPath(p))
+}
+
+// writeRoom persists the session's joined room.
+func writeRoom(p paths, room string) error {
+	path := roomPath(p)
+	if path == "" {
+		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / MESS_SESSION_ID); cannot persist a room (pass --room or set MESS_ROOM instead)")
+	}
+	return writeIdentFile(path, room)
+}
+
+// clearRoom removes this session's persisted room (the inverse of writeRoom,
+// i.e. `mess room leave`). An absent file is not an error.
+func clearRoom(p paths) error {
+	path := roomPath(p)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}

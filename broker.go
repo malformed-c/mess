@@ -48,13 +48,26 @@ type Broker struct {
 	// lingering as a ghost listener (and being resurrected on a daemon restart).
 	evicts map[string][]chan struct{}
 
+	// bridges/bridgesByTopic implement cross-room topic relay (see Bridge/
+	// Unbridge/relayLocked). bridgesByTopic indexes by composite topic key
+	// (either side) for Pub's fan-out and Ps's audit display.
+	bridges        map[string]*bridge
+	bridgesByTopic map[string][]*bridge
+
+	// threadParticipants maps a thread's root message ID to the set of composite
+	// agent keys who've posted in it — a threaded reply wakes a participant (or
+	// an @mention) but is quiet-delivered to everyone else, the same way an
+	// unmentioned topic subscriber is.
+	threadParticipants map[string]map[string]bool
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
 }
 
 type agentState struct {
-	name    string
+	name    string // bare display name, derived from the map key
+	room    string // "" = global/default room, derived from the map key
 	inbox   []Message
 	history []Message // bounded ring of recently-consumed messages, for `replay`
 	topics  map[string]bool
@@ -78,19 +91,89 @@ type warnInfo struct {
 	until time.Time
 }
 
+// bridgeDirection controls which way a bridge relays a publish.
+type bridgeDirection int
+
+const (
+	bridgeBoth  bridgeDirection = iota // relay both ways (default)
+	bridgeAToB                        // relay only a -> b
+	bridgeBToA                        // relay only b -> a
+)
+
+func (d bridgeDirection) String() string {
+	switch d {
+	case bridgeAToB:
+		return "out"
+	case bridgeBToA:
+		return "in"
+	default:
+		return "both"
+	}
+}
+
+// bridge links two topics (possibly in different rooms) so a publish to
+// either side also relays to subscribers on the other — the explicit escape
+// hatch for cross-room coordination now that topics are room-scoped.
+type bridge struct {
+	id                   string
+	a, b                 string // composite topic keys: topicKey(room, topic)
+	aRoom, aTopic        string // decomposed, cached for display/persistence
+	bRoom, bTopic        string
+	dir                  bridgeDirection
+	creator              string
+	createdAt, expiresAt time.Time // expiresAt zero = never
+}
+
+func (br *bridge) expired(now time.Time) bool {
+	return !br.expiresAt.IsZero() && now.After(br.expiresAt)
+}
+
+// otherSide returns the far composite topic key from key, and whether br's
+// direction allows relaying from key at all.
+func (br *bridge) otherSide(key string) (string, bool) {
+	switch key {
+	case br.a:
+		return br.b, br.dir == bridgeBoth || br.dir == bridgeAToB
+	case br.b:
+		return br.a, br.dir == bridgeBoth || br.dir == bridgeBToA
+	}
+	return "", false
+}
+
+// describeFrom renders br for display in ps, from the perspective of key (one
+// of its two topic sides) — e.g. "periapsis/#deploy (out)".
+func (br *bridge) describeFrom(key string) string {
+	other, _ := br.otherSide(key)
+	oRoom, oTopic := splitTopicKey(other)
+	dir := br.dir.String()
+	if key == br.b {
+		// Flip the label's sense so it always reads relative to the caller's side.
+		switch br.dir {
+		case bridgeAToB:
+			dir = "in"
+		case bridgeBToA:
+			dir = "out"
+		}
+	}
+	return fmt.Sprintf("%s (%s)", displayName(oRoom, "#"+oTopic), dir)
+}
+
 // NewBroker returns an empty broker.
 func NewBroker() *Broker {
 	return &Broker{
-		agents:      map[string]*agentState{},
-		topics:      map[string]map[string]bool{},
-		pendingAcks: map[string]chan struct{}{},
-		listeners:   map[string]int{},
-		busyUntil:   map[string]time.Time{},
-		lastSeen:    map[string]time.Time{},
-		owners:      map[string]ownerInfo{},
-		warnings:    map[string]warnInfo{},
-		evicts:      map[string][]chan struct{}{},
-		now:         time.Now,
+		agents:             map[string]*agentState{},
+		topics:             map[string]map[string]bool{},
+		pendingAcks:        map[string]chan struct{}{},
+		listeners:          map[string]int{},
+		busyUntil:          map[string]time.Time{},
+		lastSeen:           map[string]time.Time{},
+		owners:             map[string]ownerInfo{},
+		warnings:           map[string]warnInfo{},
+		evicts:             map[string][]chan struct{}{},
+		bridges:            map[string]*bridge{},
+		bridgesByTopic:     map[string][]*bridge{},
+		threadParticipants: map[string]map[string]bool{},
+		now:                time.Now,
 	}
 }
 
@@ -149,11 +232,15 @@ func (b *Broker) touch(name string) {
 	}
 }
 
-func (b *Broker) ensure(name string) *agentState {
-	a := b.agents[name]
+// ensure gets-or-creates the agentState for key, a composite agentKey(room,
+// name) (or a bare name, for the global room). name/room are derived from the
+// key itself, so no caller needs to set them separately.
+func (b *Broker) ensure(key string) *agentState {
+	a := b.agents[key]
 	if a == nil {
-		a = &agentState{name: name, topics: map[string]bool{}}
-		b.agents[name] = a
+		room, name := splitAgentKey(key)
+		a = &agentState{name: name, room: room, topics: map[string]bool{}}
+		b.agents[key] = a
 	}
 	return a
 }
@@ -278,17 +365,19 @@ func (b *Broker) Rename(old, newName, session string, force bool) (bool, string)
 	}
 
 	dst := b.ensure(newName)
+	room, _ := splitAgentKey(newName)
 	if src := b.agents[old]; src != nil {
 		dst.inbox = append(dst.inbox, src.inbox...)
 		if dst.state == "" {
 			dst.state = src.state
 		}
-		for topic := range src.topics {
-			dst.topics[topic] = true
-			if b.topics[topic] == nil {
-				b.topics[topic] = map[string]bool{}
+		for topicName := range src.topics {
+			dst.topics[topicName] = true
+			tk := topicKey(room, topicName)
+			if b.topics[tk] == nil {
+				b.topics[tk] = map[string]bool{}
 			}
-			b.topics[topic][newName] = true
+			b.topics[tk][newName] = true
 		}
 	}
 	// Carry over activity/turn markers (keep the fresher of the two).
@@ -335,13 +424,18 @@ func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error
 	return b.send(from, to, body, true)
 }
 
+// send's from/to are composite keys (agentKey(room, name)) except when to is
+// the bare human mailbox handle (never room-scoped — see dispatch). The
+// delivered Message always carries bare names.
 func (b *Broker) send(from, to, body string, ack bool) (Message, <-chan struct{}, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if to == "" {
 		return Message{}, nil, fmt.Errorf("recipient required")
 	}
-	m := Message{ID: b.nextID(), From: from, To: to, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack}
+	_, fromName := splitAgentKey(from)
+	_, toName := splitAgentKey(to)
+	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack}
 	b.touch(from)
 	b.ensure(to).deliver(m)
 	var ackCh chan struct{}
@@ -360,15 +454,23 @@ func (b *Broker) CancelAck(id string) {
 	delete(b.pendingAcks, id)
 }
 
-// Broadcast delivers to every known agent except the sender.
+// Broadcast delivers to every known agent in the sender's room except the
+// sender itself. from is a composite key (agentKey(room, name)); the room it
+// decomposes to is the scope — an agent in the global room broadcasts to the
+// rest of the global room, an agent in a joined room broadcasts only to that
+// room's other members.
 func (b *Broker) Broadcast(from, body string) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	m := Message{ID: b.nextID(), From: from, Kind: KindBroadcast, Body: body, Time: b.now()}
+	room, fromName := splitAgentKey(from)
+	m := Message{ID: b.nextID(), From: fromName, Kind: KindBroadcast, Body: body, Time: b.now()}
 	b.touch(from)
 	n := 0
-	for name, a := range b.agents {
-		if name == from {
+	for key, a := range b.agents {
+		if key == from {
+			continue
+		}
+		if r, _ := splitAgentKey(key); r != room {
 			continue
 		}
 		a.deliver(m)
@@ -399,18 +501,24 @@ func mentionsIn(body string) map[string]bool {
 // Pub delivers to every subscriber of a topic except the sender, and returns the
 // delivery count and how many were *woken*. If the body @-mentions subscribers,
 // only the mentioned ones are woken (the rest still receive it, read on their
-// next recv); with no mentions, everyone is woken as before.
+// next recv); with no mentions, everyone is woken as before. from/topic are
+// composite keys (agentKey/topicKey(room, ...)); b.topics[topic]'s subscriber
+// set holds composite agent keys too, since every subscriber of a room-scoped
+// topic is necessarily a member of that same room.
 func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	m = Message{ID: b.nextID(), From: from, Topic: topic, Kind: KindTopic, Body: body, Time: b.now()}
+	_, fromName := splitAgentKey(from)
+	_, topicName := splitAgentKey(topic)
+	m = Message{ID: b.nextID(), From: fromName, Topic: topicName, Kind: KindTopic, Body: body, Time: b.now()}
 	b.touch(from)
 	mentions := mentionsIn(body)
-	for name := range b.topics[topic] {
-		if name == from {
+	for key := range b.topics[topic] {
+		if key == from {
 			continue
 		}
-		a := b.ensure(name)
+		_, name := splitAgentKey(key)
+		a := b.ensure(key)
 		if len(mentions) == 0 || mentions[name] {
 			a.deliver(m) // wake
 			woke++
@@ -423,11 +531,12 @@ func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) 
 	return m, delivered, woke
 }
 
-// Sub subscribes an agent to a topic.
+// Sub subscribes an agent to a topic. name/topic are composite keys.
 func (b *Broker) Sub(name, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.ensure(name).topics[topic] = true
+	_, topicName := splitAgentKey(topic)
+	b.ensure(name).topics[topicName] = true
 	b.touch(name)
 	if b.topics[topic] == nil {
 		b.topics[topic] = map[string]bool{}
@@ -436,13 +545,14 @@ func (b *Broker) Sub(name, topic string) {
 	b.changed()
 }
 
-// Unsub removes a topic subscription.
+// Unsub removes a topic subscription. name/topic are composite keys.
 func (b *Broker) Unsub(name, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.touch(name)
+	_, topicName := splitAgentKey(topic)
 	if a := b.agents[name]; a != nil {
-		delete(a.topics, topic)
+		delete(a.topics, topicName)
 	}
 	if subs := b.topics[topic]; subs != nil {
 		delete(subs, name)
@@ -700,41 +810,50 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now()
-	var names []string
-	for name, a := range b.agents {
-		if b.aliveLocked(name) {
+	var keys, names []string
+	for key, a := range b.agents {
+		if b.aliveLocked(key) {
 			continue // online (listening / working / recently active) — keep
 		}
-		if isUserHandle(name) {
-			continue // the human's mailbox — never prune unread pings
+		if isUserHandle(a.name) {
+			continue // the human's mailbox — never prune unread pings, in any room
 		}
 		stale := false
-		if seen, ok := b.lastSeen[name]; ok && now.Sub(seen) > maxAge {
+		if seen, ok := b.lastSeen[key]; ok && now.Sub(seen) > maxAge {
 			stale = true // no activity for too long
 		}
 		if len(a.inbox) > 0 && now.Sub(a.inbox[0].Time) > maxAge {
 			stale = true // mail undrained for too long — a dead session accumulating
 		}
 		if stale {
-			names = append(names, name)
+			keys = append(keys, key)
+			names = append(names, displayName(a.room, a.name))
 		}
 	}
 	sort.Strings(names)
-	if !dryRun && len(names) > 0 {
-		for _, name := range names {
-			b.removeAgentLocked(name)
+	sort.Strings(keys)
+	if !dryRun && len(keys) > 0 {
+		for _, key := range keys {
+			b.removeAgentLocked(key)
 		}
 		b.changed()
 	}
 	return names
 }
 
-// Ps reports current agents and topics, sorted for stable output.
-func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
+// Ps reports current agents and topics, sorted for stable output. With
+// all==false, only the given room's agents/topics are returned (room=="" is
+// the global/default room — the scope everyone is in until they `mess room
+// join`); with all==true, room is ignored and everything is returned across
+// every room.
+func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var agents []AgentInfo
-	for _, a := range b.agents {
+	for key, a := range b.agents {
+		if !all && a.room != room {
+			continue
+		}
 		topics := make([]string, 0, len(a.topics))
 		for t := range a.topics {
 			topics = append(topics, t)
@@ -745,22 +864,42 @@ func (b *Broker) Ps() ([]AgentInfo, []TopicInfo) {
 			oldest = a.inbox[0].Time // inbox is in arrival order; [0] is oldest
 		}
 		warning := ""
-		if w, ok := b.warnings[a.name]; ok && w.until.After(b.now()) {
+		if w, ok := b.warnings[key]; ok && w.until.After(b.now()) {
 			warning = w.text // expired warnings are simply not reported
 		}
-		agents = append(agents, AgentInfo{Name: a.name, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[a.name] > 0, Working: b.busyUntil[a.name].After(b.now()), Online: b.aliveLocked(a.name), State: a.state, Warning: warning, Oldest: oldest})
+		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.busyUntil[key].After(b.now()), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest})
 	}
-	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
+	sort.Slice(agents, func(i, j int) bool {
+		if agents[i].Room != agents[j].Room {
+			return agents[i].Room < agents[j].Room
+		}
+		return agents[i].Name < agents[j].Name
+	})
 
 	var topics []TopicInfo
-	for t, subs := range b.topics {
+	for tk, subs := range b.topics {
+		tRoom, tName := splitTopicKey(tk)
+		if !all && tRoom != room {
+			continue
+		}
 		names := make([]string, 0, len(subs))
-		for n := range subs {
+		for key := range subs {
+			_, n := splitAgentKey(key)
 			names = append(names, n)
 		}
 		sort.Strings(names)
-		topics = append(topics, TopicInfo{Name: t, Subscribers: names})
+		var bridged []string
+		for _, br := range b.bridgesByTopic[tk] {
+			bridged = append(bridged, br.describeFrom(tk))
+		}
+		sort.Strings(bridged)
+		topics = append(topics, TopicInfo{Name: tName, Room: tRoom, Subscribers: names, Bridged: bridged})
 	}
-	sort.Slice(topics, func(i, j int) bool { return topics[i].Name < topics[j].Name })
+	sort.Slice(topics, func(i, j int) bool {
+		if topics[i].Room != topics[j].Room {
+			return topics[i].Room < topics[j].Room
+		}
+		return topics[i].Name < topics[j].Name
+	})
 	return agents, topics
 }
