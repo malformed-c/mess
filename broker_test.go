@@ -1245,3 +1245,80 @@ func TestDrainThreadFiltersToRootAndReplies(t *testing.T) {
 		t.Fatalf("peek should not have consumed anything; expected 4 total, got %d", len(full))
 	}
 }
+
+// --- export ---
+
+// ExportTopic reads the topic's own log even for a subscriber who never
+// consumed anything (unlike Replay, which is per-recipient), and even after
+// everyone has unsubscribed (the topic's own history outlives its last
+// subscriber leaving).
+func TestExportTopicSurvivesUnsubscribe(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("alice", "eng")
+	b.Pub("alice", "eng", "first")
+	b.Pub("alice", "eng", "second")
+	b.Unsub("alice", "eng") // topic now has zero subscribers
+
+	got := b.ExportTopic("eng", 0)
+	if len(got) != 2 || got[0].Body != "first" || got[1].Body != "second" {
+		t.Fatalf("expected both messages preserved in topic history: %+v", got)
+	}
+}
+
+func TestExportTopicRespectsMax(t *testing.T) {
+	b := newTestBroker()
+	for _, body := range []string{"1", "2", "3"} {
+		b.Pub("alice", "eng", body)
+	}
+	got := b.ExportTopic("eng", 2)
+	if len(got) != 2 || got[0].Body != "2" || got[1].Body != "3" {
+		t.Fatalf("expected the most recent 2, got %+v", got)
+	}
+}
+
+// ExportThread/ExportDirect are peek-only (Drain is unaffected) and combine
+// already-consumed history with whatever's still queued.
+func TestExportThreadAndDirectArePeekOnly(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("bob", "eng")
+	root, _, _ := b.Pub("alice", "eng", "root")
+	b.PubThreaded("alice", "eng", "reply", root.ID)
+	b.Drain("bob", false, 1) // consume just the root, leaving "reply" still queued
+
+	got := b.ExportThread("bob", root.ID, 0)
+	if len(got) != 2 {
+		t.Fatalf("expected root (from history) + reply (from inbox), got %+v", got)
+	}
+	// Peek-only: nothing was consumed by the export itself.
+	if len(b.agents["bob"].inbox) != 1 {
+		t.Fatalf("export must not consume the still-queued reply: %+v", b.agents["bob"].inbox)
+	}
+
+	b.Send("carol", "bob", "a DM")
+	direct := b.ExportDirect("bob", "carol", 0)
+	if len(direct) != 1 || direct[0].Body != "a DM" {
+		t.Fatalf("expected the DM from carol: %+v", direct)
+	}
+}
+
+func TestExportTopicSnapshotRoundTripSurvivesNoSubscribers(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("alice", "eng")
+	b.Pub("alice", "eng", "hello")
+	b.Unsub("alice", "eng")
+	snap := b.snapshot()
+
+	b2 := newTestBroker()
+	b2.load(snap)
+	got := b2.ExportTopic("eng", 0)
+	if len(got) != 1 || got[0].Body != "hello" {
+		t.Fatalf("topic history should survive a restart even with no subscribers: %+v", got)
+	}
+	// And it must not resurrect a phantom subscriber entry in ps.
+	_, topics := b2.Ps("", true)
+	for _, top := range topics {
+		if top.Name == "eng" && len(top.Subscribers) != 0 {
+			t.Fatalf("restored topic should have zero subscribers, got %+v", top)
+		}
+	}
+}

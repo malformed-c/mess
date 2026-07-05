@@ -60,6 +60,14 @@ type Broker struct {
 	// unmentioned topic subscriber is.
 	threadParticipants map[string]map[string]bool
 
+	// topicHistory is a topic's own bounded append-only log (composite topic
+	// key -> recent messages), independent of any individual subscriber's own
+	// inbox/history lifecycle — unlike agentState.history (per-*recipient*,
+	// only what that agent actually consumed), this exists even for a topic
+	// nobody was subscribed to at the time, so `mess export --topic` has
+	// something to show.
+	topicHistory map[string][]Message
+
 	// onChange is invoked (while holding the lock) after every mutation so the
 	// caller can persist state. It receives a snapshot to serialize.
 	onChange func(snapshot)
@@ -173,6 +181,7 @@ func NewBroker() *Broker {
 		bridges:            map[string]*bridge{},
 		bridgesByTopic:     map[string][]*bridge{},
 		threadParticipants: map[string]map[string]bool{},
+		topicHistory:       map[string][]Message{},
 		now:                time.Now,
 	}
 }
@@ -538,6 +547,7 @@ func mentionsIn(body string) map[string]bool {
 // (non-relay, non-threaded) publish keeps today's behavior (no mention ->
 // wake everyone). Returns the delivery/wake counts. Caller must hold b.mu.
 func (b *Broker) publishLocalLocked(key string, m Message, skip string, isRelay bool) (delivered, woke int) {
+	b.appendTopicHistoryLocked(key, m)
 	mentions := mentionsIn(m.Body)
 	participants := b.threadParticipants[m.ThreadID] // nil if ThreadID=="" or nobody's posted yet
 	for subKey := range b.topics[key] {
@@ -561,6 +571,16 @@ func (b *Broker) publishLocalLocked(key string, m Message, skip string, isRelay 
 		delivered++
 	}
 	return delivered, woke
+}
+
+// appendTopicHistoryLocked records m in key's own bounded log, independent of
+// current subscribers (see topicHistory's field comment). Caller must hold b.mu.
+func (b *Broker) appendTopicHistoryLocked(key string, m Message) {
+	h := append(b.topicHistory[key], m)
+	if len(h) > maxHistory {
+		h = h[len(h)-maxHistory:]
+	}
+	b.topicHistory[key] = h
 }
 
 // maxBridgeHops hard-caps how far a single publish can relay across a chain of
@@ -905,6 +925,77 @@ func (b *Broker) Replay(name string, n int) []Message {
 	}
 	out := make([]Message, len(h))
 	copy(out, h)
+	return out
+}
+
+// ExportTopic returns a topic's own bounded history (topicKey composite key),
+// most-recent max messages (0 = all), oldest first. Unlike Replay, this
+// exists even if nobody was subscribed at the time a message went by — it's
+// the topic's own log, not a recipient's.
+func (b *Broker) ExportTopic(topic string, max int) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	h := b.topicHistory[topic]
+	if max > 0 && max < len(h) {
+		h = h[len(h)-max:]
+	}
+	out := make([]Message, len(h))
+	copy(out, h)
+	return out
+}
+
+// ExportThread returns name's own view (already-consumed history plus
+// whatever's still queued, time-ordered) of one thread: the root message plus
+// every reply name has *received*. Peek-only; consumes nothing.
+//
+// Known gap: a message name sent itself never appears — Pub/Send never add a
+// sender's own message to its own inbox (the same "you don't receive your own
+// broadcast/topic post" rule recv already follows), so an active participant's
+// own replies are invisible to their own export. `mess export --topic`
+// doesn't have this gap, since a topic's history is logged once at publish
+// time regardless of sender — prefer it when completeness matters more than
+// "just my view."
+func (b *Broker) ExportThread(name, threadID string, max int) []Message {
+	return b.exportOwn(name, max, func(m Message) bool {
+		return m.ThreadID == threadID || m.ID == threadID
+	})
+}
+
+// ExportDirect returns name's own direct-message history with peer
+// (bare name), time-ordered. Peek-only; consumes nothing. Same "own received
+// view" gap as ExportThread: a message name sent to peer won't appear.
+func (b *Broker) ExportDirect(name, peer string, max int) []Message {
+	_, peerName := splitAgentKey(peer)
+	return b.exportOwn(name, max, func(m Message) bool {
+		return m.Kind == KindDirect && (m.From == peerName || m.To == peerName)
+	})
+}
+
+// exportOwn scans name's own consumed history and current inbox (never
+// mutating either) for messages matching, merges and time-sorts them, and
+// caps to the most recent max (0 = all).
+func (b *Broker) exportOwn(name string, max int, match func(Message) bool) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return nil
+	}
+	var out []Message
+	for _, m := range a.history {
+		if match(m) {
+			out = append(out, m)
+		}
+	}
+	for _, m := range a.inbox {
+		if match(m) {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if max > 0 && max < len(out) {
+		out = out[len(out)-max:]
+	}
 	return out
 }
 

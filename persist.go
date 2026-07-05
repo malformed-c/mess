@@ -28,9 +28,10 @@ type agentSnap struct {
 }
 
 type topicSnap struct {
-	Room        string   `json:"room,omitempty"`
-	Name        string   `json:"name"`
-	Subscribers []string `json:"subscribers"`
+	Room        string    `json:"room,omitempty"`
+	Name        string    `json:"name"`
+	Subscribers []string  `json:"subscribers"`
+	History     []Message `json:"history,omitempty"` // the topic's own bounded log; see Broker.topicHistory
 }
 
 type bridgeSnap struct {
@@ -96,15 +97,26 @@ func (b *Broker) snapshot() snapshot {
 		}
 		return s.Agents[i].Name < s.Agents[j].Name
 	})
-	for tk, subs := range b.topics {
+	// Union b.topics (current subscribers) with b.topicHistory (a topic's own
+	// log can outlive its last subscriber unsubscribing) so history isn't
+	// silently dropped for a topic nobody's currently subscribed to.
+	topicKeys := make(map[string]bool, len(b.topics)+len(b.topicHistory))
+	for tk := range b.topics {
+		topicKeys[tk] = true
+	}
+	for tk := range b.topicHistory {
+		topicKeys[tk] = true
+	}
+	for tk := range topicKeys {
 		tRoom, tName := splitTopicKey(tk)
+		subs := b.topics[tk]
 		names := make([]string, 0, len(subs))
 		for key := range subs {
 			_, n := splitAgentKey(key)
 			names = append(names, n)
 		}
 		sort.Strings(names)
-		s.Topics = append(s.Topics, topicSnap{Room: tRoom, Name: tName, Subscribers: names})
+		s.Topics = append(s.Topics, topicSnap{Room: tRoom, Name: tName, Subscribers: names, History: b.topicHistory[tk]})
 	}
 	sort.Slice(s.Topics, func(i, j int) bool {
 		if s.Topics[i].Room != s.Topics[j].Room {
@@ -132,6 +144,7 @@ func (b *Broker) load(s snapshot) {
 	b.lastSeen = map[string]time.Time{}
 	b.bridges = map[string]*bridge{}
 	b.bridgesByTopic = map[string][]*bridge{}
+	b.topicHistory = map[string][]Message{}
 	for _, as := range s.Agents {
 		key := agentKey(as.Room, as.Name)
 		a := b.ensure(key)
@@ -151,11 +164,15 @@ func (b *Broker) load(s snapshot) {
 	}
 	for _, ts := range s.Topics {
 		tk := topicKey(ts.Room, ts.Name)
-		if b.topics[tk] == nil {
-			b.topics[tk] = map[string]bool{}
+		if len(ts.Subscribers) > 0 {
+			subs := make(map[string]bool, len(ts.Subscribers))
+			for _, n := range ts.Subscribers {
+				subs[agentKey(ts.Room, n)] = true
+			}
+			b.topics[tk] = subs
 		}
-		for _, n := range ts.Subscribers {
-			b.topics[tk][agentKey(ts.Room, n)] = true
+		if len(ts.History) > 0 {
+			b.topicHistory[tk] = ts.History
 		}
 	}
 	for _, bs := range s.Bridges {

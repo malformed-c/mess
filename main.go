@@ -19,9 +19,12 @@ Usage:
                                   (--ack blocks until it's read; --timeout DUR)
                                   (to "user" or your login name = the human's
                                   mailbox: desktop-notifies, read via recv --as user)
+                                  (--thread ID replies within a thread)
   mess broadcast [body...]        send to every known agent
   mess pub <topic> [body...]      publish to a topic (@mention wakes only the
                                   tagged subscribers; the rest still receive it)
+                                  (--thread ID replies within a thread — quiet
+                                  unless @mentioned or already a participant)
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
   mess register [name]            join the network; with a name, set this
@@ -41,9 +44,13 @@ Usage:
                                   leaves the agent registered — for a stuck backlog)
   mess whoami                     print your resolved identity (empty if none)
   mess islistening                exit 0 if you have an active listener, else 1
-  mess recv [duration]            receive queued messages
+  mess recv [duration]            receive queued messages (--thread ID shows
+                                  only that thread's messages, not with --wait)
   mess replay [N]                 reprint the last N messages you already consumed
                                   (recover a message lost to a dropped wake)
+  mess export --topic NAME | --thread ID | --to AGENT
+                                  dump a conversation's full history
+                                  (--format text|json, --out FILE, --max N)
   mess listen [idle-timeout]      run continuously (bg): print messages as they
                                   arrive until interrupted (alias: recv --follow)
   mess ps [--room NAME | --all]    list agents and topics (online/offline +
@@ -145,6 +152,8 @@ func main() {
 		err = cmdRecv(p, args)
 	case "replay":
 		err = cmdReplay(p, args)
+	case "export":
+		err = cmdExport(p, args)
 	case "listen":
 		// listen == recv --follow: a continuous background listener.
 		err = cmdRecv(p, append([]string{"--follow"}, args...))
@@ -772,6 +781,75 @@ func cmdReplay(p paths, args []string) error {
 		return err
 	}
 	printMessages(resp.Messages, *asJSON)
+	return nil
+}
+
+// cmdExport dumps a conversation's full history — a topic's own log (--topic,
+// independent of who's currently subscribed), a thread's root+replies from
+// your own view (--thread), or your direct-message history with a peer
+// (--to) — as text or JSON, to stdout or a file.
+func cmdExport(p paths, args []string) error {
+	fs, as := newFlags("export")
+	topic := fs.String("topic", "", "export this topic's full history")
+	thread := fs.String("thread", "", "export this thread (root + replies) from your own received view (your own sent replies won't appear; use --topic for the complete log)")
+	to := fs.String("to", "", "export your direct-message history with this peer (received view only, same caveat as --thread)")
+	format := fs.String("format", "text", "text | json")
+	out := fs.String("out", "", "write to this file instead of stdout")
+	max := fs.Int("max", 0, "limit to the most recent N messages (0 = all)")
+	parseAnywhere(fs, args)
+	targets := 0
+	for _, v := range []string{*topic, *thread, *to} {
+		if v != "" {
+			targets++
+		}
+	}
+	if targets != 1 {
+		return fmt.Errorf("usage: mess export --topic NAME | --thread ID | --to AGENT [--format text|json] [--out FILE] [--max N]")
+	}
+	if *format != "text" && *format != "json" {
+		return fmt.Errorf("--format must be text or json")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "export", As: name, Topic: *topic, ThreadID: *thread, To: *to, Max: *max})
+	if err != nil {
+		return err
+	}
+
+	var w io.Writer = os.Stdout
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	if *format == "json" {
+		enc := json.NewEncoder(w)
+		for _, m := range resp.Messages {
+			if err := enc.Encode(m); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, m := range resp.Messages {
+		ts := m.Time.Format("2006-01-02 15:04:05")
+		switch m.Kind {
+		case KindTopic:
+			fmt.Fprintf(w, "%s %s #%s: %s\n", ts, m.From, m.Topic, m.Body)
+		case KindBroadcast:
+			fmt.Fprintf(w, "%s %s (broadcast): %s\n", ts, m.From, m.Body)
+		default:
+			fmt.Fprintf(w, "%s %s: %s\n", ts, m.From, m.Body)
+		}
+	}
+	if *out != "" {
+		fmt.Printf("exported %d message(s) to %s\n", len(resp.Messages), *out)
+	}
 	return nil
 }
 

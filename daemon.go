@@ -307,7 +307,7 @@ func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
 		"busy", "unbusy", "recv", "listen", "replay", "unregister", "room-leave",
-		"bridge", "unbridge":
+		"bridge", "unbridge", "export":
 		return true
 	}
 	return false
@@ -429,6 +429,19 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true, Count: 0} // idempotent
 	case "bridges":
 		return Response{OK: true, Bridges: b.ListBridges()}
+	case "export":
+		var msgs []Message
+		switch {
+		case req.Topic != "":
+			msgs = b.ExportTopic(topic, req.Max)
+		case req.ThreadID != "":
+			msgs = b.ExportThread(who, req.ThreadID, req.Max)
+		case req.To != "":
+			msgs = b.ExportDirect(who, to, req.Max)
+		default:
+			return Response{Error: "export requires --topic, --thread, or --to"}
+		}
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "state":
 		b.SetState(who, req.Body)
 		return Response{OK: true}
