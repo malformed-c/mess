@@ -374,8 +374,14 @@ func cmdRoom(p paths, args []string) error {
 	switch args[0] {
 	case "join", "leave":
 		return cmdRoomJoinLeave(p, args[0], args[1:])
+	case "bridge":
+		return cmdRoomBridge(p, args[1:])
+	case "unbridge":
+		return cmdRoomUnbridge(p, args[1:])
+	case "bridges":
+		return cmdRoomBridges(p, args[1:])
 	default:
-		return fmt.Errorf("usage: mess room [join <room> | leave]")
+		return fmt.Errorf("usage: mess room [join <room> | leave | bridge ... | unbridge <id> | bridges]")
 	}
 }
 
@@ -426,6 +432,111 @@ func cmdRoomJoinLeave(p paths, op string, args []string) error {
 		return err
 	}
 	fmt.Printf("left room %q; back in the global room\n", cur)
+	return nil
+}
+
+// splitRoomTopic parses a "<room>/<topic>" remote address (the room may be
+// empty for the global room, e.g. "/announcements").
+func splitRoomTopic(s string) (room, topic string, err error) {
+	i := strings.LastIndexByte(s, '/')
+	if i < 0 {
+		return "", "", fmt.Errorf("expected <room>/<topic>, got %q", s)
+	}
+	return s[:i], strings.TrimPrefix(s[i+1:], "#"), nil
+}
+
+// cmdRoomBridge implements `mess room bridge <local-topic> <room>/<remote-topic>`
+// — links two topics (possibly in different rooms) so a publish to either
+// side also relays to subscribers on the other. The local side defaults to
+// the caller's own current room; --local-room names a different one but
+// requires --force, since otherwise any caller could bridge on behalf of a
+// room it isn't even in.
+func cmdRoomBridge(p paths, args []string) error {
+	fs, as := newFlags("room bridge")
+	direction := fs.String("direction", "both", "both | out | in")
+	localRoom := fs.String("local-room", "", "override the local side's room (requires --force if you're not in it)")
+	ttl := fs.String("ttl", "", "auto-expire after this long (default: never)")
+	force := fs.Bool("force", false, "override the local-room guard, a duplicate bridge, or the bridge cap")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("usage: mess room bridge [--direction both|out|in] [--local-room NAME] [--ttl DUR] [--force] <local-topic> <room>/<remote-topic>")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	if *direction != "both" && *direction != "out" && *direction != "in" {
+		return fmt.Errorf("--direction must be both, out, or in")
+	}
+	remoteRoom, remoteTopic, err := splitRoomTopic(rest[1])
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{
+		Op: "bridge", As: name, Topic: rest[0], RemoteRoom: remoteRoom, RemoteTopic: remoteTopic,
+		Direction: *direction, LocalRoom: *localRoom, Timeout: *ttl, Force: *force,
+	})
+	if err != nil {
+		return err
+	}
+	if len(resp.Bridges) == 1 {
+		br := resp.Bridges[0]
+		fmt.Printf("bridge %s: %s <-%s-> %s\n", br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic))
+	}
+	return nil
+}
+
+// cmdRoomUnbridge tears down a bridge by ID.
+func cmdRoomUnbridge(p paths, args []string) error {
+	fs, as := newFlags("room unbridge")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: mess room unbridge <id>")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "unbridge", As: name, BridgeID: rest[0]})
+	if err != nil {
+		return err
+	}
+	if resp.Count == 0 {
+		fmt.Printf("no such bridge %q\n", rest[0])
+	} else {
+		fmt.Printf("removed bridge %s\n", rest[0])
+	}
+	return nil
+}
+
+// cmdRoomBridges lists every active bridge.
+func cmdRoomBridges(p paths, args []string) error {
+	fs := flag.NewFlagSet("room bridges", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print bridges as JSON")
+	parseAnywhere(fs, args)
+	resp, err := call(p, Request{Op: "bridges"})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resp.Bridges)
+	}
+	if len(resp.Bridges) == 0 {
+		fmt.Println("no bridges")
+		return nil
+	}
+	for _, br := range resp.Bridges {
+		expiry := "never"
+		if !br.ExpiresAt.IsZero() {
+			expiry = br.ExpiresAt.Format(time.RFC3339)
+		}
+		fmt.Printf("%-6s %s <-%s-> %s  creator=%s expires=%s\n",
+			br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
+	}
 	return nil
 }
 

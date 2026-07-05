@@ -306,10 +306,24 @@ func writeResp(conn net.Conn, r Response) {
 func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
-		"busy", "unbusy", "recv", "listen", "replay", "unregister", "room-leave":
+		"busy", "unbusy", "recv", "listen", "replay", "unregister", "room-leave",
+		"bridge", "unbridge":
 		return true
 	}
 	return false
+}
+
+// parseBridgeDirection turns the wire "out"/"in"/"" into a bridgeDirection
+// (default bridgeBoth for an empty/unrecognized value).
+func parseBridgeDirection(s string) bridgeDirection {
+	switch s {
+	case "out":
+		return bridgeAToB
+	case "in":
+		return bridgeBToA
+	default:
+		return bridgeBoth
+	}
 }
 
 func (d *daemon) dispatch(req Request) Response {
@@ -381,6 +395,40 @@ func (d *daemon) dispatch(req Request) Response {
 	case "unsub":
 		b.Unsub(who, topic)
 		return Response{OK: true}
+	case "bridge":
+		// The local side defaults to the caller's ambient room (req.Room, already
+		// filled by client.go's withRoom); --local-room overrides it but requires
+		// --force unless it matches, since otherwise any caller could bridge on
+		// behalf of a room it isn't even in.
+		localRoom := req.Room
+		if req.LocalRoom != "" {
+			if req.LocalRoom != req.Room && !req.Force {
+				return Response{Error: fmt.Sprintf("not currently in room %q; pass --force to bridge on its behalf", req.LocalRoom)}
+			}
+			localRoom = req.LocalRoom
+		}
+		remoteTopic := strings.TrimPrefix(req.RemoteTopic, "#")
+		dir := parseBridgeDirection(req.Direction)
+		var ttl time.Duration
+		if req.Timeout != "" {
+			if d, err := time.ParseDuration(req.Timeout); err == nil {
+				ttl = d
+			}
+		}
+		br, err := b.Bridge(localRoom, req.Topic, req.RemoteRoom, remoteTopic, dir, req.As, ttl, req.Force)
+		if err != nil {
+			elog("bridge %s -> %s refused: %s", displayName(localRoom, req.Topic), displayName(req.RemoteRoom, remoteTopic), err)
+			return Response{Error: err.Error()}
+		}
+		return Response{OK: true, Bridges: []BridgeInfo{bridgeToInfo(br)}}
+	case "unbridge":
+		if ok, desc := b.Unbridge(req.BridgeID); ok {
+			elog("BRIDGE removed: id=%s by=%s (%s)", req.BridgeID, req.As, desc)
+			return Response{OK: true, Count: 1}
+		}
+		return Response{OK: true, Count: 0} // idempotent
+	case "bridges":
+		return Response{OK: true, Bridges: b.ListBridges()}
 	case "state":
 		b.SetState(who, req.Body)
 		return Response{OK: true}

@@ -675,7 +675,7 @@ func (b *Broker) Bridge(localRoom, localTopic, remoteRoom, remoteTopic string, d
 	b.bridgesByTopic[ak] = append(b.bridgesByTopic[ak], br)
 	b.bridgesByTopic[bk] = append(b.bridgesByTopic[bk], br)
 	b.changed()
-	elog("BRIDGE created: id=%s creator=%s %s <-%s-> %s", id, creator, ak, br.dir.String(), bk)
+	elog("BRIDGE created: id=%s creator=%s %s <-%s-> %s", id, creator, displayName(localRoom, "#"+localTopic), br.dir.String(), displayName(remoteRoom, "#"+remoteTopic))
 	return br, nil
 }
 
@@ -699,7 +699,7 @@ func (b *Broker) Unbridge(id string) (bool, string) {
 	if len(b.bridgesByTopic[br.b]) == 0 {
 		delete(b.bridgesByTopic, br.b)
 	}
-	desc := fmt.Sprintf("%s <-%s-> %s", br.a, br.dir.String(), br.b)
+	desc := fmt.Sprintf("%s <-%s-> %s", displayName(br.aRoom, "#"+br.aTopic), br.dir.String(), displayName(br.bRoom, "#"+br.bTopic))
 	b.changed()
 	return true, desc
 }
@@ -714,6 +714,14 @@ func removeBridge(list []*bridge, target *bridge) []*bridge {
 	return out
 }
 
+// bridgeToInfo converts a *bridge to its wire form.
+func bridgeToInfo(br *bridge) BridgeInfo {
+	return BridgeInfo{
+		ID: br.id, ARoom: br.aRoom, ATopic: br.aTopic, BRoom: br.bRoom, BTopic: br.bTopic,
+		Direction: br.dir.String(), Creator: br.creator, CreatedAt: br.createdAt, ExpiresAt: br.expiresAt,
+	}
+}
+
 // ListBridges reports every live (non-expired) bridge, sorted by ID.
 func (b *Broker) ListBridges() []BridgeInfo {
 	b.mu.Lock()
@@ -724,10 +732,7 @@ func (b *Broker) ListBridges() []BridgeInfo {
 		if br.expired(now) {
 			continue
 		}
-		out = append(out, BridgeInfo{
-			ID: br.id, ARoom: br.aRoom, ATopic: br.aTopic, BRoom: br.bRoom, BTopic: br.bTopic,
-			Direction: br.dir.String(), Creator: br.creator, CreatedAt: br.createdAt, ExpiresAt: br.expiresAt,
-		})
+		out = append(out, bridgeToInfo(br))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

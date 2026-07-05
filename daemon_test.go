@@ -197,3 +197,65 @@ func TestRoomLeaveRevertsToGlobal(t *testing.T) {
 		t.Fatalf("second leave should be a no-op, got %+v", resp)
 	}
 }
+
+// The daemon-level "bridge" op resolves the local side from req.Room (the
+// caller's ambient room, already filled by client.go's withRoom before this
+// ever reaches dispatch) and relays a publish across it.
+func TestDispatchBridgeUsesCallerRoomAsLocalSide(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
+	d.dispatch(Request{Op: "sub", As: "bob", Room: "B", Topic: "ops"})
+	resp := d.dispatch(Request{Op: "bridge", As: "alice", Room: "A", Topic: "deploy", RemoteRoom: "B", RemoteTopic: "ops"})
+	if !resp.OK || len(resp.Bridges) != 1 {
+		t.Fatalf("bridge creation failed: %+v", resp)
+	}
+	if resp.Bridges[0].ARoom != "A" || resp.Bridges[0].ATopic != "deploy" {
+		t.Fatalf("local side should resolve from req.Room: %+v", resp.Bridges[0])
+	}
+
+	d.dispatch(Request{Op: "pub", As: "alice", Room: "A", Topic: "deploy", Body: "ship it"})
+	got := d.recv(nil, Request{Op: "recv", As: "bob", Room: "B"})
+	if len(got.Messages) != 1 || got.Messages[0].Body != "ship it" {
+		t.Fatalf("bridge did not relay through dispatch: %+v", got.Messages)
+	}
+}
+
+// --local-room overriding the caller's actual current room requires --force —
+// otherwise any caller could bridge on behalf of a room it isn't even in.
+func TestDispatchBridgeLocalRoomOverrideRequiresForce(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
+	resp := d.dispatch(Request{Op: "bridge", As: "alice", Room: "A", LocalRoom: "C", Topic: "deploy", RemoteRoom: "B", RemoteTopic: "ops"})
+	if resp.Error == "" {
+		t.Fatal("overriding local-room without --force should be refused")
+	}
+	resp = d.dispatch(Request{Op: "bridge", As: "alice", Room: "A", LocalRoom: "C", Topic: "deploy", RemoteRoom: "B", RemoteTopic: "ops", Force: true})
+	if !resp.OK || resp.Bridges[0].ARoom != "C" {
+		t.Fatalf("--force should allow the override: %+v", resp)
+	}
+}
+
+func TestDispatchUnbridgeAndBridgesList(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
+	resp := d.dispatch(Request{Op: "bridge", As: "alice", Room: "A", Topic: "deploy", RemoteRoom: "B", RemoteTopic: "ops"})
+	id := resp.Bridges[0].ID
+
+	list := d.dispatch(Request{Op: "bridges"})
+	if len(list.Bridges) != 1 || list.Bridges[0].ID != id {
+		t.Fatalf("expected the bridge listed: %+v", list.Bridges)
+	}
+
+	unb := d.dispatch(Request{Op: "unbridge", As: "alice", BridgeID: id})
+	if unb.Count != 1 {
+		t.Fatalf("unbridge should succeed: %+v", unb)
+	}
+	unb = d.dispatch(Request{Op: "unbridge", As: "alice", BridgeID: id})
+	if unb.Count != 0 {
+		t.Fatalf("second unbridge should be a no-op: %+v", unb)
+	}
+	list = d.dispatch(Request{Op: "bridges"})
+	if len(list.Bridges) != 0 {
+		t.Fatalf("bridge should be gone from the list: %+v", list.Bridges)
+	}
+}

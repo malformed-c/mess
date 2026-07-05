@@ -984,7 +984,7 @@ func TestLoadLegacySnapshotTopicsMapMigrates(t *testing.T) {
 	}
 }
 
-// --- bridges (smoke test; full coverage lives in task 6's test additions) ---
+// --- bridges ---
 
 func TestBridgeRelaysToOtherRoomTopic(t *testing.T) {
 	b := newTestBroker()
@@ -1001,5 +1001,149 @@ func TestBridgeRelaysToOtherRoomTopic(t *testing.T) {
 	got := b.Drain(agentKey("B", "bob"), false, 0)
 	if len(got) != 1 || got[0].Body != "shipping v2" || got[0].OriginRoom != "A" || got[0].OriginTopic != "deploy" {
 		t.Fatalf("bridge did not relay correctly: %+v", got)
+	}
+}
+
+// A "both" bridge relays either way; "out"/"in" (relative to the creation
+// order a->b) only relay one way.
+func TestBridgeDirectionRespected(t *testing.T) {
+	b := newTestBroker()
+	b.Sub(agentKey("A", "alice"), topicKey("A", "x"))
+	b.Sub(agentKey("B", "bob"), topicKey("B", "y"))
+
+	if _, err := b.Bridge("A", "x", "B", "y", bridgeAToB, "alice", 0, false); err != nil {
+		t.Fatalf("bridge creation failed: %v", err)
+	}
+	// A -> B: bob should get it.
+	b.Pub(agentKey("A", "someone"), topicKey("A", "x"), "a to b")
+	if got := b.Drain(agentKey("B", "bob"), false, 0); len(got) != 1 {
+		t.Fatalf("out-direction bridge should relay A->B: %+v", got)
+	}
+	b.Drain(agentKey("A", "alice"), false, 0) // clear alice's own direct copy of that first publish
+	// B -> A: alice should NOT get a relayed copy (direction disallows this way).
+	b.Pub(agentKey("B", "someone"), topicKey("B", "y"), "b to a, should not relay")
+	if got := b.Drain(agentKey("A", "alice"), false, 0); len(got) != 0 {
+		t.Fatalf("out-direction bridge must not relay B->A: %+v", got)
+	}
+}
+
+// A cycle of bridges (A<->B<->A) must not ping-pong forever — the visited-set
+// guard, not the hop cap, should be what stops it (each topic is only entered
+// once per publish).
+func TestBridgeLoopPreventionOnCycle(t *testing.T) {
+	b := newTestBroker()
+	b.Sub(agentKey("A", "alice"), topicKey("A", "x"))
+	b.Sub(agentKey("B", "bob"), topicKey("B", "y"))
+	// Two bridges forming a cycle: A/x <-> B/y, and B/y <-> A/x again (a second,
+	// distinct bridge between the same two topics — forced, since it would
+	// otherwise be treated as a duplicate).
+	if _, err := b.Bridge("A", "x", "B", "y", bridgeBoth, "alice", 0, false); err != nil {
+		t.Fatalf("first bridge failed: %v", err)
+	}
+	if _, err := b.Bridge("B", "y", "A", "x", bridgeBoth, "alice", 0, true); err != nil {
+		t.Fatalf("second (cycle-forming) bridge failed: %v", err)
+	}
+
+	_, delivered, _ := b.Pub(agentKey("A", "alice"), topicKey("A", "x"), "should not infinite-loop")
+	if delivered != 0 { // alice is the sender, no other local subscriber
+		t.Fatalf("unexpected direct delivery count: %d", delivered)
+	}
+	got := b.Drain(agentKey("B", "bob"), false, 0)
+	if len(got) != 1 {
+		t.Fatalf("bob should receive exactly one relayed copy, not a duplicate from the cycle: %+v", got)
+	}
+}
+
+// A no-mention publish still wakes direct local subscribers (as today), but
+// its relayed copy on the far side of a bridge is quiet-delivered — a bridge
+// between two busy rooms can't become a wake-storm amplifier. An individually
+// @mentioned name on the far side still wakes, same as a direct mention would.
+func TestBridgeRelayIsQuietUnlessMentioned(t *testing.T) {
+	b := newTestBroker()
+	b.Sub(agentKey("B", "bob"), topicKey("B", "y"))
+	b.Sub(agentKey("B", "carol"), topicKey("B", "y"))
+	if _, err := b.Bridge("A", "x", "B", "y", bridgeBoth, "alice", 0, false); err != nil {
+		t.Fatalf("bridge creation failed: %v", err)
+	}
+
+	// No mention at all: neither far-side subscriber should wake.
+	bobCh := b.waitChan(agentKey("B", "bob"), nil)
+	carolCh := b.waitChan(agentKey("B", "carol"), nil)
+	b.Pub(agentKey("A", "alice"), topicKey("A", "x"), "no mention, relayed")
+	select {
+	case <-bobCh:
+		t.Fatal("an unmentioned relay recipient must not be woken")
+	default:
+	}
+	select {
+	case <-carolCh:
+		t.Fatal("an unmentioned relay recipient must not be woken")
+	default:
+	}
+	got := b.Drain(agentKey("B", "bob"), false, 0)
+	if len(got) != 1 || !got[0].Quiet {
+		t.Fatalf("bob should still receive the relayed message, quietly: %+v", got)
+	}
+
+	// @bob specifically: bob should wake, carol (unmentioned) should not.
+	bobCh = b.waitChan(agentKey("B", "bob"), nil)
+	carolCh = b.waitChan(agentKey("B", "carol"), nil)
+	b.Pub(agentKey("A", "alice"), topicKey("A", "x"), "@bob check this out (relayed)")
+	select {
+	case <-bobCh:
+		// expected: an explicit mention wakes, even across a bridge
+	default:
+		t.Fatal("a mentioned relay recipient should be woken")
+	}
+	select {
+	case <-carolCh:
+		t.Fatal("unmentioned carol must not be woken by a relay that mentions someone else")
+	default:
+	}
+	got = b.Drain(agentKey("B", "bob"), false, 0)
+	if len(got) != 1 || got[0].Quiet {
+		t.Fatalf("mentioned bob's copy should NOT be quiet: %+v", got)
+	}
+}
+
+func TestUnbridgeIsIdempotent(t *testing.T) {
+	b := newTestBroker()
+	br, err := b.Bridge("A", "x", "B", "y", bridgeBoth, "alice", 0, false)
+	if err != nil {
+		t.Fatalf("bridge creation failed: %v", err)
+	}
+	if ok, _ := b.Unbridge(br.id); !ok {
+		t.Fatal("first unbridge should succeed")
+	}
+	if ok, desc := b.Unbridge(br.id); ok || desc != "" {
+		t.Fatalf("second unbridge of the same id should be a no-op, got ok=%v desc=%q", ok, desc)
+	}
+	if len(b.bridgesByTopic[topicKey("A", "x")]) != 0 || len(b.bridgesByTopic[topicKey("B", "y")]) != 0 {
+		t.Fatal("bridgesByTopic should be cleaned up after unbridge")
+	}
+}
+
+func TestBridgeSnapshotRoundTrip(t *testing.T) {
+	b := newTestBroker()
+	if _, err := b.Bridge("A", "x", "B", "y", bridgeAToB, "alice", time.Hour, false); err != nil {
+		t.Fatalf("bridge creation failed: %v", err)
+	}
+	snap := b.snapshot()
+
+	b2 := newTestBroker()
+	b2.load(snap)
+	list := b2.ListBridges()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 bridge restored, got %+v", list)
+	}
+	br := list[0]
+	if br.ARoom != "A" || br.ATopic != "x" || br.BRoom != "B" || br.BTopic != "y" || br.Direction != "out" || br.Creator != "alice" {
+		t.Fatalf("bridge fields not restored correctly: %+v", br)
+	}
+	// The relay mechanism must also work post-restore (bridgesByTopic rebuilt).
+	b2.Sub(agentKey("B", "bob"), topicKey("B", "y"))
+	b2.Pub(agentKey("A", "alice"), topicKey("A", "x"), "still relays after restore")
+	if got := b2.Drain(agentKey("B", "bob"), false, 0); len(got) != 1 {
+		t.Fatalf("restored bridge should still relay: %+v", got)
 	}
 }
