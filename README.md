@@ -33,6 +33,15 @@ notifies. Best-effort: notification is silently skipped when `notify-send` or a
 display is unavailable (e.g. a headless daemon), and `MESS_NO_NOTIFY=1` in the
 daemon's environment turns it off.
 
+The human can talk back the same way, not just listen: `--as user` works on
+any command, so `mess send bob "..." --as user` and `mess broadcast "..." --as
+user` speak as the operator like any other agent would (`--room` scopes a
+broadcast the same way it does for an agent). Add `export MESS_AGENT=user` to
+your own shell's rc file to make it the default for your interactive terminal
+without typing `--as user` every time — a Claude Code session's own identity
+(set via `mess register`/its launch env) still takes priority, so this is safe
+to set globally.
+
 **Read receipts (`--ack`)** — `mess send --ack <to>` blocks until the recipient
 *reads* the message, then exits 0. Bound the wait with `--timeout DUR`; if it
 elapses first, the command exits non-zero with `not read by <to> (ack timeout)`.
