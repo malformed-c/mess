@@ -49,3 +49,13 @@ func displayName(room, name string) string {
 	}
 	return room + "/" + name
 }
+
+// roomThenNameLess orders two (room, name) pairs — room first, name breaking
+// ties — for stable, grouped-by-room output (ps's agents/topics, and their
+// snapshot equivalents).
+func roomThenNameLess(roomA, nameA, roomB, nameB string) bool {
+	if roomA != roomB {
+		return roomA < roomB
+	}
+	return nameA < nameB
+}

@@ -818,17 +818,15 @@ func (b *Broker) Drain(name string, peek bool, max int) []Message {
 	return b.DrainKinds(name, peek, max, nil)
 }
 
-// DrainKinds is Drain restricted to the given message kinds (nil = all kinds).
-// Non-matching messages are left in the inbox in order, so a filtered waiter
-// (e.g. recv --wait --kind direct) ignores broadcast noise without losing it.
-func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bool) []Message {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	a := b.ensure(name)
-	b.touch(name)
+// drainMatchingLocked partitions a's inbox by match, consuming the matched
+// messages (firing any pending acks and appending them to history) unless
+// peek, and leaving non-matching messages in the inbox in order. Shared by
+// DrainKinds and DrainThread, which differ only in what match tests. Caller
+// must hold b.mu.
+func (b *Broker) drainMatchingLocked(a *agentState, peek bool, max int, match func(Message) bool) []Message {
 	var out, keep []Message
 	for _, m := range a.inbox {
-		if (kinds == nil || kinds[m.Kind]) && (max <= 0 || len(out) < max) {
+		if match(m) && (max <= 0 || len(out) < max) {
 			out = append(out, m)
 		} else {
 			keep = append(keep, m)
@@ -853,6 +851,19 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 	return out
 }
 
+// DrainKinds is Drain restricted to the given message kinds (nil = all kinds).
+// Non-matching messages are left in the inbox in order, so a filtered waiter
+// (e.g. recv --wait --kind direct) ignores broadcast noise without losing it.
+func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bool) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.ensure(name)
+	b.touch(name)
+	return b.drainMatchingLocked(a, peek, max, func(m Message) bool {
+		return kinds == nil || kinds[m.Kind]
+	})
+}
+
 // DrainThread is Drain restricted to one thread: a message whose ThreadID
 // matches, plus the thread's root message itself (whose own ID equals
 // threadID, and which never carries a ThreadID — it isn't a reply to
@@ -863,31 +874,9 @@ func (b *Broker) DrainThread(name, threadID string, peek bool, max int) []Messag
 	defer b.mu.Unlock()
 	a := b.ensure(name)
 	b.touch(name)
-	var out, keep []Message
-	for _, m := range a.inbox {
-		if (m.ThreadID == threadID || m.ID == threadID) && (max <= 0 || len(out) < max) {
-			out = append(out, m)
-		} else {
-			keep = append(keep, m)
-		}
-	}
-	if !peek && len(out) > 0 {
-		for _, m := range out {
-			if m.AckRequested {
-				if ch := b.pendingAcks[m.ID]; ch != nil {
-					ch <- struct{}{}
-					delete(b.pendingAcks, m.ID)
-				}
-			}
-		}
-		a.inbox = keep
-		a.history = append(a.history, out...)
-		if len(a.history) > maxHistory {
-			a.history = a.history[len(a.history)-maxHistory:]
-		}
-		b.changed()
-	}
-	return out
+	return b.drainMatchingLocked(a, peek, max, func(m Message) bool {
+		return m.ThreadID == threadID || m.ID == threadID
+	})
 }
 
 // DrainQuiet consumes and returns an agent's whole inbox WITHOUT marking it
@@ -917,6 +906,21 @@ func (b *Broker) DrainQuiet(name string, max int) []Message {
 	return out
 }
 
+// capAndCopy returns a defensive copy of the most recent n messages in h
+// (n<=0 means no cap, i.e. everything). The copy matters because h aliases a
+// slice still owned by the broker (an agent's history or a topic's log),
+// which can keep growing via append — without a copy, a later append that
+// reuses spare capacity in place could silently mutate what looks like an
+// already-returned, independent snapshot.
+func capAndCopy(h []Message, n int) []Message {
+	if n > 0 && n < len(h) {
+		h = h[len(h)-n:]
+	}
+	out := make([]Message, len(h))
+	copy(out, h)
+	return out
+}
+
 // Replay returns the last n messages the agent has already consumed (from its
 // bounded history), so a message lost to a dropped wake injection can still be
 // recovered. n<=0 returns the whole history (oldest first).
@@ -927,13 +931,7 @@ func (b *Broker) Replay(name string, n int) []Message {
 	if a == nil {
 		return nil
 	}
-	h := a.history
-	if n > 0 && n < len(h) {
-		h = h[len(h)-n:]
-	}
-	out := make([]Message, len(h))
-	copy(out, h)
-	return out
+	return capAndCopy(a.history, n)
 }
 
 // ExportTopic returns a topic's own bounded history (topicKey composite key),
@@ -943,13 +941,7 @@ func (b *Broker) Replay(name string, n int) []Message {
 func (b *Broker) ExportTopic(topic string, max int) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	h := b.topicHistory[topic]
-	if max > 0 && max < len(h) {
-		h = h[len(h)-max:]
-	}
-	out := make([]Message, len(h))
-	copy(out, h)
-	return out
+	return capAndCopy(b.topicHistory[topic], max)
 }
 
 // ExportThread returns name's own view (already-consumed history plus
@@ -1331,10 +1323,7 @@ func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.busyUntil[key].After(b.now()), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest})
 	}
 	sort.Slice(agents, func(i, j int) bool {
-		if agents[i].Room != agents[j].Room {
-			return agents[i].Room < agents[j].Room
-		}
-		return agents[i].Name < agents[j].Name
+		return roomThenNameLess(agents[i].Room, agents[i].Name, agents[j].Room, agents[j].Name)
 	})
 
 	var topics []TopicInfo
@@ -1357,10 +1346,7 @@ func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 		topics = append(topics, TopicInfo{Name: tName, Room: tRoom, Subscribers: names, Bridged: bridged})
 	}
 	sort.Slice(topics, func(i, j int) bool {
-		if topics[i].Room != topics[j].Room {
-			return topics[i].Room < topics[j].Room
-		}
-		return topics[i].Name < topics[j].Name
+		return roomThenNameLess(topics[i].Room, topics[i].Name, topics[j].Room, topics[j].Name)
 	})
 	return agents, topics
 }

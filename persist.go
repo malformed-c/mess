@@ -92,10 +92,7 @@ func (b *Broker) snapshot() snapshot {
 		s.Agents = append(s.Agents, agentSnap{Room: a.room, Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state, LastSeen: b.lastSeen[key]})
 	}
 	sort.Slice(s.Agents, func(i, j int) bool {
-		if s.Agents[i].Room != s.Agents[j].Room {
-			return s.Agents[i].Room < s.Agents[j].Room
-		}
-		return s.Agents[i].Name < s.Agents[j].Name
+		return roomThenNameLess(s.Agents[i].Room, s.Agents[i].Name, s.Agents[j].Room, s.Agents[j].Name)
 	})
 	// Union b.topics (current subscribers) with b.topicHistory (a topic's own
 	// log can outlive its last subscriber unsubscribing) so history isn't
@@ -119,10 +116,7 @@ func (b *Broker) snapshot() snapshot {
 		s.Topics = append(s.Topics, topicSnap{Room: tRoom, Name: tName, Subscribers: names, History: b.topicHistory[tk]})
 	}
 	sort.Slice(s.Topics, func(i, j int) bool {
-		if s.Topics[i].Room != s.Topics[j].Room {
-			return s.Topics[i].Room < s.Topics[j].Room
-		}
-		return s.Topics[i].Name < s.Topics[j].Name
+		return roomThenNameLess(s.Topics[i].Room, s.Topics[i].Name, s.Topics[j].Room, s.Topics[j].Name)
 	})
 	for _, br := range b.bridges {
 		s.Bridges = append(s.Bridges, bridgeSnap{

@@ -988,15 +988,7 @@ func cmdExport(p paths, args []string) error {
 		return nil
 	}
 	for _, m := range resp.Messages {
-		ts := m.Time.Format("2006-01-02 15:04:05")
-		switch m.Kind {
-		case KindTopic:
-			fmt.Fprintf(w, "%s %s #%s: %s\n", ts, m.From, m.Topic, m.Body)
-		case KindBroadcast:
-			fmt.Fprintf(w, "%s %s (broadcast): %s\n", ts, m.From, m.Body)
-		default:
-			fmt.Fprintf(w, "%s %s: %s\n", ts, m.From, m.Body)
-		}
+		fmt.Fprintln(w, formatMessageLine(m.Time.Format("2006-01-02 15:04:05"), m))
 	}
 	if *out != "" {
 		fmt.Printf("exported %d message(s) to %s\n", len(resp.Messages), *out)
@@ -1319,6 +1311,21 @@ func cmdStop(p paths) error {
 	return nil
 }
 
+// formatMessageLine renders one message as "TIME FROM #topic: body" / "TIME
+// FROM (broadcast): body" / "TIME FROM: body". ts is pre-formatted by the
+// caller, since recv/listen show time-only while export shows a full date
+// (its output isn't necessarily today's).
+func formatMessageLine(ts string, m Message) string {
+	switch m.Kind {
+	case KindTopic:
+		return fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
+	case KindBroadcast:
+		return fmt.Sprintf("%s %s (broadcast): %s", ts, m.From, m.Body)
+	default:
+		return fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
+	}
+}
+
 func printMessages(msgs []Message, asJSON bool) {
 	if asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -1328,16 +1335,7 @@ func printMessages(msgs []Message, asJSON bool) {
 		return
 	}
 	for _, m := range msgs {
-		ts := m.Time.Format("15:04:05")
-		var line string
-		switch m.Kind {
-		case KindTopic:
-			line = fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
-		case KindBroadcast:
-			line = fmt.Sprintf("%s %s (broadcast): %s", ts, m.From, m.Body)
-		default:
-			line = fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
-		}
+		line := formatMessageLine(m.Time.Format("15:04:05"), m)
 		// Only tag actual thread replies with their id — a plain message
 		// needs no id, since `mess reply` implicitly threads off the most
 		// recent message without you ever having to read/type one.
