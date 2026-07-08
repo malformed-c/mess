@@ -15,49 +15,94 @@ import (
 const usage = `mess - a local messenger for Claude agents
 
 Usage:
-  mess send <to> [body...]        send a direct message to an agent
-                                  (--ack blocks until it's read; --timeout DUR)
-                                  (to "user" or your login name = the human's
-                                  mailbox: desktop-notifies, read via recv --as user)
-  mess broadcast [body...]        send to every known agent
-  mess pub <topic> [body...]      publish to a topic (@mention wakes only the
-                                  tagged subscribers; the rest still receive it)
-  mess sub <topic>                subscribe to a topic
-  mess unsub <topic>              unsubscribe from a topic
+
+Identity:
   mess register [name]            join the network; with a name, set this
                                   session's identity (persists across turns)
   mess unregister                 leave the network and clear this session's
                                   identity (inverse of register)
   mess rename [--force] <name>    rename yourself, migrating your inbox and
                                   subscriptions to the new name
-  mess cleanup [maxage]           prune agents idle longer than maxage (default
-                                  24h) and not listening; --dry-run to preview
+  mess whoami                     print your resolved identity (empty if none)
+  mess islistening                exit 0 if you have an active listener, else 1
+
+Rooms (namespace isolation):
+  mess room [join <room> | leave] print your current room, or join/leave one —
+                                  an exclusive namespace isolating identities,
+                                  broadcast, ps, and topics from other rooms
+                                  (global/default room until you join one)
+  mess room bridge <topic> <room>/<topic> [--direction both|out|in] [--ttl DUR]
+                                  relay a local topic to a topic in another room
+  mess room unbridge <id>          tear down a bridge
+  mess room bridges                list active bridges
+
+Sending:
+  mess send <to> [body...]        send a direct message to an agent
+                                  (--ack blocks until it's read; --timeout DUR)
+                                  (to "user" or your login name = the human's
+                                  mailbox: desktop-notifies, read via recv --as user)
+                                  (--thread ID replies within a thread)
+  mess broadcast [body...]        send to every known agent in your room (plain
+                                  broadcasts don't wake the standard --no-broadcast
+                                  auto-wake hook; --loud bypasses that, goes
+                                  host-wide across rooms, and desktop-notifies the
+                                  human operator; --loud-room does the same but
+                                  stays scoped to your own room)
+  mess pub <topic> [body...]      publish to a topic (@mention wakes only the
+                                  tagged subscribers; the rest still receive it)
+                                  (--thread ID replies within a thread — quiet
+                                  unless @mentioned or already a participant)
+  mess sub <topic>                subscribe to a topic
+  mess unsub <topic>              unsubscribe from a topic
+
+Receiving and threads:
+  mess recv [duration]            receive queued messages (--thread ID shows
+                                  only that thread's messages, not with --wait)
+  mess listen [idle-timeout]      run continuously (bg): print messages as they
+                                  arrive until interrupted (alias: recv --follow)
+  mess replay [N]                 reprint the last N messages you already consumed
+                                  (recover a message lost to a dropped wake)
+  mess reply [body...]            reply to the most recent message (or continue
+                                  the open thread — see "mess thread close");
+                                  no need to know/pass a message id
+  mess thread close                end the thread "mess reply" is continuing;
+                                  the next reply starts a fresh one
+  mess thread list                 list threads you've seen activity in
+  mess export --topic NAME | --thread ID | --to AGENT
+                                  dump a conversation's full history
+                                  (--format text|json, --out FILE, --max N)
+
+Status:
+  mess ps [--room NAME | --all]    list agents and topics (online/offline +
+                                  working/listening/idle status); scoped to
+                                  your own room by default
   mess state [text...]            set your working state (shown in ps); --clear to clear
   mess warn [text...]             set a transient status warning (auto-clears when
                                   you're next active; --ttl DUR, --clear)
   mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
+
+Admin and daemon:
   mess rm <agent>                 remove an agent (e.g. a dead session) from the network
   mess drain <agent>              clear another agent's inbox (prints what was queued;
                                   leaves the agent registered — for a stuck backlog)
-  mess whoami                     print your resolved identity (empty if none)
-  mess islistening                exit 0 if you have an active listener, else 1
-  mess recv [duration]            receive queued messages
-  mess replay [N]                 reprint the last N messages you already consumed
-                                  (recover a message lost to a dropped wake)
-  mess listen [idle-timeout]      run continuously (bg): print messages as they
-                                  arrive until interrupted (alias: recv --follow)
-  mess ps                         list agents and topics (online/offline +
-                                  working/listening/idle status)
+  mess cleanup [maxage]           prune agents idle longer than maxage (default
+                                  24h) and not listening; --dry-run to preview
   mess ping                       check the daemon
   mess daemon                     run the daemon in the foreground
   mess stop                       shut the daemon down
 
-Identity (resolved in this order):
+Identity resolution (most to least specific):
   1. --as NAME on the command
   2. a mid-session name set via "mess register <name>" — persisted per host
      session (keyed on the first of $MESS_SESSION_ID, $CLAUDE_CODE_SESSION_ID,
      or $CODEX_THREAD_ID), so it survives across turns, compaction, and resume
   3. the MESS_AGENT environment variable (set at launch)
+
+Room resolution (same order, independently of identity):
+  1. --room NAME on the command
+  2. a mid-session room set via "mess room join <room>" — persisted the same
+     way as identity
+  3. the MESS_ROOM environment variable
 
 If no body args are given, the body is read from stdin.
 
@@ -92,8 +137,23 @@ func main() {
 
 	var err error
 	switch cmd {
-	case "daemon":
-		err = runDaemon(p)
+	// Identity
+	case "register":
+		err = cmdRegister(p, args)
+	case "unregister":
+		err = cmdUnregister(p, args)
+	case "rename":
+		err = cmdRename(p, args)
+	case "whoami":
+		err = cmdWhoami(p)
+	case "islistening":
+		err = cmdIsListening(p, args)
+
+	// Rooms
+	case "room":
+		err = cmdRoom(p, args)
+
+	// Sending
 	case "send":
 		err = cmdSend(p, args)
 	case "broadcast":
@@ -102,41 +162,46 @@ func main() {
 		err = cmdPub(p, args)
 	case "sub", "unsub":
 		err = cmdSubUnsub(p, cmd, args)
-	case "register":
-		err = cmdRegister(p, args)
-	case "unregister":
-		err = cmdUnregister(p, args)
-	case "rename":
-		err = cmdRename(p, args)
-	case "cleanup":
-		err = cmdCleanup(p, args)
+
+	// Receiving and threads
+	case "recv":
+		err = cmdRecv(p, args)
+	case "listen":
+		// listen == recv --follow: a continuous background listener.
+		err = cmdRecv(p, append([]string{"--follow"}, args...))
+	case "replay":
+		err = cmdReplay(p, args)
+	case "reply":
+		err = cmdReply(p, args)
+	case "thread":
+		err = cmdThread(p, args)
+	case "export":
+		err = cmdExport(p, args)
+
+	// Status
+	case "ps":
+		err = cmdPs(p, args)
 	case "state":
 		err = cmdState(p, args)
 	case "warn":
 		err = cmdWarn(p, args)
 	case "busy", "unbusy":
 		err = cmdBusy(p, cmd, args)
+
+	// Admin and daemon
 	case "rm":
 		err = cmdRm(p, args)
 	case "drain":
 		err = cmdDrain(p, args)
-	case "whoami":
-		err = cmdWhoami(p)
-	case "islistening":
-		err = cmdIsListening(p, args)
-	case "recv":
-		err = cmdRecv(p, args)
-	case "replay":
-		err = cmdReplay(p, args)
-	case "listen":
-		// listen == recv --follow: a continuous background listener.
-		err = cmdRecv(p, append([]string{"--follow"}, args...))
-	case "ps":
-		err = cmdPs(p, args)
+	case "cleanup":
+		err = cmdCleanup(p, args)
 	case "ping":
 		err = cmdPing(p)
+	case "daemon":
+		err = runDaemon(p)
 	case "stop":
 		err = cmdStop(p)
+
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -162,6 +227,22 @@ func agentName(p paths, flagVal string) (string, error) {
 		return env, nil
 	}
 	return "", fmt.Errorf("no identity: run `mess register <name>`, pass --as NAME, or set MESS_AGENT")
+}
+
+// resolveRoom resolves the room to act in: --room flag, then a mid-session
+// joined room, then MESS_ROOM. Unlike agentName, absence is never an error —
+// "" is the meaningful, valid global/default room, not a failure.
+func resolveRoom(p paths, flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if r := readRoom(p); r != "" {
+		return r
+	}
+	if env := os.Getenv("MESS_ROOM"); env != "" {
+		return env
+	}
+	return ""
 }
 
 // bodyFrom joins remaining args as the body, or reads stdin when none given.
@@ -243,10 +324,11 @@ func cmdSend(p paths, args []string) error {
 	fs, as := newFlags("send")
 	ack := fs.Bool("ack", false, "block until the recipient reads the message")
 	timeout := fs.String("timeout", "", "ack wait timeout (e.g. 30s); default: wait forever")
+	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] <to> [body...]")
+		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] <to> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -257,7 +339,7 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout})
+	resp, err := call(p, Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread})
 	if err != nil {
 		return err
 	}
@@ -272,7 +354,12 @@ func cmdSend(p paths, args []string) error {
 
 func cmdBroadcast(p paths, args []string) error {
 	fs, as := newFlags("broadcast")
+	loud := fs.Bool("loud", false, "wake every recipient host-wide (crosses room boundaries) even if their auto-wake hook filters out broadcasts (--no-broadcast), and desktop-notify the human operator too")
+	loudRoom := fs.Bool("loud-room", false, "like --loud, but stays scoped to your own room instead of going host-wide")
 	parseAnywhere(fs, args)
+	if *loud && *loudRoom {
+		return fmt.Errorf("--loud and --loud-room are mutually exclusive")
+	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
@@ -281,7 +368,7 @@ func cmdBroadcast(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body})
+	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: *loud || *loudRoom, HostWide: *loud})
 	if err != nil {
 		return err
 	}
@@ -291,10 +378,11 @@ func cmdBroadcast(p paths, args []string) error {
 
 func cmdPub(p paths, args []string) error {
 	fs, as := newFlags("pub")
+	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output) — quiet-delivered to everyone except an @mention or existing participant")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess pub <topic> [body...]")
+		return fmt.Errorf("usage: mess pub [--thread ID] <topic> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -304,7 +392,7 @@ func cmdPub(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "pub", As: from, Topic: rest[0], Body: body})
+	resp, err := call(p, Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread})
 	if err != nil {
 		return err
 	}
@@ -325,6 +413,186 @@ func cmdSubUnsub(p paths, op string, args []string) error {
 	}
 	_, err = call(p, Request{Op: op, As: name, Topic: rest[0]})
 	return err
+}
+
+// cmdRoom handles the `mess room ...` subcommand family: bare "mess room"
+// prints the current room, "join"/"leave" delegate to cmdRoomJoinLeave.
+func cmdRoom(p paths, args []string) error {
+	if len(args) == 0 {
+		if r := resolveRoom(p, ""); r != "" {
+			fmt.Println(r)
+		} else {
+			fmt.Println("(global)")
+		}
+		return nil
+	}
+	switch args[0] {
+	case "join", "leave":
+		return cmdRoomJoinLeave(p, args[0], args[1:])
+	case "bridge":
+		return cmdRoomBridge(p, args[1:])
+	case "unbridge":
+		return cmdRoomUnbridge(p, args[1:])
+	case "bridges":
+		return cmdRoomBridges(p, args[1:])
+	default:
+		return fmt.Errorf("usage: mess room [join <room> | leave | bridge ... | unbridge <id> | bridges]")
+	}
+}
+
+// cmdRoomJoinLeave mirrors cmdSubUnsub's shape: "mess room join [--force]
+// <room>" claims identity within that room (like register, deferring the
+// persisted-room-file write until the daemon accepts it); "mess room leave"
+// unregisters from the current room and reverts to global.
+func cmdRoomJoinLeave(p paths, op string, args []string) error {
+	fs, as := newFlags("room " + op)
+	force := fs.Bool("force", false, "take over a name already held in that room by another live session")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	if op == "join" {
+		rest := fs.Args()
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: mess room join [--force] <room>")
+		}
+		newRoom := rest[0]
+		if _, err := call(p, Request{Op: "room-join", As: name, Room: newRoom, Force: *force}); err != nil {
+			return err
+		}
+		if err := writeRoom(p, newRoom); err != nil {
+			return err
+		}
+		// Also persist the identity itself (like `mess register <name>`), so
+		// `room join <room> --as NAME` works as a one-shot "pick a name and join
+		// a room" even with no prior `mess register` — otherwise whoami and every
+		// future command would have no persisted identity to resolve.
+		if err := writeIdentity(p, name); err != nil {
+			return err
+		}
+		fmt.Printf("joined room %q as %s\n", newRoom, name)
+		return nil
+	}
+	// leave: unregister from the current room, then revert to global.
+	cur := resolveRoom(p, "")
+	if cur == "" {
+		fmt.Println("already in the global room")
+		return nil
+	}
+	if _, err := call(p, Request{Op: "room-leave", As: name, Room: cur}); err != nil {
+		return err
+	}
+	if err := clearRoom(p); err != nil {
+		return err
+	}
+	fmt.Printf("left room %q; back in the global room\n", cur)
+	return nil
+}
+
+// splitRoomTopic parses a "<room>/<topic>" remote address (the room may be
+// empty for the global room, e.g. "/announcements").
+func splitRoomTopic(s string) (room, topic string, err error) {
+	i := strings.LastIndexByte(s, '/')
+	if i < 0 {
+		return "", "", fmt.Errorf("expected <room>/<topic>, got %q", s)
+	}
+	return s[:i], strings.TrimPrefix(s[i+1:], "#"), nil
+}
+
+// cmdRoomBridge implements `mess room bridge <local-topic> <room>/<remote-topic>`
+// — links two topics (possibly in different rooms) so a publish to either
+// side also relays to subscribers on the other. The local side defaults to
+// the caller's own current room; --local-room names a different one but
+// requires --force, since otherwise any caller could bridge on behalf of a
+// room it isn't even in.
+func cmdRoomBridge(p paths, args []string) error {
+	fs, as := newFlags("room bridge")
+	direction := fs.String("direction", "both", "both | out | in")
+	localRoom := fs.String("local-room", "", "override the local side's room (requires --force if you're not in it)")
+	ttl := fs.String("ttl", "", "auto-expire after this long (default: never)")
+	force := fs.Bool("force", false, "override the local-room guard, a duplicate bridge, or the bridge cap")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("usage: mess room bridge [--direction both|out|in] [--local-room NAME] [--ttl DUR] [--force] <local-topic> <room>/<remote-topic>")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	if *direction != "both" && *direction != "out" && *direction != "in" {
+		return fmt.Errorf("--direction must be both, out, or in")
+	}
+	remoteRoom, remoteTopic, err := splitRoomTopic(rest[1])
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{
+		Op: "bridge", As: name, Topic: rest[0], RemoteRoom: remoteRoom, RemoteTopic: remoteTopic,
+		Direction: *direction, LocalRoom: *localRoom, Timeout: *ttl, Force: *force,
+	})
+	if err != nil {
+		return err
+	}
+	if len(resp.Bridges) == 1 {
+		br := resp.Bridges[0]
+		fmt.Printf("bridge %s: %s <-%s-> %s\n", br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic))
+	}
+	return nil
+}
+
+// cmdRoomUnbridge tears down a bridge by ID.
+func cmdRoomUnbridge(p paths, args []string) error {
+	fs, as := newFlags("room unbridge")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: mess room unbridge <id>")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "unbridge", As: name, BridgeID: rest[0]})
+	if err != nil {
+		return err
+	}
+	if resp.Count == 0 {
+		fmt.Printf("no such bridge %q\n", rest[0])
+	} else {
+		fmt.Printf("removed bridge %s\n", rest[0])
+	}
+	return nil
+}
+
+// cmdRoomBridges lists every active bridge.
+func cmdRoomBridges(p paths, args []string) error {
+	fs := flag.NewFlagSet("room bridges", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print bridges as JSON")
+	parseAnywhere(fs, args)
+	resp, err := call(p, Request{Op: "bridges"})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resp.Bridges)
+	}
+	if len(resp.Bridges) == 0 {
+		fmt.Println("no bridges")
+		return nil
+	}
+	for _, br := range resp.Bridges {
+		expiry := "never"
+		if !br.ExpiresAt.IsZero() {
+			expiry = br.ExpiresAt.Format(time.RFC3339)
+		}
+		fmt.Printf("%-6s %s <-%s-> %s  creator=%s expires=%s\n",
+			br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
+	}
+	return nil
 }
 
 func cmdRegister(p paths, args []string) error {
@@ -517,13 +785,14 @@ func cmdBusy(p paths, op string, args []string) error {
 func cmdDrain(p paths, args []string) error {
 	fs := flag.NewFlagSet("drain", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print messages as JSON lines")
+	room := fs.String("room", "", "room the target agent is in (default: your own room)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess drain <agent>")
 	}
 	target := rest[0]
-	resp, err := call(p, Request{Op: "drain", As: target}) // clear target's inbox (no touch, no ack)
+	resp, err := call(p, Request{Op: "drain", As: target, Room: *room}) // clear target's inbox (no touch, no ack)
 	if err != nil {
 		return err
 	}
@@ -559,15 +828,192 @@ func cmdReplay(p paths, args []string) error {
 	return nil
 }
 
+// cmdExport dumps a conversation's full history — a topic's own log (--topic,
+// independent of who's currently subscribed), a thread's root+replies from
+// your own view (--thread), or your direct-message history with a peer
+// (--to) — as text or JSON, to stdout or a file.
+// cmdReply replies within the currently open thread (see `mess thread
+// close`), or starts a new one from the most recently seen message if none is
+// open — so you never have to read or type a message id to reply to
+// whatever just arrived. Routes to a topic (pub) or a direct peer (send)
+// depending on what the root message was.
+func cmdReply(p paths, args []string) error {
+	fs, as := newFlags("reply")
+	parseAnywhere(fs, args)
+	body, err := bodyFrom(fs.Args())
+	if err != nil {
+		return err
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+
+	if open, ok := readOpenThread(p); ok {
+		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body)
+	}
+
+	last, ok := readLastMsg(p)
+	if !ok {
+		return fmt.Errorf("nothing to reply to yet — run `mess recv` first, or use `mess send`/`mess pub --thread ID` directly")
+	}
+	if err := writeOpenThread(p, openThreadInfo{ThreadID: last.ID, Kind: last.Kind, Topic: last.Topic, To: last.From}); err != nil {
+		return err
+	}
+	return sendReply(p, name, last.Kind, last.Topic, last.From, last.ID, body)
+}
+
+// sendReply posts body as a threaded reply, routing to a topic or a direct
+// peer depending on kind.
+func sendReply(p paths, from, kind, topic, to, threadID, body string) error {
+	switch kind {
+	case KindTopic:
+		resp, err := call(p, Request{Op: "pub", As: from, Topic: topic, Body: body, ThreadID: threadID})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("replied in #%s (thread %s) — delivered to %d subscriber(s)\n", topic, threadID, resp.Count)
+	case KindDirect:
+		if _, err := call(p, Request{Op: "send", As: from, To: to, Body: body, ThreadID: threadID}); err != nil {
+			return err
+		}
+		fmt.Printf("replied to %s (thread %s)\n", to, threadID)
+	default:
+		return fmt.Errorf("unsupported reply target kind %q", kind)
+	}
+	return nil
+}
+
+// cmdThread handles `mess thread ...`: "close" ends the thread `mess reply`
+// is continuing so the next `mess reply` starts fresh, and "list" shows every
+// thread the caller has seen activity in.
+func cmdThread(p paths, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: mess thread close | mess thread list")
+	}
+	switch args[0] {
+	case "close":
+		if err := clearOpenThread(p); err != nil {
+			return err
+		}
+		fmt.Println("thread closed; next `mess reply` starts a new one")
+		return nil
+	case "list":
+		return cmdThreadList(p, args[1:])
+	default:
+		return fmt.Errorf("usage: mess thread close | mess thread list")
+	}
+}
+
+func cmdThreadList(p paths, args []string) error {
+	fs, as := newFlags("thread list")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "thread-list", As: name})
+	if err != nil {
+		return err
+	}
+	if len(resp.Threads) == 0 {
+		fmt.Println("no threads seen yet")
+		return nil
+	}
+	open, hasOpen := readOpenThread(p)
+	for _, th := range resp.Threads {
+		where := "#" + th.Topic
+		if th.Kind == KindDirect {
+			where = th.Peer
+		}
+		marker := ""
+		if hasOpen && open.ThreadID == th.ID {
+			marker = " (open)"
+		}
+		fmt.Printf("%s  %-12s %d repl(y/ies), %d participant(s), last %s%s\n",
+			th.ID, where, th.Replies, th.Participants, th.LastActivity.Format("15:04:05"), marker)
+		if th.RootBody != "" {
+			fmt.Printf("    %s\n", truncate(th.RootBody, 100))
+		}
+	}
+	return nil
+}
+
+func cmdExport(p paths, args []string) error {
+	fs, as := newFlags("export")
+	topic := fs.String("topic", "", "export this topic's full history")
+	thread := fs.String("thread", "", "export this thread (root + replies) from your own received view (your own sent replies won't appear; use --topic for the complete log)")
+	to := fs.String("to", "", "export your direct-message history with this peer (received view only, same caveat as --thread)")
+	format := fs.String("format", "text", "text | json")
+	out := fs.String("out", "", "write to this file instead of stdout")
+	max := fs.Int("max", 0, "limit to the most recent N messages (0 = all)")
+	parseAnywhere(fs, args)
+	targets := 0
+	for _, v := range []string{*topic, *thread, *to} {
+		if v != "" {
+			targets++
+		}
+	}
+	if targets != 1 {
+		return fmt.Errorf("usage: mess export --topic NAME | --thread ID | --to AGENT [--format text|json] [--out FILE] [--max N]")
+	}
+	if *format != "text" && *format != "json" {
+		return fmt.Errorf("--format must be text or json")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "export", As: name, Topic: *topic, ThreadID: *thread, To: *to, Max: *max})
+	if err != nil {
+		return err
+	}
+
+	var w io.Writer = os.Stdout
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	if *format == "json" {
+		enc := json.NewEncoder(w)
+		for _, m := range resp.Messages {
+			if err := enc.Encode(m); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, m := range resp.Messages {
+		ts := m.Time.Format("2006-01-02 15:04:05")
+		switch m.Kind {
+		case KindTopic:
+			fmt.Fprintf(w, "%s %s #%s: %s\n", ts, m.From, m.Topic, m.Body)
+		case KindBroadcast:
+			fmt.Fprintf(w, "%s %s (broadcast): %s\n", ts, m.From, m.Body)
+		default:
+			fmt.Fprintf(w, "%s %s: %s\n", ts, m.From, m.Body)
+		}
+	}
+	if *out != "" {
+		fmt.Printf("exported %d message(s) to %s\n", len(resp.Messages), *out)
+	}
+	return nil
+}
+
 // cmdRm removes an agent from the network (its inbox, subscriptions, presence).
 func cmdRm(p paths, args []string) error {
 	fs, _ := newFlags("rm")
+	room := fs.String("room", "", "room the target agent is in (default: your own room)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess rm <agent>")
 	}
-	resp, err := call(p, Request{Op: "rm", To: rest[0]})
+	resp, err := call(p, Request{Op: "rm", To: rest[0], Room: *room})
 	if err != nil {
 		return err
 	}
@@ -622,6 +1068,7 @@ func cmdRecv(p paths, args []string) error {
 	kind := fs.String("kind", "", "only these kinds (comma-list: direct,broadcast,topic)")
 	noBroadcast := fs.Bool("no-broadcast", false, "ignore broadcasts (= --kind direct,topic)")
 	batch := fs.String("batch", "", "with --wait: coalesce a burst arriving within this window into one return")
+	thread := fs.String("thread", "", "show only this thread's messages (root + replies), not combined with --wait")
 	parseAnywhere(fs, args)
 	name, err := agentName(p, *as)
 	if err != nil {
@@ -655,7 +1102,7 @@ func cmdRecv(p paths, args []string) error {
 		return followRecv(p, name, timeout, *max, *asJSON, kinds, *batch)
 	}
 
-	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch}
+	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch, ThreadID: *thread}
 	// A blocking wait uses the restart-resilient path so it survives a daemon
 	// bounce; a non-blocking drain is a plain one-shot call.
 	dispatch := call
@@ -666,8 +1113,35 @@ func cmdRecv(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *thread == "" { // a --thread query is browsing history, not "new mail"
+		updateLastMsg(p, resp.Messages)
+	}
 	printMessages(resp.Messages, *asJSON)
 	return nil
+}
+
+// updateLastMsg records the most recent direct/topic message in msgs (skips
+// broadcasts, which have no coherent reply target) as the implicit root for a
+// future `mess reply`. Best-effort; called after a successful mess recv.
+func updateLastMsg(p paths, msgs []Message) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		// If the newest message is itself a reply, target its thread's root —
+		// not the reply's own ID — so a further `mess reply` stays flat under
+		// the same root instead of spawning a reply-to-a-reply sub-thread.
+		root := m.ID
+		if m.ThreadID != "" {
+			root = m.ThreadID
+		}
+		switch m.Kind {
+		case KindTopic:
+			writeLastMsg(p, lastMsgInfo{ID: root, Kind: m.Kind, Topic: m.Topic, From: m.From})
+			return
+		case KindDirect:
+			writeLastMsg(p, lastMsgInfo{ID: root, Kind: m.Kind, From: m.From})
+			return
+		}
+	}
 }
 
 // resolveKinds turns --kind/--no-broadcast into an explicit kinds list, or nil
@@ -727,6 +1201,7 @@ func warnIfAlreadyListening(p paths, name string) {
 // run as a long-lived background command so an agent can be woken by peers.
 func followRecv(p paths, name, timeout string, max int, asJSON bool, kinds []string, batch string) error {
 	return callStream(p, Request{Op: "listen", As: name, Timeout: timeout, Max: max, Kinds: kinds, Batch: batch}, func(resp Response) error {
+		updateLastMsg(p, resp.Messages)
 		printMessages(resp.Messages, asJSON)
 		return nil
 	})
@@ -747,8 +1222,10 @@ func compactDur(d time.Duration) string {
 func cmdPs(p paths, args []string) error {
 	fs := flag.NewFlagSet("ps", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	room := fs.String("room", "", "show this room instead of your own")
+	all := fs.Bool("all", false, "show every room")
 	parseAnywhere(fs, args)
-	resp, err := call(p, Request{Op: "ps"})
+	resp, err := call(p, Request{Op: "ps", Room: *room, All: *all})
 	if err != nil {
 		return err
 	}
@@ -756,6 +1233,14 @@ func cmdPs(p paths, args []string) error {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(resp)
+	}
+	// displayAgent/displayTopic render "name" scoped to one room (the common
+	// case: identical to pre-rooms mess) or "room/name" when --all mixes rooms.
+	displayAgent := func(a AgentInfo) string { return a.Name }
+	displayTopic := func(t TopicInfo) string { return t.Name }
+	if *all {
+		displayAgent = func(a AgentInfo) string { return displayName(a.Room, a.Name) }
+		displayTopic = func(t TopicInfo) string { return displayName(t.Room, t.Name) }
 	}
 	if len(resp.Agents) == 0 {
 		fmt.Println("no agents")
@@ -778,7 +1263,7 @@ func cmdPs(p paths, args []string) error {
 			if a.Online {
 				presence = "online"
 			}
-			line := fmt.Sprintf("  %-16s %-7s %-9s %d pending", a.Name, presence, status, a.Pending)
+			line := fmt.Sprintf("  %-16s %-7s %-9s %d pending", displayAgent(a), presence, status, a.Pending)
 			if a.Pending > 0 && !a.Oldest.IsZero() {
 				line += fmt.Sprintf(" (oldest %s)", compactDur(time.Since(a.Oldest)))
 			}
@@ -797,7 +1282,22 @@ func cmdPs(p paths, args []string) error {
 	if len(resp.Topics) > 0 {
 		fmt.Println("topics:")
 		for _, t := range resp.Topics {
-			fmt.Printf("  #%-15s %s\n", t.Name, strings.Join(t.Subscribers, ", "))
+			line := fmt.Sprintf("  #%-15s %s", displayTopic(t), strings.Join(t.Subscribers, ", "))
+			if len(t.Bridged) > 0 {
+				line += "  <-> " + strings.Join(t.Bridged, ", ")
+			}
+			fmt.Println(line)
+		}
+	}
+	if len(resp.Bridges) > 0 {
+		fmt.Println("bridges:")
+		for _, br := range resp.Bridges {
+			expiry := "never"
+			if !br.ExpiresAt.IsZero() {
+				expiry = br.ExpiresAt.Format(time.RFC3339)
+			}
+			fmt.Printf("  %-6s %s <-%s-> %s  creator=%s expires=%s\n",
+				br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
 		}
 	}
 	return nil
@@ -829,13 +1329,21 @@ func printMessages(msgs []Message, asJSON bool) {
 	}
 	for _, m := range msgs {
 		ts := m.Time.Format("15:04:05")
+		var line string
 		switch m.Kind {
 		case KindTopic:
-			fmt.Printf("%s %s #%s: %s\n", ts, m.From, m.Topic, m.Body)
+			line = fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
 		case KindBroadcast:
-			fmt.Printf("%s %s (broadcast): %s\n", ts, m.From, m.Body)
+			line = fmt.Sprintf("%s %s (broadcast): %s", ts, m.From, m.Body)
 		default:
-			fmt.Printf("%s %s: %s\n", ts, m.From, m.Body)
+			line = fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
 		}
+		// Only tag actual thread replies with their id — a plain message
+		// needs no id, since `mess reply` implicitly threads off the most
+		// recent message without you ever having to read/type one.
+		if m.ThreadID != "" {
+			line = fmt.Sprintf("[thread %s] %s", m.ThreadID, line)
+		}
+		fmt.Println(line)
 	}
 }

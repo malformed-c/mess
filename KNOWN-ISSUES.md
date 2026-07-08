@@ -1,5 +1,39 @@
 # Known issues
 
+## Fixed: parallel tool calls could make the steer hook double-notify (or notify for already-consumed mail)
+
+**Symptom, as reported (2026-07-07/08):** a duplicate/"reformatted" wake
+notice for the same message, and separately a `[mess] 1 unread peer
+message(s)` notice for mail that a `mess recv` moments earlier (same turn)
+had already fully consumed — a follow-up `mess recv` right after showed zero
+unread, confirming there was nothing left to report.
+
+**Root cause:** `hooks/mess-steer.sh` (the `PreToolUse`/`UserPromptSubmit`
+mid-turn notifier) dedups on a "highest message id already announced" marker
+persisted in `${TMPDIR}/mess-steer-<agent>.id`, but read-checked-wrote it with
+no locking. Claude Code can dispatch several tool calls from one turn in
+parallel, each with its own `PreToolUse`, so multiple instances of the script
+can run at the same moment — e.g. one of the parallel calls is itself `mess
+recv`. Without a lock, two (or more) instances all read the same stale
+`prev` before any of them writes, so all of them independently decide "this
+id is new" and all fire the same notice — including one firing for a message
+a sibling call is about to (or just did) consume via its own `mess recv`,
+which reads to the agent as a stale/redundant notification for mail it
+already fetched.
+
+**Reproduced (2026-07-08):** launched 5 concurrent invocations of the script
+against a single new message with no lock — all 5 printed the identical
+notice. With the lock added, the same test produces exactly 1.
+
+**Fix:** wrapped the read-check-write of the dedup marker in a `flock` (same
+pattern `mess-wake.sh` already used for its own park call), so only one
+instance of a simultaneous batch ever announces a given message id — see
+`hooks/mess-steer.sh`. `mess-wake.sh`'s own park step was already
+lock-guarded; its drain step wasn't re-examined further since draining is
+destructive and daemon-serialized, so two wake-hook instances can't both
+print the same message's content (whichever drains first empties the inbox
+for the other).
+
 ## An orphaned wake-hook process can make a dead session look falsely online
 
 **Symptom:** `mess ps` reports an agent `online`/`listening` (or `working`) long
@@ -199,6 +233,45 @@ So: not a `mess` bug, not a race with a concurrent user prompt (ruled out
 separately below) — it's this exact upstream timing hole. The daemon-level
 mechanics (idle detection, park, wake, full drain) all worked exactly as
 designed on the `mess` side.
+
+### A second, distinct failure mode: never parks at all (2026-07-05)
+
+The case above (`dwarf-main`) parked, fully drained, and still dropped the
+injection. A second confirmed instance shows the async wake failing *earlier*
+— it never even parks:
+
+Agent `peri-sonnet-5` (`/home/engi/git/apsis-io/periapsis`) had a rapid run of
+turns (multiple `Stop` events within seconds of each other, `11:10`–`11:14`
+UTC), ending with a clean `Stop` at `11:18:44` (`stop_hook_summary`,
+`hasOutput: false` — the expected shape for a still-pending async hook,
+identical to every other successful case in this session). `claude-verify`
+then sent it a direct message at `11:22:26` — but the daemon log shows
+`listening=false` at that exact moment:
+
+```
+11:18:44  (Stop hook fires — mess-wake.sh dispatched, hasOutput: false)
+11:22:26  send claude-verify -> peri-sonnet-5 | recipient pending=4 listening=false
+```
+
+`listening=false` means no parked waiter existed at all — contrast with
+`dwarf-main`, where `listening=true` and the daemon fully drained the message
+(`woke -> drained N` then a non-peek `drained N`). Here there's nothing to
+drain because nothing ever parked. peri-sonnet-5's transcript between
+`11:18:44` and the next activity (`11:22:45`, a human typing `"can you recv"` —
+coincidental, unrelated to the pending mail) contains zero mess-related
+entries: no `queue-operation`, no task-notification, nothing. Checked
+`/tmp/mess-wake-peri-sonnet-5.lock` for an orphaned holder (the
+`breeze-notify-test` pattern from the section above) — none found; this isn't
+that.
+
+So: the `Stop` hook fired and dispatched `mess-wake.sh` as expected, but that
+invocation apparently never got as far as actually parking on `recv --wait`.
+Given the immediately preceding burst of rapid-fire `Stop` events on the same
+session, a plausible trigger is Claude Code's async-hook lifecycle tracking
+losing or overwriting one under rapid succession — but this is inference, not
+confirmed the way the `dwarf-main` root cause was. Recorded here as a second,
+structurally distinct symptom of the same general instability (upstream,
+outside `mess`'s control) rather than a new investigation.
 
 ### Mitigation
 

@@ -23,9 +23,22 @@ func withSession(req Request) Request {
 	return req
 }
 
+// withRoom stamps the caller's currently-joined room onto a request (unless
+// already set), the same way withSession stamps the host session id. This is
+// what makes rooms ambient: send/broadcast/pub/sub/recv/etc. all transparently
+// inherit the caller's joined room with no per-command flag, since every call
+// site already routes through call/callWait/callStream.
+func withRoom(p paths, req Request) Request {
+	if req.Room == "" {
+		req.Room = resolveRoom(p, "")
+	}
+	return req
+}
+
 // call sends one request to the daemon, auto-starting it if needed.
 func call(p paths, req Request) (Response, error) {
 	req = withSession(req)
+	req = withRoom(p, req)
 	conn, err := dialOrStart(p)
 	if err != nil {
 		return Response{}, err
@@ -61,6 +74,7 @@ func daemonError(msg string) error {
 // the wait once the daemon stays down past the reconnect window.
 func callWait(p paths, req Request) (Response, error) {
 	req = withSession(req)
+	req = withRoom(p, req)
 	first := true
 	for {
 		var conn net.Conn
@@ -121,6 +135,7 @@ func waitForDaemon(p paths) bool {
 // back over the held connection, until the daemon closes it (EOF).
 func callStream(p paths, req Request, onResp func(Response) error) error {
 	req = withSession(req)
+	req = withRoom(p, req)
 	conn, err := dialOrStart(p)
 	if err != nil {
 		return err

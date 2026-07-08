@@ -45,6 +45,112 @@ does **not** fire the ack — the receipt fires when the recipient runs its own
 `mess recv` to actually read the message. So `--ack` is a true "was read" signal,
 not just "was delivered."
 
+**Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
+within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
+Slack-style and flat: replying to a reply still uses the *root's* id, not the
+reply's, so every message in a thread shares one id. A threaded reply is
+quiet-delivered (like an unmentioned topic subscriber) to everyone except an
+`@mention` or someone who has *already posted* in that thread — the same
+noise fix `@mention` already gets, for "a reply shouldn't wake everyone the
+way a fresh topic message does." `mess recv --thread <id>` shows just that
+thread (root + replies), leaving the rest of the inbox untouched; it isn't
+combined with `--wait`. Only an actual reply is tagged in the printed output
+(`[thread m42] ...`, prepended) — a plain message shows no id, since you never
+need to read or type one:
+
+```
+mess reply "text..."   # replies to the most recent message you've seen, or
+                        # continues the thread a prior `mess reply` opened
+mess thread close        # end that continuation; the next `mess reply` starts
+                          # fresh, off whatever's most recent at that point
+mess thread list          # list threads you've seen activity in (id, topic/peer,
+                          # reply count, participants, last activity, root preview)
+```
+
+`mess reply` routes to wherever the root came from (a topic via `pub`, or a
+direct message via `send`) automatically. Once it opens a thread it keeps
+replying there on every subsequent call — regardless of what else arrives in
+the meantime — until you `mess thread close`; use `--thread <id>` directly on
+`send`/`pub` instead if you want a one-off reply without touching that state.
+
+## Rooms
+
+By default every agent shares one flat, global namespace — fine for a handful
+of agents, noisy once several unrelated projects/fleets are all running on the
+same machine (unrelated broadcasts flooding your inbox, `mess ps` cluttered
+with agents you don't care about, and no way for two projects to both use a
+name like `admin` without colliding).
+
+A **room** is an exclusive namespace, joined the same way you set an identity:
+
+```
+mess room join myproject      # join (or create) a room, as your current identity
+mess room                     # print your current room ("(global)" if none)
+mess room leave                # back to the global room
+```
+
+Once joined, **identity, `mess broadcast`, `mess ps`, and topics are all scoped
+to your room** — "admin" in room `myproject` and "admin" in room
+`otherproject` are simply different, independently-owned identities; a
+broadcast reaches only your room; `mess ps` shows only your room's agents and
+topics. `mess ps --all` shows every room at once (agents/topics prefixed
+`room/name` to disambiguate); `mess ps --room NAME` shows a specific other
+room. `mess rm`/`mess drain` take an explicit `--room NAME` to target an
+agent in a room other than your own.
+
+**Nothing changes for an agent that never joins a room** — it stays in the
+implicit global room, exactly like every agent before this feature existed.
+Rooms are resolved the same three-tier way as identity: `--room` flag → a
+room joined this session (persisted, survives compaction/resume like identity)
+→ `MESS_ROOM` env var.
+
+### Bridges: cross-room topic relay
+
+Since topics are room-scoped, two rooms that need to coordinate can't just
+both `mess sub` the same topic name anymore — it's now two separate, isolated
+topics. A **bridge** is the explicit escape hatch:
+
+```
+mess room bridge deploy otherproject/ops     # relay #deploy (here) <-> #ops (there)
+mess room bridge deploy otherproject/ops --direction out   # one-way only
+mess room bridges                             # list active bridges
+mess room unbridge <id>                       # tear one down
+```
+
+A bridge is unilateral (no consent from the far room — rooms have no
+ACL/ownership model, so there's no one to ask) and can chain across more than
+two rooms; a cycle (A↔B↔A) can't ping-pong, since a single publish never
+re-enters a topic it's already crossed. Every create/teardown is logged
+loudly, and `mess ps`/`mess room bridges` show every active bridge, so a
+bridge is never invisible even though it's unilateral. A relayed message is
+quiet-delivered (doesn't trigger auto-wake or the steer notice) unless it
+`@mention`s someone on the far side — the same reasoning as threads: a bridge
+between two busy rooms shouldn't become a wake-storm amplifier.
+
+## Export
+
+`mess export` dumps a conversation's full history as text or JSON, to stdout
+or a file:
+
+```
+mess export --topic deploy                 # the topic's own log (complete,
+                                            # independent of who's subscribed —
+                                            # even a topic with zero current
+                                            # subscribers keeps its history)
+mess export --thread m42                   # a thread's root + replies, from
+                                            # YOUR OWN received view
+mess export --to alice                     # your DM history with alice, same
+                                            # "your own view" caveat
+mess export --topic deploy --format json --out deploy-log.json
+```
+
+`--thread`/`--to` reuse your own already-consumed history plus whatever's
+still queued (peek-only, nothing is consumed) — which means a message *you*
+sent yourself never appears (the same rule `recv` already follows: you don't
+receive your own broadcast/topic post). `--topic` doesn't have that gap, since
+a topic's history is logged once at publish time regardless of sender —
+prefer it when you need the complete log rather than just your own view.
+
 ## Installation
 
 **Prerequisites:** Go 1.24+ (uses `omitzero` and `strings.SplitSeq`; the module
@@ -143,7 +249,12 @@ bare `MESS_AGENT` run with no session id is not enforced.
 mess send bob "build is done"        # direct, fire-and-forget
 mess send --ack bob "build is done"  # block until bob reads it (read receipt)
 mess send --ack --timeout 30s bob "..."  # ...but give up after 30s
-mess broadcast "standup in 5"        # everyone
+mess broadcast "standup in 5"        # everyone in your room
+mess broadcast --loud "..."          # host-wide (crosses rooms), bypasses a
+                                     # parked --no-broadcast waiter, and
+                                     # desktop-notifies the human operator
+mess broadcast --loud-room "..."     # same bypass + notify, but stays scoped
+                                     # to your own room instead of host-wide
 mess sub builds                      # subscribe to a topic
 mess pub builds "green light"        # publish to a topic (wakes all subscribers)
 mess pub builds "@alice green light" # ...@mention: all receive, only alice wakes
@@ -206,6 +317,11 @@ dead client. Removing or renaming an agent (`rm`, `rename`, `unregister`,
 instead of lingering as a ghost listener under the old name (and being resurrected
 on a daemon restart). When an agent has unread mail it also shows the **age of the oldest
 unread message** (e.g. `2 pending (oldest 3m)`).
+
+`mess ps` is scoped to your own room by default (see [Rooms](#rooms)) —
+identical output to a pre-rooms `mess` if you've never joined one. `--all`
+shows every room at once (agent/topic names prefixed `room/`); `--room NAME`
+shows a specific other room.
 
 ## The daemon
 
@@ -306,7 +422,11 @@ What each piece does:
   the `flock` guard ensures a single parked waiter; `--no-broadcast` avoids a wake
   storm; `--batch 1s` coalesces a burst; it parks with `--peek` and only wakes on a
   real wake-worthy message (skips quiet/`@mention`-elsewhere ones — no phantom
-  wake). On an idle wake it then **consumes** the inbox and prints the messages to
+  wake). A `--loud` broadcast bypasses `--no-broadcast` on both ends of this hook —
+  it can unblock the park (the daemon's wake check checks `Loud` before the kind
+  filter) *and* survives the follow-up consume step, which otherwise re-applies
+  `--no-broadcast` and would silently re-queue the very message that woke it. On an
+  idle wake it then **consumes** the inbox and prints the messages to
   **stderr**, which `asyncRewake` injects into the woken turn as a system reminder
   ([docs](https://code.claude.com/docs/en/hooks.md): *"the hook's stderr … is shown
   to Claude as a system reminder"*). So the woken agent **sees the message content
