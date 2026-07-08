@@ -15,6 +15,28 @@ import (
 const usage = `mess - a local messenger for Claude agents
 
 Usage:
+
+Identity:
+  mess register [name]            join the network; with a name, set this
+                                  session's identity (persists across turns)
+  mess unregister                 leave the network and clear this session's
+                                  identity (inverse of register)
+  mess rename [--force] <name>    rename yourself, migrating your inbox and
+                                  subscriptions to the new name
+  mess whoami                     print your resolved identity (empty if none)
+  mess islistening                exit 0 if you have an active listener, else 1
+
+Rooms (namespace isolation):
+  mess room [join <room> | leave] print your current room, or join/leave one —
+                                  an exclusive namespace isolating identities,
+                                  broadcast, ps, and topics from other rooms
+                                  (global/default room until you join one)
+  mess room bridge <topic> <room>/<topic> [--direction both|out|in] [--ttl DUR]
+                                  relay a local topic to a topic in another room
+  mess room unbridge <id>          tear down a bridge
+  mess room bridges                list active bridges
+
+Sending:
   mess send <to> [body...]        send a direct message to an agent
                                   (--ack blocks until it's read; --timeout DUR)
                                   (to "user" or your login name = the human's
@@ -32,61 +54,51 @@ Usage:
                                   unless @mentioned or already a participant)
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
-  mess register [name]            join the network; with a name, set this
-                                  session's identity (persists across turns)
-  mess unregister                 leave the network and clear this session's
-                                  identity (inverse of register)
-  mess rename [--force] <name>    rename yourself, migrating your inbox and
-                                  subscriptions to the new name
-  mess cleanup [maxage]           prune agents idle longer than maxage (default
-                                  24h) and not listening; --dry-run to preview
-  mess state [text...]            set your working state (shown in ps); --clear to clear
-  mess warn [text...]             set a transient status warning (auto-clears when
-                                  you're next active; --ttl DUR, --clear)
-  mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
-  mess rm <agent>                 remove an agent (e.g. a dead session) from the network
-  mess drain <agent>              clear another agent's inbox (prints what was queued;
-                                  leaves the agent registered — for a stuck backlog)
-  mess whoami                     print your resolved identity (empty if none)
-  mess islistening                exit 0 if you have an active listener, else 1
+
+Receiving and threads:
   mess recv [duration]            receive queued messages (--thread ID shows
                                   only that thread's messages, not with --wait)
+  mess listen [idle-timeout]      run continuously (bg): print messages as they
+                                  arrive until interrupted (alias: recv --follow)
+  mess replay [N]                 reprint the last N messages you already consumed
+                                  (recover a message lost to a dropped wake)
   mess reply [body...]            reply to the most recent message (or continue
                                   the open thread — see "mess thread close");
                                   no need to know/pass a message id
   mess thread close                end the thread "mess reply" is continuing;
                                   the next reply starts a fresh one
   mess thread list                 list threads you've seen activity in
-  mess replay [N]                 reprint the last N messages you already consumed
-                                  (recover a message lost to a dropped wake)
   mess export --topic NAME | --thread ID | --to AGENT
                                   dump a conversation's full history
                                   (--format text|json, --out FILE, --max N)
-  mess listen [idle-timeout]      run continuously (bg): print messages as they
-                                  arrive until interrupted (alias: recv --follow)
+
+Status:
   mess ps [--room NAME | --all]    list agents and topics (online/offline +
                                   working/listening/idle status); scoped to
                                   your own room by default
-  mess room [join <room> | leave] print your current room, or join/leave one —
-                                  an exclusive namespace isolating identities,
-                                  broadcast, ps, and topics from other rooms
-                                  (global/default room until you join one)
-  mess room bridge <topic> <room>/<topic> [--direction both|out|in] [--ttl DUR]
-                                  relay a local topic to a topic in another room
-  mess room unbridge <id>          tear down a bridge
-  mess room bridges                list active bridges
+  mess state [text...]            set your working state (shown in ps); --clear to clear
+  mess warn [text...]             set a transient status warning (auto-clears when
+                                  you're next active; --ttl DUR, --clear)
+  mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
+
+Admin and daemon:
+  mess rm <agent>                 remove an agent (e.g. a dead session) from the network
+  mess drain <agent>              clear another agent's inbox (prints what was queued;
+                                  leaves the agent registered — for a stuck backlog)
+  mess cleanup [maxage]           prune agents idle longer than maxage (default
+                                  24h) and not listening; --dry-run to preview
   mess ping                       check the daemon
   mess daemon                     run the daemon in the foreground
   mess stop                       shut the daemon down
 
-Identity (resolved in this order):
+Identity resolution (most to least specific):
   1. --as NAME on the command
   2. a mid-session name set via "mess register <name>" — persisted per host
      session (keyed on the first of $MESS_SESSION_ID, $CLAUDE_CODE_SESSION_ID,
      or $CODEX_THREAD_ID), so it survives across turns, compaction, and resume
   3. the MESS_AGENT environment variable (set at launch)
 
-Room (resolved the same way, independently of identity):
+Room resolution (same order, independently of identity):
   1. --room NAME on the command
   2. a mid-session room set via "mess room join <room>" — persisted the same
      way as identity
@@ -125,8 +137,23 @@ func main() {
 
 	var err error
 	switch cmd {
-	case "daemon":
-		err = runDaemon(p)
+	// Identity
+	case "register":
+		err = cmdRegister(p, args)
+	case "unregister":
+		err = cmdUnregister(p, args)
+	case "rename":
+		err = cmdRename(p, args)
+	case "whoami":
+		err = cmdWhoami(p)
+	case "islistening":
+		err = cmdIsListening(p, args)
+
+	// Rooms
+	case "room":
+		err = cmdRoom(p, args)
+
+	// Sending
 	case "send":
 		err = cmdSend(p, args)
 	case "broadcast":
@@ -135,32 +162,13 @@ func main() {
 		err = cmdPub(p, args)
 	case "sub", "unsub":
 		err = cmdSubUnsub(p, cmd, args)
-	case "register":
-		err = cmdRegister(p, args)
-	case "room":
-		err = cmdRoom(p, args)
-	case "unregister":
-		err = cmdUnregister(p, args)
-	case "rename":
-		err = cmdRename(p, args)
-	case "cleanup":
-		err = cmdCleanup(p, args)
-	case "state":
-		err = cmdState(p, args)
-	case "warn":
-		err = cmdWarn(p, args)
-	case "busy", "unbusy":
-		err = cmdBusy(p, cmd, args)
-	case "rm":
-		err = cmdRm(p, args)
-	case "drain":
-		err = cmdDrain(p, args)
-	case "whoami":
-		err = cmdWhoami(p)
-	case "islistening":
-		err = cmdIsListening(p, args)
+
+	// Receiving and threads
 	case "recv":
 		err = cmdRecv(p, args)
+	case "listen":
+		// listen == recv --follow: a continuous background listener.
+		err = cmdRecv(p, append([]string{"--follow"}, args...))
 	case "replay":
 		err = cmdReplay(p, args)
 	case "reply":
@@ -169,15 +177,31 @@ func main() {
 		err = cmdThread(p, args)
 	case "export":
 		err = cmdExport(p, args)
-	case "listen":
-		// listen == recv --follow: a continuous background listener.
-		err = cmdRecv(p, append([]string{"--follow"}, args...))
+
+	// Status
 	case "ps":
 		err = cmdPs(p, args)
+	case "state":
+		err = cmdState(p, args)
+	case "warn":
+		err = cmdWarn(p, args)
+	case "busy", "unbusy":
+		err = cmdBusy(p, cmd, args)
+
+	// Admin and daemon
+	case "rm":
+		err = cmdRm(p, args)
+	case "drain":
+		err = cmdDrain(p, args)
+	case "cleanup":
+		err = cmdCleanup(p, args)
 	case "ping":
 		err = cmdPing(p)
+	case "daemon":
+		err = runDaemon(p)
 	case "stop":
 		err = cmdStop(p)
+
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

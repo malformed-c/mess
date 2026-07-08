@@ -955,6 +955,37 @@ func TestPsUnjoinedAgentSeesFullGlobalFleetUnchanged(t *testing.T) {
 	}
 }
 
+// Regression test: a room-scoped `mess ps` must still surface the human
+// operator's mailbox, even though it's registered in the global room — a
+// room-joined agent otherwise has no way to see "user" is reachable without
+// already knowing the (undocumented-in-ps) always-global convention. Same
+// exception class as TestCleanupNeverPrunesUserHandleInAnyRoom.
+func TestPsSurfacesUserHandleAcrossRooms(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("A", "alice"))
+	b.Register("user") // the human's global mailbox
+
+	agents, _ := b.Ps("A", false)
+	names := map[string]bool{}
+	for _, a := range agents {
+		names[a.Name] = true
+	}
+	if !names["alice"] || !names["user"] {
+		t.Fatalf("expected both alice and the user mailbox in room A's ps, got %+v", agents)
+	}
+
+	// A different, unrelated room must also see the human mailbox.
+	b.Register(agentKey("B", "bob"))
+	agents, _ = b.Ps("B", false)
+	names = map[string]bool{}
+	for _, a := range agents {
+		names[a.Name] = true
+	}
+	if !names["bob"] || !names["user"] {
+		t.Fatalf("expected both bob and the user mailbox in room B's ps, got %+v", agents)
+	}
+}
+
 // Regression test for a real bug class introduced by room-scoping: Cleanup's
 // "never prune the human's mailbox" guard must check the bare name, not the
 // composite map key (isUserHandle("A\x00user") is false, but isUserHandle on

@@ -1302,13 +1302,17 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 // all==false, only the given room's agents/topics are returned (room=="" is
 // the global/default room — the scope everyone is in until they `mess room
 // join`); with all==true, room is ignored and everything is returned across
-// every room.
+// every room. The human operator's mailbox (isUserHandle) is always included
+// regardless of room — there's one human per machine, not one per room (the
+// same exception dispatch() and Cleanup already make), so a room-scoped `ps`
+// still surfaces them as reachable instead of hiding the one recipient every
+// agent can always fall back to.
 func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var agents []AgentInfo
 	for key, a := range b.agents {
-		if !all && a.room != room {
+		if !all && a.room != room && !isUserHandle(a.name) {
 			continue
 		}
 		topics := make([]string, 0, len(a.topics))
