@@ -220,7 +220,7 @@ func loadSnapshotFile(path string) (snapshot, error) {
 
 // paths resolves the runtime directory and the files within it. The directory
 // can be overridden with MESS_DIR (useful for tests and isolation).
-type paths struct{ dir, sock, state, log string }
+type paths struct{ dir, sock, state, log, journal string }
 
 func resolvePaths() paths {
 	dir := os.Getenv("MESS_DIR")
@@ -232,9 +232,10 @@ func resolvePaths() paths {
 		dir = filepath.Join(home, ".mess")
 	}
 	return paths{
-		dir:   dir,
-		sock:  filepath.Join(dir, "mess.sock"),
-		state: filepath.Join(dir, "state.json"),
-		log:   filepath.Join(dir, "daemon.log"),
+		dir:     dir,
+		sock:    filepath.Join(dir, "mess.sock"),
+		state:   filepath.Join(dir, "state.json"),
+		log:     filepath.Join(dir, "daemon.log"),
+		journal: filepath.Join(dir, "journal.jsonl"),
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -350,5 +351,227 @@ func TestDispatchThreadList(t *testing.T) {
 	th := resp.Threads[0]
 	if th.ID != rootID || th.Topic != "eng" || th.Replies != 1 {
 		t.Fatalf("unexpected thread summary: %+v", th)
+	}
+}
+
+// recv --if-idle must stand down (Busy: true, no messages) while the agent
+// is busy, and drain normally once it's not — exercised through d.recv, the
+// same entry point the CLI's non-blocking path uses.
+func TestDispatchRecvIfIdleStandsDownWhenBusy(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.Send("alice", "bob", "hello")
+	d.broker.SetBusy("bob", time.Minute)
+
+	resp := d.recv(nil, Request{Op: "recv", As: "bob", IfIdle: true})
+	if !resp.OK || !resp.Busy || len(resp.Messages) != 0 {
+		t.Fatalf("expected a busy stand-down with no messages, got %+v", resp)
+	}
+
+	d.broker.ClearBusy("bob")
+	resp = d.recv(nil, Request{Op: "recv", As: "bob", IfIdle: true})
+	if !resp.OK || resp.Busy || len(resp.Messages) != 1 {
+		t.Fatalf("expected the message once idle, got %+v", resp)
+	}
+}
+
+// --- ask/await ---
+
+// ask (async) creates a threaded message and returns its own id as the
+// token, without waiting; await on that token then blocks until a reply
+// (a plain threaded send, exactly what `mess reply` issues) arrives.
+func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	_, server := net.Pipe()
+
+	askResp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
+	if !askResp.OK || askResp.ID == "" || len(askResp.Messages) != 0 {
+		t.Fatalf("expected an async ask to return a token with no messages, got %+v", askResp)
+	}
+	token := askResp.ID
+
+	done := make(chan Response, 1)
+	go func() { done <- d.askOrAwait(server, Request{Op: "await", As: "alice", ThreadID: token, Wait: true}) }()
+
+	// Wait until the await has registered as a listener, then have bob answer.
+	deadline := time.Now().Add(time.Second)
+	for !d.broker.IsListening("alice") {
+		if time.Now().After(deadline) {
+			t.Fatal("await never registered as listening")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := d.broker.SendThreaded("bob", "alice", "all green", token); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case resp := <-done:
+		if !resp.OK || len(resp.Messages) != 1 || resp.Messages[0].Body != "all green" {
+			t.Fatalf("expected the threaded reply, got %+v", resp)
+		}
+		if resp.ID != token {
+			t.Fatalf("expected Response.ID to echo the token, got %q", resp.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("await did not return after the reply arrived")
+	}
+}
+
+// A non-blocking await on an already-answered token returns it immediately,
+// without parking (mirrors recv's own non-blocking-vs-wait split).
+func TestDispatchAwaitNonBlockingReturnsAlreadyAnsweredToken(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	root, err := d.broker.Send("alice", "bob", "question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.broker.SendThreaded("bob", "alice", "answer", root.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := d.askOrAwait(nil, Request{Op: "await", As: "alice", ThreadID: root.ID, Wait: false})
+	if !resp.OK || len(resp.Messages) != 1 || resp.Messages[0].Body != "answer" {
+		t.Fatalf("expected the already-queued reply, got %+v", resp)
+	}
+}
+
+// await with no token at all is a clear error, not a silent no-op.
+func TestDispatchAwaitRequiresToken(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.askOrAwait(nil, Request{Op: "await", As: "alice", Wait: false})
+	if resp.Error == "" {
+		t.Fatal("expected an error for await with no token")
+	}
+}
+
+// --- log ---
+
+func newTestDaemonWithJournal(t *testing.T) *daemon {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+	jw, err := openJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { jw.close() })
+	return &daemon{broker: NewBroker(), journal: jw, paths: paths{journal: path}, stop: make(chan struct{})}
+}
+
+// send/broadcast/pub all journal what they deliver, and "log" queries it back
+// — end-to-end through dispatch, not the journal package directly.
+func TestDispatchSendBroadcastPubAllJournal(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "direct hello"})
+	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "broadcast hello"})
+	d.dispatch(Request{Op: "sub", As: "bob", Topic: "eng"})
+	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "pub hello"})
+
+	resp := d.dispatch(Request{Op: "log", As: "alice", All: true})
+	if !resp.OK || len(resp.Messages) != 3 {
+		t.Fatalf("expected all 3 journaled messages, got %+v", resp)
+	}
+	bodies := map[string]bool{}
+	for _, m := range resp.Messages {
+		bodies[m.Body] = true
+	}
+	for _, want := range []string{"direct hello", "broadcast hello", "pub hello"} {
+		if !bodies[want] {
+			t.Fatalf("expected %q in the journal, got %+v", want, resp.Messages)
+		}
+	}
+}
+
+// log defaults to the caller's own room, matching Ps/Broadcast.
+func TestDispatchLogScopesToCallerRoomByDefault(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "A", Body: "room A message"})
+	d.dispatch(Request{Op: "send", As: "carol", To: "dave", Room: "B", Body: "room B message"})
+
+	resp := d.dispatch(Request{Op: "log", As: "alice", Room: "A"})
+	if !resp.OK || len(resp.Messages) != 1 || resp.Messages[0].Body != "room A message" {
+		t.Fatalf("expected only room A's message, got %+v", resp)
+	}
+
+	resp = d.dispatch(Request{Op: "log", As: "alice", All: true})
+	if !resp.OK || len(resp.Messages) != 2 {
+		t.Fatalf("expected both rooms with --all, got %+v", resp)
+	}
+}
+
+// An invalid --since is a clear error, not a silently-empty result.
+func TestDispatchLogRejectsInvalidSince(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	resp := d.dispatch(Request{Op: "log", As: "alice", Since: "nonsense"})
+	if resp.Error == "" {
+		t.Fatal("expected an error for an invalid --since")
+	}
+}
+
+// --- expire ---
+
+// The core no-silent-loss invariant: an expired message must be durably
+// journaled (Event=="expired") before/as part of being dropped, so `mess
+// log` can always show what was auto-removed.
+func TestDispatchExpireJournalsBeforeDropping(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	now := time.Unix(0, 0)
+	d.broker.now = func() time.Time { return now }
+	d.broker.Send("alice", "bob", "ancient mail")
+	now = now.Add(15 * 24 * time.Hour)
+
+	resp := d.dispatch(Request{Op: "expire", Timeout: (14 * 24 * time.Hour).String()})
+	if !resp.OK || resp.Expired != 1 {
+		t.Fatalf("expected 1 expired message, got %+v", resp)
+	}
+	if got := d.broker.Drain("bob", false, 0); len(got) != 0 {
+		t.Fatalf("expected the inbox to be empty after expiry, got %+v", got)
+	}
+
+	logResp := d.dispatch(Request{Op: "log", As: "alice", All: true})
+	if !logResp.OK || len(logResp.Messages) != 1 || logResp.Messages[0].Body != "ancient mail" {
+		t.Fatalf("expected the expired message to be journaled and findable via log, got %+v", logResp)
+	}
+}
+
+// --dry-run (Peek) previews without journaling or dropping anything.
+func TestDispatchExpireDryRunDoesNotJournalOrDrop(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	now := time.Unix(0, 0)
+	d.broker.now = func() time.Time { return now }
+	d.broker.Send("alice", "bob", "ancient mail")
+	now = now.Add(15 * 24 * time.Hour)
+
+	resp := d.dispatch(Request{Op: "expire", Timeout: (14 * 24 * time.Hour).String(), Peek: true})
+	if !resp.OK || resp.Expired != 1 {
+		t.Fatalf("expected a preview count of 1, got %+v", resp)
+	}
+	if got := d.broker.Drain("bob", false, 0); len(got) != 1 {
+		t.Fatalf("dry-run must not drop anything, got %+v", got)
+	}
+	logResp := d.dispatch(Request{Op: "log", As: "alice", All: true})
+	if !logResp.OK || len(logResp.Messages) != 0 {
+		t.Fatalf("dry-run must not journal anything, got %+v", logResp)
+	}
+}
+
+// If the journal write fails, nothing in that batch is committed — resweeping
+// later beats a partially-committed, partially-audited drop.
+func TestExpireDurablySkipsCommitOnJournalFailure(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	now := time.Unix(0, 0)
+	d.broker.now = func() time.Time { return now }
+	d.broker.Send("alice", "bob", "ancient mail")
+	now = now.Add(15 * 24 * time.Hour)
+
+	if err := d.journal.close(); err != nil { // force the next append to fail
+		t.Fatal(err)
+	}
+
+	expired := d.expireDurably(14 * 24 * time.Hour)
+	if expired != nil {
+		t.Fatalf("expected no commit when journaling fails, got %+v", expired)
+	}
+	if got := d.broker.Drain("bob", false, 0); len(got) != 1 {
+		t.Fatalf("message must remain queued when the journal write failed, got %+v", got)
 	}
 }

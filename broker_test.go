@@ -239,6 +239,80 @@ func TestWaitChanFiresImmediatelyIfPending(t *testing.T) {
 	}
 }
 
+// --- ask/await primitives ---
+
+func TestWaitChanThreadFiresOnMatchingReply(t *testing.T) {
+	b := newTestBroker()
+	root, err := b.Send("alice", "bob", "question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := b.waitChanThread("alice", root.ID)
+	select {
+	case <-ch:
+		t.Fatal("waiter fired before any reply")
+	default:
+	}
+	if _, err := b.SendThreaded("bob", "alice", "the answer", root.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ch:
+		// good
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not fire after the threaded reply")
+	}
+}
+
+// waitChanThread mirrors waitChan's contract exactly: any delivery wakes a
+// parked waiter (deliver() wakes all waiters unconditionally, see deliver()'s
+// own doc comment), and it's the caller's job to re-check the real predicate
+// (HasPendingThread) on wake — parkAndDrain's loop does exactly that, so an
+// unrelated delivery causes a spurious wake-and-reloop, not a wrong answer.
+func TestHasPendingThreadDistinguishesSpuriousWakeFromRealAnswer(t *testing.T) {
+	b := newTestBroker()
+	root, _ := b.Send("alice", "bob", "question")
+	b.Send("carol", "alice", "unrelated")
+	if b.HasPendingThread("alice", root.ID) {
+		t.Fatal("an unrelated message must not satisfy HasPendingThread")
+	}
+	b.SendThreaded("bob", "alice", "the answer", root.ID)
+	if !b.HasPendingThread("alice", root.ID) {
+		t.Fatal("expected the threaded reply to satisfy HasPendingThread")
+	}
+}
+
+func TestWaitChanThreadFiresImmediatelyIfAlreadyAnswered(t *testing.T) {
+	b := newTestBroker()
+	root, err := b.Send("alice", "bob", "question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.SendThreaded("bob", "alice", "already answered", root.ID); err != nil {
+		t.Fatal(err)
+	}
+	ch := b.waitChanThread("alice", root.ID)
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("expected immediate fire when a reply is already queued")
+	}
+}
+
+func TestHasPendingThreadIgnoresOtherThreads(t *testing.T) {
+	b := newTestBroker()
+	root, _ := b.Send("alice", "bob", "q1")
+	other, _ := b.Send("alice", "bob", "q2")
+	b.SendThreaded("carol", "alice", "reply to q2", other.ID)
+
+	if b.HasPendingThread("alice", root.ID) {
+		t.Fatal("must not see a reply belonging to a different thread")
+	}
+	if !b.HasPendingThread("alice", other.ID) {
+		t.Fatal("expected the reply belonging to this thread")
+	}
+}
+
 func TestAckFiresAutomaticallyOnRead(t *testing.T) {
 	b := newTestBroker()
 	_, ackCh, err := b.SendAck("alice", "bob", "did you see this?")
@@ -719,6 +793,81 @@ func TestCleanupPrunesByStaleMail(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("agent with 48h-old undrained mail should be pruned, got %v", removed)
+	}
+}
+
+// --- backlog TTL (ExpireInbox) ---
+
+// Unlike Cleanup, ExpireInbox must drop old unread mail even from an agent
+// that's currently alive (listening/working) — a live-but-sporadic agent can
+// still be sitting on ancient unread mail Cleanup would never touch.
+func TestExpireInboxDropsOldMailEvenFromAliveAgent(t *testing.T) {
+	now := time.Unix(0, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Send("alice", "bob", "old mail")
+	b.AddListener("bob") // alive: Cleanup would skip this agent entirely
+	now = now.Add(15 * 24 * time.Hour)
+
+	expired := b.ExpireInbox(14*24*time.Hour, false)
+	if len(expired) != 1 || expired[0].Body != "old mail" {
+		t.Fatalf("expected the old message to expire despite bob being alive, got %+v", expired)
+	}
+	if got := b.Drain("bob", false, 0); len(got) != 0 {
+		t.Fatalf("expired message should be gone from the inbox, got %+v", got)
+	}
+}
+
+// Only the old messages in a mixed inbox expire; recent ones stay queued.
+func TestExpireInboxKeepsRecentMessages(t *testing.T) {
+	now := time.Unix(0, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Send("alice", "bob", "old")
+	now = now.Add(15 * 24 * time.Hour)
+	b.Send("alice", "bob", "recent")
+
+	expired := b.ExpireInbox(14*24*time.Hour, false)
+	if len(expired) != 1 || expired[0].Body != "old" {
+		t.Fatalf("expected only the old message to expire, got %+v", expired)
+	}
+	got := b.Drain("bob", false, 0)
+	if len(got) != 1 || got[0].Body != "recent" {
+		t.Fatalf("expected the recent message to remain queued, got %+v", got)
+	}
+}
+
+// dryRun (--dry-run) previews without mutating anything.
+func TestExpireInboxDryRunLeavesInboxUntouched(t *testing.T) {
+	now := time.Unix(0, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Send("alice", "bob", "old mail")
+	now = now.Add(15 * 24 * time.Hour)
+
+	expired := b.ExpireInbox(14*24*time.Hour, true)
+	if len(expired) != 1 {
+		t.Fatalf("expected 1 eligible message in the preview, got %+v", expired)
+	}
+	if got := b.Drain("bob", false, 0); len(got) != 1 {
+		t.Fatalf("dry-run must not mutate the inbox, got %+v", got)
+	}
+}
+
+// Same carve-out as Cleanup: the human's mailbox is never auto-expired.
+func TestExpireInboxNeverDropsUserHandle(t *testing.T) {
+	now := time.Unix(0, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.Send("alice", "user", "please look at this")
+	now = now.Add(365 * 24 * time.Hour)
+
+	expired := b.ExpireInbox(14*24*time.Hour, false)
+	if len(expired) != 0 {
+		t.Fatalf("the human's mailbox must never auto-expire, got %+v", expired)
+	}
+	if got := b.Drain("user", false, 0); len(got) != 1 {
+		t.Fatalf("expected the message to remain queued for the human, got %+v", got)
 	}
 }
 
@@ -1289,6 +1438,50 @@ func TestThreadedReplyWakesParticipantsNotBystanders(t *testing.T) {
 
 // A direct (non-topic) threaded send is just metadata/participant-tracking —
 // it doesn't change wake behavior, since there's only one recipient.
+// --- attachments ---
+
+func TestSendThreadedAttachRecordsFields(t *testing.T) {
+	b := newTestBroker()
+	mtime := time.Unix(1000, 0)
+	attach := &Attachment{Path: "/tmp/cfg.yaml", Hash: "sha256:abcd", Size: 42, MTime: mtime}
+	m, err := b.SendThreadedAttach("alice", "bob", "see this", "", attach)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AttachPath != "/tmp/cfg.yaml" || m.AttachHash != "sha256:abcd" || m.AttachSize != 42 || !m.AttachMTime.Equal(mtime) {
+		t.Fatalf("attachment fields not recorded on the sent message: %+v", m)
+	}
+	got := b.Drain("bob", false, 0)
+	if len(got) != 1 || got[0].AttachPath != "/tmp/cfg.yaml" {
+		t.Fatalf("attachment fields not delivered to the recipient: %+v", got)
+	}
+}
+
+func TestSendThreadedWithoutAttachLeavesFieldsEmpty(t *testing.T) {
+	b := newTestBroker()
+	m, err := b.SendThreaded("alice", "bob", "no attachment here", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AttachPath != "" || m.AttachHash != "" {
+		t.Fatalf("expected no attachment fields, got %+v", m)
+	}
+}
+
+func TestPubThreadedAttachRecordsFields(t *testing.T) {
+	b := newTestBroker()
+	b.Sub("bob", "eng")
+	attach := &Attachment{Path: "/tmp/note.txt", Hash: "sha256:ef01", Size: 7}
+	m, _, _ := b.PubThreadedAttach("alice", "eng", "check this", "", attach)
+	if m.AttachPath != "/tmp/note.txt" || m.AttachHash != "sha256:ef01" || m.AttachSize != 7 {
+		t.Fatalf("attachment fields not recorded on the published message: %+v", m)
+	}
+	got := b.Drain("bob", false, 0)
+	if len(got) != 1 || got[0].AttachHash != "sha256:ef01" {
+		t.Fatalf("attachment fields not delivered to the subscriber: %+v", got)
+	}
+}
+
 func TestSendThreadedTagsMessageAndTracksParticipant(t *testing.T) {
 	b := newTestBroker()
 	m, err := b.SendThreaded("alice", "bob", "starting a DM thread", "root123")
@@ -1334,6 +1527,61 @@ func TestDrainThreadFiltersToRootAndReplies(t *testing.T) {
 	full := b.Drain("bob", false, 0)
 	if len(full) != 4 {
 		t.Fatalf("peek should not have consumed anything; expected 4 total, got %d", len(full))
+	}
+}
+
+// DrainIfIdle must not drain (or touch the inbox at all) while the agent is
+// busy — this is what closes the auto-wake hook's old two-round-trip race
+// (a separate "is it busy" ps call, then a separate drain call, with a real
+// gap in between for a new turn to start in).
+func TestDrainIfIdleStandsDownWhenBusy(t *testing.T) {
+	b := newTestBroker()
+	b.Send("alice", "bob", "hello")
+	b.SetBusy("bob", time.Minute)
+
+	msgs, idle := b.DrainIfIdle("bob", 0, nil)
+	if idle {
+		t.Fatal("expected idle=false while busy")
+	}
+	if msgs != nil {
+		t.Fatalf("expected no messages while busy, got %+v", msgs)
+	}
+	// Must still be sitting in the inbox, untouched.
+	full := b.Drain("bob", true, 0)
+	if len(full) != 1 {
+		t.Fatalf("message should still be queued after a stood-down DrainIfIdle: %+v", full)
+	}
+}
+
+func TestDrainIfIdleDrainsWhenNotBusy(t *testing.T) {
+	b := newTestBroker()
+	b.Send("alice", "bob", "hello")
+
+	msgs, idle := b.DrainIfIdle("bob", 0, nil)
+	if !idle {
+		t.Fatal("expected idle=true when not busy")
+	}
+	if len(msgs) != 1 || msgs[0].Body != "hello" {
+		t.Fatalf("expected the queued message, got %+v", msgs)
+	}
+	// And it's actually consumed — a later drain finds nothing.
+	if full := b.Drain("bob", false, 0); len(full) != 0 {
+		t.Fatalf("expected the message to be consumed, got %+v", full)
+	}
+}
+
+// The busy check and the drain must be one atomic operation — SetBusy
+// between DrainIfIdle's check and its drain must be impossible since both
+// happen under b.mu in the same call, not two separate round trips.
+func TestDrainIfIdleClearedBusyStillDrains(t *testing.T) {
+	b := newTestBroker()
+	b.Send("alice", "bob", "hello")
+	b.SetBusy("bob", time.Minute)
+	b.ClearBusy("bob")
+
+	msgs, idle := b.DrainIfIdle("bob", 0, nil)
+	if !idle || len(msgs) != 1 {
+		t.Fatalf("expected a drain once busy clears, got idle=%v msgs=%+v", idle, msgs)
 	}
 }
 

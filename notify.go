@@ -81,6 +81,7 @@ func notifyUser(from, to, body string) {
 		return
 	}
 	desktopNotify(summary, body)
+	bridgeIfAway(summary, body)
 }
 
 // notifyUserLoud unconditionally pings the human operator regardless of
@@ -95,7 +96,74 @@ func notifyUserLoud(from, body string) {
 	if from == "" {
 		from = "someone"
 	}
-	desktopNotify(fmt.Sprintf("mess: %s broadcast (loud)", from), body)
+	summary := fmt.Sprintf("mess: %s broadcast (loud)", from)
+	desktopNotify(summary, body)
+	bridgeIfAway(summary, body)
+}
+
+// presenceAway reports whether the human operator is away from their desktop
+// right now, i.e. a desktop notification alone likely won't be seen and a
+// bridge to another device is worth the noise. There's no reliable signal
+// this daemon can observe automatically today (aliveLocked-style presence is
+// computed for registered agents, never for the human's own mailbox, and the
+// one real OS-level candidate — systemd-logind's per-session idle hint — has
+// DE-version-dependent reliability not worth trusting blind) — so v1 is an
+// explicit, manual gate: MESS_PRESENCE=away turns bridging on; unset or
+// "present" keeps today's desktop-only behavior (the default, so this is a
+// zero-regression-risk opt-in). Overridable package var, mirroring notifySend,
+// so tests don't depend on the real environment.
+var presenceAway = func() bool {
+	return strings.EqualFold(os.Getenv("MESS_PRESENCE"), "away")
+}
+
+// bridgeEnabled gates the human bridge entirely; MESS_NO_BRIDGE=1 turns it
+// off regardless of presence, mirroring MESS_NO_NOTIFY.
+var bridgeEnabled = os.Getenv("MESS_NO_BRIDGE") == ""
+
+// bridgeIfAway relays a human-notice-worthy message to the configured bridge
+// channel(s) when presenceAway reports the human isn't at their desktop to
+// see a plain desktop notification. Best-effort and non-blocking, same
+// philosophy as desktopNotify — a bridge failing (or not being configured)
+// must never make the triggering `mess send`/`broadcast`/`pub` fail or block.
+// Only one channel (kdeconnect) exists today; calls it directly rather than
+// through a slice/interface of channels — that's ceremony worth adding once a
+// second channel (ntfy/email) actually exists, not before.
+func bridgeIfAway(summary, body string) {
+	if !bridgeEnabled || !presenceAway() {
+		return
+	}
+	kdeconnectBridge(summary, body)
+}
+
+// kdeconnectDevice is the target device name for the kdeconnect bridge,
+// overridable via MESS_KDECONNECT_DEVICE for a different phone/host.
+func kdeconnectDevice() string {
+	if d := os.Getenv("MESS_KDECONNECT_DEVICE"); d != "" {
+		return d
+	}
+	return "engipixel"
+}
+
+// kdeconnectBridge pings the configured device via kdeconnect-cli, mirroring
+// notifySend's exact pattern: LookPath, non-blocking Start, reaped in a
+// goroutine, silent skip if the tool isn't installed or the call fails — a
+// missing/unreachable device must never surface as an error to the sender.
+// Package var so tests can swap it for a recording stub.
+var kdeconnectBridge = func(summary, body string) {
+	path, err := exec.LookPath("kdeconnect-cli")
+	if err != nil {
+		return // kdeconnect not installed — best effort
+	}
+	msg := summary
+	if body != "" {
+		msg = summary + ": " + truncate(body, 200)
+	}
+	cmd := exec.Command(path, "--name", kdeconnectDevice(), "--ping-msg", msg)
+	if err := cmd.Start(); err != nil {
+		dlog("kdeconnect-cli failed: %v", err)
+		return
+	}
+	go func() { _ = cmd.Wait() }() // reap the child without blocking the daemon
 }
 
 // desktopNotify runs notify-send without blocking the daemon. A missing notifier

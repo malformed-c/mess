@@ -33,6 +33,18 @@ notifies. Best-effort: notification is silently skipped when `notify-send` or a
 display is unavailable (e.g. a headless daemon), and `MESS_NO_NOTIFY=1` in the
 daemon's environment turns it off.
 
+**Human bridge (kdeconnect)** — a desktop notification only helps if you're at
+the desktop. Set `MESS_PRESENCE=away` in the daemon's environment and every
+human-notice-worthy message (direct-to-mailbox or `@mention`) also pings a
+paired phone via `kdeconnect-cli --name <device> --ping-msg ...`
+(`MESS_KDECONNECT_DEVICE` picks the device, default `engipixel`). Unset or
+`present` (the default) keeps today's desktop-only behavior — this is an
+explicit opt-in, not automatic presence detection (no reliable "is a human at
+this keyboard" signal exists to build that on yet). `MESS_NO_BRIDGE=1` turns
+bridging off regardless of presence, mirroring `MESS_NO_NOTIFY`. Same
+best-effort philosophy as desktop notifications: a missing `kdeconnect-cli` or
+an unreachable device degrades silently, never fails or blocks the sender.
+
 The human can talk back the same way, not just listen: `--as user` works on
 any command, so `mess send bob "..." --as user` and `mess broadcast "..." --as
 user` speak as the operator like any other agent would (`--room` scopes a
@@ -53,6 +65,17 @@ This works correctly with the auto-wake flow: the wake hook only *peeks*, so it
 does **not** fire the ack — the receipt fires when the recipient runs its own
 `mess recv` to actually read the message. So `--ack` is a true "was read" signal,
 not just "was delivered."
+
+**`mess ask`/`mess await`** — the dominant agent-to-agent pattern is
+ask-and-wait, and `--ack` only proves the question was *read*, not answered.
+`mess ask <agent> "question" [--timeout DUR]` sends a threaded message and
+blocks for the reply by default (its own message id is the correlation token);
+`--async` prints the token immediately instead of waiting, and a later `mess
+await <token>` picks up the reply whenever it arrives — including after an
+`ask` that timed out (the token still works, nothing is lost). The replying
+side needs no new command: a plain `mess reply` after receiving the ask
+already threads back to it. "Answered" is just "a reply arrived in that
+thread" — the same thing `mess recv --thread <id>` already shows.
 
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
 within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
@@ -159,6 +182,68 @@ sent yourself never appears (the same rule `recv` already follows: you don't
 receive your own broadcast/topic post). `--topic` doesn't have that gap, since
 a topic's history is logged once at publish time regardless of sender —
 prefer it when you need the complete log rather than just your own view.
+
+## Attachments
+
+`mess send`/`mess pub --attach <path>` records the file's absolute path and a
+sha256 content hash (plus size/mtime) alongside the message, so agents stop
+describing artifact locations in prose — no copying needed, since this is a
+single-machine tool, and the hash catches the file changing under the
+reference later:
+
+```
+mess send bob "see the new config" --attach ./config.yaml
+mess pub deploy "build artifacts ready" --attach ./dist/app.tar.gz
+```
+
+The hash is computed client-side, before the request is sent. `recv`/`export`/
+`log` all render it distinctly (`[attached: /path (sha256:abcd1234, 2.3KB)]`
+in text; the full untruncated hash in JSON). A missing/unreadable file is a
+hard error — unlike a missing `notify-send`, a wrong attachment reference is a
+correctness bug, so it's caught before any daemon round trip.
+
+## Log
+
+`export`/`recv`/`replay` all only ever see a *bounded* recent window (the
+per-agent/per-topic history is capped at 50 entries). `mess log` searches a
+separate, durable, unbounded journal (`~/.mess/journal.jsonl`, rotated at
+50MB/~5 generations) that every `send`/`broadcast`/`pub` is appended to as it
+happens:
+
+```
+mess log                                   # everything in your room
+mess log --from claude-verify              # only this sender
+mess log --grep "license"                  # body matches this regexp
+mess log --since 3d                        # last 3 days (also 90s/15m/3h/2w)
+mess log --topic deploy --all              # cross-room, one topic
+mess log --format json --out audit.jsonl
+```
+
+Combine filters freely (`--from`+`--grep`+`--since` all apply together). Like
+`ps`/`export`, scoped to your own room by default; `--all` crosses rooms.
+
+## Backlog TTL and roster hygiene
+
+`mess cleanup` (prunes whole dead agent registrations) and `mess expire`
+(drops individually old unread messages, from *any* agent — even one that's
+currently alive and reachable, unlike `cleanup`) both exist as manual
+commands, but a daemon that's been running a while accumulates dead agents
+holding 100+ pending messages anyway, because nobody remembers to run them:
+
+```
+mess expire [maxage]            # drop unread mail older than maxage
+                                 # (default 14d); --dry-run to preview
+```
+
+Every drop is durably journaled (`Event: "expired"`, findable via `mess log`)
+*before* being removed from the inbox — if the journal write itself fails,
+nothing in that batch is dropped, so a message is never silently lost, only
+possibly delayed to the next sweep. Set `MESS_AUTO_EXPIRE=1` in the daemon's
+environment to run both `cleanup` and `expire` automatically on a timer
+(`MESS_CLEANUP_INTERVAL`, default 1h; `MESS_CLEANUP_MAXAGE`/
+`MESS_EXPIRE_MAXAGE` override the maxages) — **off by default**, since this is
+the one background sweep capable of deleting real unread mail on a live
+system; run `mess expire --dry-run` and eyeball the list before turning it on.
 
 ## Installation
 
@@ -443,7 +528,11 @@ What each piece does:
   hook** so a message is surfaced exactly once: if the agent is actively **working**
   when the message lands, the wake stands down (leaves it queued) and the mid-turn
   steer hook is the sole notifier; consuming on an idle wake empties the inbox, so
-  the woken turn's steer has nothing to re-announce. (If the harness ever drops
+  the woken turn's steer has nothing to re-announce. The busy check and the drain
+  are one atomic daemon-side operation (`recv --if-idle`, backed by
+  `Broker.DrainIfIdle`), not two separate round trips — closing a real gap where a
+  new turn starting between a "check busy" call and a later "drain" call could let
+  this hook steal a message out from under it. (If the harness ever drops
   the exit-2 injection, the consumed message is still recoverable with
   **`mess replay`** — a bounded per-agent history of recently-consumed messages —
   so consume-on-wake stays recoverable rather than lossy.) This isn't

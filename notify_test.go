@@ -122,6 +122,104 @@ func TestNotifyUserRespectsNotifyEnabledFlag(t *testing.T) {
 	}
 }
 
+// mockKdeconnectBridge swaps in a recording stub for kdeconnectBridge for the
+// duration of the test — mirrors mockNotifySend exactly.
+func mockKdeconnectBridge(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	orig := kdeconnectBridge
+	kdeconnectBridge = func(summary, body string) {
+		calls = append(calls, summary+"|"+body)
+	}
+	t.Cleanup(func() { kdeconnectBridge = orig })
+	return &calls
+}
+
+// presenceAway defaults to "present" (no bridging) unless MESS_PRESENCE=away —
+// a zero-regression-risk default, since desktop-only is today's behavior.
+func TestPresenceAwayDefaultsToPresent(t *testing.T) {
+	t.Setenv("MESS_PRESENCE", "")
+	if presenceAway() {
+		t.Fatal("expected present (no bridging) when MESS_PRESENCE is unset")
+	}
+	t.Setenv("MESS_PRESENCE", "present")
+	if presenceAway() {
+		t.Fatal("expected present (no bridging) when MESS_PRESENCE=present")
+	}
+	t.Setenv("MESS_PRESENCE", "away")
+	if !presenceAway() {
+		t.Fatal("expected away (bridging) when MESS_PRESENCE=away")
+	}
+	t.Setenv("MESS_PRESENCE", "AWAY") // case-insensitive
+	if !presenceAway() {
+		t.Fatal("expected MESS_PRESENCE to be matched case-insensitively")
+	}
+}
+
+// bridgeIfAway only fires the configured channels when presenceAway is true —
+// a present (default) human never gets bridged, only desktop-notified.
+func TestBridgeIfAwayFiresOnlyWhenAway(t *testing.T) {
+	calls := mockKdeconnectBridge(t)
+	origPresence := presenceAway
+	t.Cleanup(func() { presenceAway = origPresence })
+
+	presenceAway = func() bool { return false }
+	bridgeIfAway("summary", "body")
+	if len(*calls) != 0 {
+		t.Fatalf("must not bridge when present, got %v", *calls)
+	}
+
+	presenceAway = func() bool { return true }
+	bridgeIfAway("summary", "body")
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly one bridge call when away, got %v", *calls)
+	}
+}
+
+// MESS_NO_BRIDGE (bridgeEnabled) silences bridging even when away, mirroring
+// MESS_NO_NOTIFY's kill-switch shape.
+func TestBridgeIfAwayRespectsBridgeEnabledFlag(t *testing.T) {
+	calls := mockKdeconnectBridge(t)
+	origPresence, origEnabled := presenceAway, bridgeEnabled
+	t.Cleanup(func() { presenceAway, bridgeEnabled = origPresence, origEnabled })
+
+	presenceAway = func() bool { return true }
+	bridgeEnabled = false
+	bridgeIfAway("summary", "body")
+	if len(*calls) != 0 {
+		t.Fatalf("MESS_NO_BRIDGE should silence bridging even when away, got %v", *calls)
+	}
+}
+
+// notifyUser (the actual call site) fires the bridge too when away, not just
+// desktopNotify — end-to-end through the real choke point.
+func TestNotifyUserBridgesWhenAway(t *testing.T) {
+	mockNotifySend(t)
+	bridgeCalls := mockKdeconnectBridge(t)
+	origPresence := presenceAway
+	presenceAway = func() bool { return true }
+	t.Cleanup(func() { presenceAway = origPresence })
+
+	notifyUser("alice", "user", "need your input")
+	if len(*bridgeCalls) != 1 {
+		t.Fatalf("expected notifyUser to bridge when away, got %v", *bridgeCalls)
+	}
+
+	// Ordinary agent-to-agent traffic still must not notify or bridge.
+	notifyUser("alice", "bob", "regular status update")
+	if len(*bridgeCalls) != 1 {
+		t.Fatalf("ordinary traffic must not trigger a bridge, got %v", *bridgeCalls)
+	}
+}
+
+// kdeconnectBridge must degrade silently (no panic, no error surfaced) when
+// kdeconnect-cli isn't installed — the same best-effort contract notifySend
+// already has for a missing notify-send.
+func TestKdeconnectBridgeDegradesSilentlyWithoutTool(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // guarantee kdeconnect-cli can't be found
+	kdeconnectBridge("summary", "body")
+}
+
 // desktopNotify truncates a long body before handing it to the notifier, so a
 // giant message doesn't blow up the notification popup.
 func TestDesktopNotifyTruncatesLongBody(t *testing.T) {

@@ -50,6 +50,16 @@ type Message struct {
 	BridgeID    string `json:"bridgeId,omitempty"`
 	OriginRoom  string `json:"originRoom,omitempty"`
 	OriginTopic string `json:"originTopic,omitempty"`
+
+	// Attachment fields (mess send/pub --attach), all set together or not at
+	// all. AttachPath is absolute (meaningful regardless of the reader's cwd).
+	// AttachHash is "sha256:<hex>", computed client-side before the request is
+	// sent — this is a single-machine tool, so the daemon has no reason to
+	// ever assume a different filesystem view than the CLI that sent it.
+	AttachPath  string    `json:"attachPath,omitempty"`
+	AttachHash  string    `json:"attachHash,omitempty"`
+	AttachSize  int64     `json:"attachSize,omitempty"`
+	AttachMTime time.Time `json:"attachMtime,omitzero"`
 }
 
 // Request is one command sent from a client to the daemon.
@@ -63,6 +73,7 @@ type Request struct {
 	Wait     bool     `json:"wait,omitempty"`     // block until a message arrives
 	Timeout  string   `json:"timeout,omitempty"`  // optional wait timeout (duration); also (room bridge) the TTL duration
 	Peek     bool     `json:"peek,omitempty"`     // recv without consuming
+	IfIdle   bool     `json:"ifIdle,omitempty"`   // (recv, non-blocking only) drain only if not currently busy, checked atomically with the drain
 	Max      int      `json:"max,omitempty"`      // recv at most N messages (0 = all)
 	Kinds    []string `json:"kinds,omitempty"`    // recv only these kinds (nil = all)
 	Batch    string   `json:"batch,omitempty"`    // (recv --wait) coalesce a burst within this window
@@ -81,6 +92,16 @@ type Request struct {
 	RemoteTopic string `json:"remoteTopic,omitempty"` // (room bridge) far side's topic
 	LocalRoom   string `json:"localRoom,omitempty"`   // (room bridge) override for the local side; requires Force if != caller's current room
 	BridgeID    string `json:"bridgeId,omitempty"`    // (room unbridge) which bridge to tear down
+
+	From  string `json:"from,omitempty"`  // (log) only messages from this sender
+	Grep  string `json:"grep,omitempty"`  // (log) only messages whose body matches this regexp
+	Since string `json:"since,omitempty"` // (log) only messages newer than this duration (supports "3d"/"2w")
+
+	// (send/pub --attach) mirrors Message's attachment fields — see there.
+	AttachPath  string    `json:"attachPath,omitempty"`
+	AttachHash  string    `json:"attachHash,omitempty"`
+	AttachSize  int64     `json:"attachSize,omitempty"`
+	AttachMTime time.Time `json:"attachMtime,omitzero"`
 }
 
 // AgentInfo is reported by the `ps` op.
@@ -143,4 +164,7 @@ type Response struct {
 	Threads  []ThreadInfo `json:"threads,omitempty"`
 	Count    int          `json:"count,omitempty"`
 	Removed  []string     `json:"removed,omitempty"` // (cleanup) agents pruned (or, with dry-run, eligible)
+	Busy     bool         `json:"busy,omitempty"`    // (recv --if-idle) the agent was busy, so nothing was drained
+	ID       string       `json:"id,omitempty"`      // (ask) the created message's own id — the await token
+	Expired  int          `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
 }
