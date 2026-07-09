@@ -1,5 +1,44 @@
 # Known issues
 
+## Fixed (plausible root cause): auto-wake hook could steal a message out from under a turn that just started, leaving `mess recv` to find nothing
+
+**Symptom, as reported (2026-07-09, habr-editor):** a peer sent a long
+multi-paragraph message; the mid-turn steer hook correctly announced "1
+unread"; the very next `mess recv` printed nothing (exit 0); a later `mess
+recv` also found nothing; `mess replay` recovered the full message, proving
+it was delivered and consumed, just never seen via `recv`.
+
+**Root cause (plausible, not conclusively reproduced against the exact
+incident — see caveat below):** `hooks/mess-wake.sh` decided whether to drain
+an idle agent's inbox via *two separate, independent round trips*: a `mess ps`
+call to check `working`, and — only if that came back false — a *separate*
+`mess recv` call to actually drain. There was a real gap between them. If a
+new turn started (`mess busy` fired, e.g. from a concurrent human prompt or a
+parallel tool call) in that gap — after the `ps` check returned "not busy" but
+before the drain ran — the wake hook would still drain the message, believing
+the agent was idle, and hand it to its own stderr injection instead of the
+turn's own `mess recv`. That injection is exactly the kind of async delivery
+Claude Code can drop (see the `asyncRewake` section below) — so the message
+could vanish from the agent's view entirely while still being genuinely
+consumed (hence recoverable via `replay`, which reads consumed history
+regardless of who did the consuming).
+
+**Fix:** added `Broker.DrainIfIdle` — checks `busyUntil` and drains in the
+*same lock acquisition*, so there's no gap between "is this agent busy" and
+"drain its inbox" for a concurrent `mess busy` to land in. Exposed as `mess
+recv --if-idle` (non-blocking only); `mess-wake.sh` now uses it instead of the
+old separate `ps`-then-`recv` sequence.
+
+**Caveat:** this closes a real, verified TOCTOU race (see
+`TestDrainIfIdleStandsDownWhenBusy`/`TestDrainIfIdleClearedBusyStillDrains` in
+broker_test.go, and the hand-driven busy/idle reproduction against a
+throwaway daemon in this fix's own testing), and it's a plausible match for
+every symptom in the report. It was not reproduced against the *exact*
+reported incident (that would need precise timing of a real concurrent turn
+start, which is impractical to force deterministically) — so treat this as
+the most likely structural cause found and closed, not a confirmed root
+cause with a before/after repro of the original failure.
+
 ## Fixed: parallel tool calls could make the steer hook double-notify (or notify for already-consumed mail)
 
 **Symptom, as reported (2026-07-07/08):** a duplicate/"reformatted" wake

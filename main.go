@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +45,7 @@ Sending:
                                   (to "user" or your login name = the human's
                                   mailbox: desktop-notifies, read via recv --as user)
                                   (--thread ID replies within a thread)
+                                  (--attach PATH records a file's path + hash)
   mess broadcast [body...]        send to every known agent in your room (plain
                                   broadcasts don't wake the standard --no-broadcast
                                   auto-wake hook; --loud bypasses that, goes
@@ -54,6 +58,11 @@ Sending:
                                   unless @mentioned or already a participant)
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
+  mess ask <agent> [q...]         send a question, wait for the reply (a plain
+                                  mess reply answers it); --async prints a
+                                  token immediately instead of waiting
+  mess await <token>              wait for an ask's reply later (the token
+                                  mess ask --async / a timed-out mess ask printed)
 
 Receiving and threads:
   mess recv [duration]            receive queued messages (--thread ID shows
@@ -71,6 +80,10 @@ Receiving and threads:
   mess export --topic NAME | --thread ID | --to AGENT
                                   dump a conversation's full history
                                   (--format text|json, --out FILE, --max N)
+  mess log [--from AGENT] [--grep PATTERN] [--since DUR] [--topic NAME] [--all]
+                                  search the durable, unbounded journal (unlike
+                                  recv/replay/export, which only see a bounded
+                                  recent window); same --format/--out/--max
 
 Status:
   mess ps [--room NAME | --all]    list agents and topics (online/offline +
@@ -87,6 +100,9 @@ Admin and daemon:
                                   leaves the agent registered — for a stuck backlog)
   mess cleanup [maxage]           prune agents idle longer than maxage (default
                                   24h) and not listening; --dry-run to preview
+  mess expire [maxage]            drop unread messages older than maxage
+                                  (default 14d), any agent, alive or not;
+                                  --dry-run to preview (see MESS_AUTO_EXPIRE)
   mess ping                       check the daemon
   mess daemon                     run the daemon in the foreground
   mess stop                       shut the daemon down
@@ -117,6 +133,8 @@ recv flags:
                     parked waiter that should wake only on actionable messages
   --batch DUR       with --wait: coalesce a burst arriving within DUR into one
                     wake (fewer back-to-back wakes for rapid messages)
+  --if-idle         drain only if not currently busy, checked atomically with
+                    the drain (not combined with --wait/--follow)
   --json            print messages as JSON lines
 
 Common flags:
@@ -156,6 +174,10 @@ func main() {
 	// Sending
 	case "send":
 		err = cmdSend(p, args)
+	case "ask":
+		err = cmdAsk(p, args)
+	case "await":
+		err = cmdAwait(p, args)
 	case "broadcast":
 		err = cmdBroadcast(p, args)
 	case "pub":
@@ -177,6 +199,8 @@ func main() {
 		err = cmdThread(p, args)
 	case "export":
 		err = cmdExport(p, args)
+	case "log":
+		err = cmdLog(p, args)
 
 	// Status
 	case "ps":
@@ -195,6 +219,8 @@ func main() {
 		err = cmdDrain(p, args)
 	case "cleanup":
 		err = cmdCleanup(p, args)
+	case "expire":
+		err = cmdExpire(p, args)
 	case "ping":
 		err = cmdPing(p)
 	case "daemon":
@@ -320,15 +346,48 @@ func flagToken(a string) (string, bool) {
 	return s, true
 }
 
+// setAttach stats and hashes path, filling in req's four attach fields — or a
+// hard error if the file is missing/unreadable. Unlike notify's silent-degrade
+// philosophy, a wrong/missing attachment reference is a correctness bug (the
+// recipient would be pointed at nothing), so this fails before any daemon
+// round trip rather than sending a broken reference. Hashing happens
+// client-side: this is a single-machine tool, so the daemon has no reason to
+// ever assume a different filesystem view than the CLI that sent it.
+func setAttach(req *Request, path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("--attach %s: %w", path, err)
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return fmt.Errorf("--attach %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("--attach %s: %w", path, err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("--attach %s: %w", path, err)
+	}
+	req.AttachPath = abs
+	req.AttachHash = "sha256:" + hex.EncodeToString(h.Sum(nil))
+	req.AttachSize = info.Size()
+	req.AttachMTime = info.ModTime()
+	return nil
+}
+
 func cmdSend(p paths, args []string) error {
 	fs, as := newFlags("send")
 	ack := fs.Bool("ack", false, "block until the recipient reads the message")
 	timeout := fs.String("timeout", "", "ack wait timeout (e.g. 30s); default: wait forever")
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output)")
+	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] <to> [body...]")
+		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] <to> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -339,7 +398,13 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread})
+	req := Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread}
+	if *attach != "" {
+		if err := setAttach(&req, *attach); err != nil {
+			return err
+		}
+	}
+	resp, err := call(p, req)
 	if err != nil {
 		return err
 	}
@@ -349,6 +414,76 @@ func cmdSend(p paths, args []string) error {
 		}
 		fmt.Printf("read by %s\n", to)
 	}
+	return nil
+}
+
+// cmdAsk sends a direct message tagged as an ask — its own message id becomes
+// the correlation token a later `mess await <token>` (or this same call, by
+// default) waits on. The replying side answers with a plain `mess reply`,
+// which already threads back to the ask's id; nothing on that side changes.
+func cmdAsk(p paths, args []string) error {
+	fs, as := newFlags("ask")
+	timeout := fs.String("timeout", "", "how long to wait for a reply; default: wait forever")
+	async := fs.Bool("async", false, "don't wait — print the token immediately for a later `mess await`")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] <agent> [question...]")
+	}
+	from, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	to := rest[0]
+	body, err := bodyFrom(rest[1:])
+	if err != nil {
+		return err
+	}
+	req := Request{Op: "ask", As: from, To: to, Body: body, Wait: !*async, Timeout: *timeout}
+	dispatch := call
+	if req.Wait {
+		dispatch = callWait
+	}
+	resp, err := dispatch(p, req)
+	if err != nil {
+		return err
+	}
+	if *async {
+		fmt.Printf("asked %s (token %s) — run `mess await %s` for the reply\n", to, resp.ID, resp.ID)
+		return nil
+	}
+	if len(resp.Messages) == 0 {
+		fmt.Printf("no reply yet (token %s) — run `mess await %s` to keep waiting\n", resp.ID, resp.ID)
+		return nil
+	}
+	printMessages(resp.Messages, false)
+	return nil
+}
+
+// cmdAwait blocks for a reply to an outstanding `mess ask`'s token.
+func cmdAwait(p paths, args []string) error {
+	fs, as := newFlags("await")
+	timeout := fs.String("timeout", "", "how long to wait; default: wait forever")
+	peek := fs.Bool("peek", false, "do not consume the reply")
+	asJSON := fs.Bool("json", false, "print the reply as JSON")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess await [--timeout DUR] [--peek] <token>")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := callWait(p, Request{Op: "await", As: name, ThreadID: rest[0], Wait: true, Peek: *peek, Timeout: *timeout})
+	if err != nil {
+		return err
+	}
+	if len(resp.Messages) == 0 {
+		fmt.Printf("no reply yet (token %s)\n", rest[0])
+		return nil
+	}
+	printMessages(resp.Messages, *asJSON)
 	return nil
 }
 
@@ -379,10 +514,11 @@ func cmdBroadcast(p paths, args []string) error {
 func cmdPub(p paths, args []string) error {
 	fs, as := newFlags("pub")
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output) — quiet-delivered to everyone except an @mention or existing participant")
+	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess pub [--thread ID] <topic> [body...]")
+		return fmt.Errorf("usage: mess pub [--thread ID] [--attach PATH] <topic> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -392,7 +528,13 @@ func cmdPub(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread})
+	req := Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread}
+	if *attach != "" {
+		if err := setAttach(&req, *attach); err != nil {
+			return err
+		}
+	}
+	resp, err := call(p, req)
 	if err != nil {
 		return err
 	}
@@ -705,6 +847,39 @@ func cmdCleanup(p paths, args []string) error {
 	return nil
 }
 
+// cmdExpire drops unread messages older than maxage from every agent's inbox
+// (regardless of whether the agent is currently alive — see Cleanup for
+// that), sibling to cmdCleanup. Every drop is durably journaled before being
+// committed (see daemon.go's expireDurably) — this is the one command
+// capable of deleting real unread mail, so its automatic counterpart
+// (MESS_AUTO_EXPIRE) ships opt-in; this manual form is always available.
+func cmdExpire(p paths, args []string) error {
+	fs := flag.NewFlagSet("expire", flag.ExitOnError)
+	dryRun := fs.Bool("dry-run", false, "list what would be dropped without dropping")
+	parseAnywhere(fs, args)
+	maxAge := ""
+	if rest := fs.Args(); len(rest) > 0 {
+		if _, derr := time.ParseDuration(rest[0]); derr != nil {
+			return fmt.Errorf("invalid duration %q", rest[0])
+		}
+		maxAge = rest[0]
+	}
+	resp, err := call(p, Request{Op: "expire", Timeout: maxAge, Peek: *dryRun})
+	if err != nil {
+		return err
+	}
+	if resp.Expired == 0 {
+		fmt.Println("nothing to expire")
+		return nil
+	}
+	verb := "dropped"
+	if *dryRun {
+		verb = "would drop"
+	}
+	fmt.Printf("%s %d unread message(s)\n", verb, resp.Expired)
+	return nil
+}
+
 // cmdState sets the calling agent's working state (what it's currently doing),
 // shown in `mess ps`. With --clear (or empty body) it clears the state.
 func cmdState(p paths, args []string) error {
@@ -996,6 +1171,58 @@ func cmdExport(p paths, args []string) error {
 	return nil
 }
 
+// cmdLog searches the durable journal — every message ever sent, unbounded
+// (unlike recv/replay/export, which only ever see a bounded recent window).
+func cmdLog(p paths, args []string) error {
+	fs, as := newFlags("log")
+	from := fs.String("from", "", "only messages from this sender")
+	topic := fs.String("topic", "", "only messages on this topic")
+	grep := fs.String("grep", "", "only messages whose body matches this regexp")
+	since := fs.String("since", "", "only messages newer than this (e.g. 90s, 15m, 3h, 2d, 1w)")
+	all := fs.Bool("all", false, "search every room, not just your own")
+	format := fs.String("format", "text", "text | json")
+	out := fs.String("out", "", "write to this file instead of stdout")
+	max := fs.Int("max", 0, "limit to the most recent N messages (0 = all)")
+	parseAnywhere(fs, args)
+	if *format != "text" && *format != "json" {
+		return fmt.Errorf("--format must be text or json")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "log", As: name, From: *from, Topic: *topic, Grep: *grep, Since: *since, All: *all, Max: *max})
+	if err != nil {
+		return err
+	}
+
+	var w io.Writer = os.Stdout
+	if *out != "" {
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		w = f
+	}
+	if *format == "json" {
+		enc := json.NewEncoder(w)
+		for _, m := range resp.Messages {
+			if err := enc.Encode(m); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, m := range resp.Messages {
+		fmt.Fprintln(w, formatMessageLine(m.Time.Format("2006-01-02 15:04:05"), m))
+	}
+	if *out != "" {
+		fmt.Printf("logged %d message(s) to %s\n", len(resp.Messages), *out)
+	}
+	return nil
+}
+
 // cmdRm removes an agent from the network (its inbox, subscriptions, presence).
 func cmdRm(p paths, args []string) error {
 	fs, _ := newFlags("rm")
@@ -1061,6 +1288,7 @@ func cmdRecv(p paths, args []string) error {
 	noBroadcast := fs.Bool("no-broadcast", false, "ignore broadcasts (= --kind direct,topic)")
 	batch := fs.String("batch", "", "with --wait: coalesce a burst arriving within this window into one return")
 	thread := fs.String("thread", "", "show only this thread's messages (root + replies), not combined with --wait")
+	ifIdle := fs.Bool("if-idle", false, "drain only if not currently busy, checked atomically with the drain (not combined with --wait/--follow) — for a caller that must not steal mail out from under a turn that just started")
 	parseAnywhere(fs, args)
 	name, err := agentName(p, *as)
 	if err != nil {
@@ -1070,7 +1298,6 @@ func cmdRecv(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-
 	// A trailing duration is the wait/idle timeout (e.g. "mess recv 30s",
 	// "mess listen 5m"). For a one-shot recv it also implies --wait.
 	timeout := ""
@@ -1081,6 +1308,9 @@ func cmdRecv(p paths, args []string) error {
 		} else {
 			return fmt.Errorf("invalid duration %q", rest[0])
 		}
+	}
+	if *ifIdle && (*wait || *follow) {
+		return fmt.Errorf("--if-idle can't be combined with --wait/--follow")
 	}
 
 	// A blocking receiver that joins an agent already being listened on creates
@@ -1094,7 +1324,7 @@ func cmdRecv(p paths, args []string) error {
 		return followRecv(p, name, timeout, *max, *asJSON, kinds, *batch)
 	}
 
-	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch, ThreadID: *thread}
+	req := Request{Op: "recv", As: name, Wait: *wait, Timeout: timeout, Peek: *peek, Max: *max, Kinds: kinds, Batch: *batch, ThreadID: *thread, IfIdle: *ifIdle}
 	// A blocking wait uses the restart-resilient path so it survives a daemon
 	// bounce; a non-blocking drain is a plain one-shot call.
 	dispatch := call
@@ -1104,6 +1334,14 @@ func cmdRecv(p paths, args []string) error {
 	resp, err := dispatch(p, req)
 	if err != nil {
 		return err
+	}
+	if resp.Busy {
+		if *asJSON {
+			fmt.Println(`{"busy":true}`)
+		} else {
+			fmt.Println("busy — not drained")
+		}
+		return nil
 	}
 	if *thread == "" { // a --thread query is browsing history, not "new mail"
 		updateLastMsg(p, resp.Messages)
@@ -1314,16 +1552,42 @@ func cmdStop(p paths) error {
 // formatMessageLine renders one message as "TIME FROM #topic: body" / "TIME
 // FROM (broadcast): body" / "TIME FROM: body". ts is pre-formatted by the
 // caller, since recv/listen show time-only while export shows a full date
-// (its output isn't necessarily today's).
+// (its output isn't necessarily today's). An attachment, if present, is
+// appended distinctly (hash truncated for readability — message ids in this
+// codebase are short "m42"-style, so a full 64-hex-char sha256 would visually
+// dominate the line; JSON output always carries the full hash untruncated).
 func formatMessageLine(ts string, m Message) string {
+	var line string
 	switch m.Kind {
 	case KindTopic:
-		return fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
+		line = fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
 	case KindBroadcast:
-		return fmt.Sprintf("%s %s (broadcast): %s", ts, m.From, m.Body)
+		line = fmt.Sprintf("%s %s (broadcast): %s", ts, m.From, m.Body)
 	default:
-		return fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
+		line = fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
 	}
+	if m.AttachPath != "" {
+		hash := m.AttachHash
+		if i := strings.IndexByte(hash, ':'); i >= 0 && len(hash) > i+13 {
+			hash = hash[:i+13] // "sha256:" + 12 hex chars
+		}
+		line += fmt.Sprintf(" [attached: %s (%s, %s)]", m.AttachPath, hash, humanBytes(m.AttachSize))
+	}
+	return line
+}
+
+// humanBytes renders a byte count as a short, human-readable size (B/KB/MB/GB).
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func printMessages(msgs []Message, asJSON bool) {

@@ -422,7 +422,7 @@ func (b *Broker) aliveLocked(name string) bool {
 
 // Send delivers a direct message to a single recipient.
 func (b *Broker) Send(from, to, body string) (Message, error) {
-	m, _, err := b.send(from, to, body, "", false)
+	m, _, err := b.send(from, to, body, "", false, nil)
 	return m, err
 }
 
@@ -430,7 +430,7 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 // recipient reads (consumes) it. The caller can block on the channel, with its
 // own timeout, to implement a read receipt.
 func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, "", true)
+	return b.send(from, to, body, "", true, nil)
 }
 
 // SendThreaded is Send, tagging the message as a reply within threadID (the
@@ -439,19 +439,36 @@ func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error
 // here, only participant bookkeeping (so the same person showing up in a
 // topic thread later is already recognized as a participant).
 func (b *Broker) SendThreaded(from, to, body, threadID string) (Message, error) {
-	m, _, err := b.send(from, to, body, threadID, false)
+	m, _, err := b.send(from, to, body, threadID, false, nil)
 	return m, err
 }
 
 // SendAckThreaded is SendAck with a thread tag (see SendThreaded).
 func (b *Broker) SendAckThreaded(from, to, body, threadID string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, threadID, true)
+	return b.send(from, to, body, threadID, true, nil)
+}
+
+// SendThreadedAttach is SendThreaded with a file attachment (mess send --attach).
+func (b *Broker) SendThreadedAttach(from, to, body, threadID string, attach *Attachment) (Message, error) {
+	m, _, err := b.send(from, to, body, threadID, false, attach)
+	return m, err
+}
+
+// Attachment is a file reference recorded alongside a message (mess send/pub
+// --attach): a path + content hash (computed client-side, before the request
+// is sent — this is a single-machine tool, so the daemon never assumes a
+// different filesystem view than the CLI that sent it), plus size/mtime.
+type Attachment struct {
+	Path  string
+	Hash  string // "sha256:<hex>"
+	Size  int64
+	MTime time.Time
 }
 
 // send's from/to are composite keys (agentKey(room, name)) except when to is
 // the bare human mailbox handle (never room-scoped — see dispatch). The
 // delivered Message always carries bare names.
-func (b *Broker) send(from, to, body, threadID string, ack bool) (Message, <-chan struct{}, error) {
+func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachment) (Message, <-chan struct{}, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if to == "" {
@@ -460,6 +477,9 @@ func (b *Broker) send(from, to, body, threadID string, ack bool) (Message, <-cha
 	_, fromName := splitAgentKey(from)
 	_, toName := splitAgentKey(to)
 	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID}
+	if attach != nil {
+		m.AttachPath, m.AttachHash, m.AttachSize, m.AttachMTime = attach.Path, attach.Hash, attach.Size, attach.MTime
+	}
 	b.touch(from)
 	if threadID != "" {
 		b.trackThreadParticipantLocked(threadID, from)
@@ -644,11 +664,23 @@ func (b *Broker) Pub(from, topic, body string) (m Message, delivered, woke int) 
 // wake-quieting behavior and trackThreadParticipantLocked for how a later
 // reply recognizes today's poster as a participant.
 func (b *Broker) PubThreaded(from, topic, body, threadID string) (m Message, delivered, woke int) {
+	return b.pub(from, topic, body, threadID, nil)
+}
+
+// PubThreadedAttach is PubThreaded with a file attachment (mess pub --attach).
+func (b *Broker) PubThreadedAttach(from, topic, body, threadID string, attach *Attachment) (m Message, delivered, woke int) {
+	return b.pub(from, topic, body, threadID, attach)
+}
+
+func (b *Broker) pub(from, topic, body, threadID string, attach *Attachment) (m Message, delivered, woke int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	_, fromName := splitAgentKey(from)
 	_, topicName := splitAgentKey(topic)
 	m = Message{ID: b.nextID(), From: fromName, Topic: topicName, Kind: KindTopic, Body: body, Time: b.now(), ThreadID: threadID}
+	if attach != nil {
+		m.AttachPath, m.AttachHash, m.AttachSize, m.AttachMTime = attach.Path, attach.Hash, attach.Size, attach.MTime
+	}
 	b.touch(from)
 	if threadID != "" {
 		b.trackThreadParticipantLocked(threadID, from)
@@ -862,6 +894,33 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 	return b.drainMatchingLocked(a, peek, max, func(m Message) bool {
 		return kinds == nil || kinds[m.Kind]
 	})
+}
+
+// DrainIfIdle drains like DrainKinds, but only if the agent isn't currently
+// busy (busyUntil in the future) — checked and acted on under the same lock
+// acquisition, so there's no gap between "is this agent busy" and "drain its
+// inbox" for a concurrent `mess busy` (a new turn starting) to land in.
+//
+// This exists for the auto-wake hook specifically: it used to check busy
+// status via a separate `mess ps` call and only then issue a separate drain,
+// two independent round trips with a real window in between — if a new turn
+// started (mess busy) right after the ps check but before the drain, the wake
+// hook could steal a message out from under an agent that had just become
+// active, leaving its own subsequent `mess recv` to find nothing (the message
+// having already been silently drained and handed to the wake hook's own,
+// possibly-dropped, stderr injection instead). idle reports whether the drain
+// actually ran (false means busy — msgs is always nil in that case).
+func (b *Broker) DrainIfIdle(name string, max int, kinds map[string]bool) (msgs []Message, idle bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.busyUntil[name].After(b.now()) {
+		return nil, false
+	}
+	a := b.ensure(name)
+	b.touch(name)
+	return b.drainMatchingLocked(a, false, max, func(m Message) bool {
+		return kinds == nil || kinds[m.Kind]
+	}), true
 }
 
 // DrainThread is Drain restricted to one thread: a message whose ThreadID
@@ -1122,6 +1181,45 @@ func (b *Broker) waitChan(name string, kinds map[string]bool) <-chan struct{} {
 	return ch
 }
 
+// HasPendingThread is HasPending restricted to one thread (a message whose
+// ThreadID matches, or whose own ID equals threadID — the root itself), used
+// by `mess await` to check whether an ask has already been answered. Unlike
+// HasPending's wake filter, there's no Quiet exemption: any matching message
+// counts, since an ask's reply is always meant for the asker specifically.
+func (b *Broker) HasPendingThread(name, threadID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return false
+	}
+	for _, m := range a.inbox {
+		if m.ThreadID == threadID || m.ID == threadID {
+			return true
+		}
+	}
+	return false
+}
+
+// waitChanThread is waitChan restricted to one thread — see HasPendingThread.
+// Reuses the same a.waiters wake mechanism as the kind-based waitChan; a
+// reply's deliver() already wakes every waiter unconditionally, so the only
+// new part here is the predicate re-checked on wake (see HasPendingThread).
+func (b *Broker) waitChanThread(name, threadID string) <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.ensure(name)
+	ch := make(chan struct{}, 1)
+	for _, m := range a.inbox {
+		if m.ThreadID == threadID || m.ID == threadID {
+			ch <- struct{}{} // already answered; fire immediately
+			return ch
+		}
+	}
+	a.waiters = append(a.waiters, ch)
+	return ch
+}
+
 // AddListener marks the start of an active streaming listener for an agent.
 func (b *Broker) AddListener(name string) {
 	b.mu.Lock()
@@ -1288,6 +1386,44 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 		}
 	}
 	return names
+}
+
+// ExpireInbox drops unread messages older than maxAge from every agent's
+// inbox — regardless of aliveness. This is deliberately a different
+// granularity than Cleanup: Cleanup skips any currently-alive agent entirely
+// (it only prunes whole *dead* registrations), but a live-yet-sporadic agent
+// can still be sitting on 30-day-old unread mail that never gets read, which
+// Cleanup would never touch. isUserHandle is exempt unconditionally, same
+// carve-out Cleanup makes (the human's own unread pings must never
+// auto-vanish). Returns every dropped message with full content — the caller
+// is expected to durably record them (see daemon.go's "expire" handling, which
+// calls this once with dryRun=true to preview+journal before committing with
+// dryRun=false, so a message is never removed without first being logged).
+func (b *Broker) ExpireInbox(maxAge time.Duration, dryRun bool) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	var expired []Message
+	for _, a := range b.agents {
+		if isUserHandle(a.name) || len(a.inbox) == 0 {
+			continue
+		}
+		var keep []Message
+		for _, m := range a.inbox {
+			if now.Sub(m.Time) > maxAge {
+				expired = append(expired, m)
+			} else {
+				keep = append(keep, m)
+			}
+		}
+		if !dryRun && len(keep) != len(a.inbox) {
+			a.inbox = keep
+		}
+	}
+	if !dryRun && len(expired) > 0 {
+		b.changed()
+	}
+	return expired
 }
 
 // Ps reports current agents and topics, sorted for stable output. With

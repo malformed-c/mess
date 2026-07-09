@@ -82,12 +82,106 @@ func dlog(format string, args ...any) {
 
 // daemon owns the broker, the listener, and the persistence file.
 type daemon struct {
-	broker *Broker
-	paths  paths
-	ln     net.Listener
+	broker  *Broker
+	paths   paths
+	ln      net.Listener
+	journal *journalWriter // nil in tests that construct &daemon{} directly; journalAppend guards for that
 
 	saveMu sync.Mutex
 	stop   chan struct{}
+}
+
+// journalAppend records a sent message durably, best-effort — a journal
+// write failure must never fail the send/broadcast/pub it's recording (the
+// message has already been delivered by the time this runs). nil-safe so
+// tests that construct &daemon{} directly (no journal opened) don't panic.
+func (d *daemon) journalAppend(room string, m Message) {
+	if d.journal == nil {
+		return
+	}
+	if err := d.journal.append(journalLine{Message: m, Room: room, Event: "sent"}); err != nil {
+		dlog("journal append failed: %v", err)
+	}
+}
+
+// defaultExpireMaxAge is how old an unread message must be before `mess
+// expire`/the automatic sweep drops it, absent an explicit --timeout or
+// MESS_EXPIRE_MAXAGE — deliberately generous, since this deletes real unread
+// mail.
+const defaultExpireMaxAge = 14 * 24 * time.Hour
+
+// expireDurably previews expired messages (ExpireInbox with dryRun=true),
+// durably journals every one of them, and only then commits the actual
+// removal (dryRun=false) — so a message is never dropped without first being
+// recorded. If any journal append fails, NONE of this batch is committed
+// (better to resweep next cycle than partially commit with a gap in the
+// audit trail); it returns nil in that case, same shape as "nothing expired."
+func (d *daemon) expireDurably(maxAge time.Duration) []Message {
+	preview := d.broker.ExpireInbox(maxAge, true)
+	if len(preview) == 0 {
+		return nil
+	}
+	if d.journal != nil {
+		now := d.broker.now()
+		for _, m := range preview {
+			if err := d.journal.append(journalLine{Message: m, Event: "expired", ExpiredAt: now}); err != nil {
+				elog("expire: journal append failed, skipping this cycle's commit: %v", err)
+				return nil
+			}
+		}
+	}
+	return d.broker.ExpireInbox(maxAge, false)
+}
+
+// startAutoSweep runs Cleanup and expireDurably on a periodic timer, opt-in
+// via MESS_AUTO_EXPIRE=1 (default off) — this is the one background sweep
+// capable of deleting real unread mail on a live system, so per this
+// project's own established discipline (a recent bug already cost trust in
+// "silent" loss) it stays manual-only until explicitly enabled, even though
+// the underlying problem ("nobody runs the manual cleanup/drain tools") is
+// exactly what motivated adding it. MESS_CLEANUP_MAXAGE/MESS_EXPIRE_MAXAGE
+// override the defaults (24h / 14d); MESS_CLEANUP_INTERVAL overrides the
+// sweep cadence (default 1h).
+func (d *daemon) startAutoSweep(stop <-chan struct{}) {
+	if os.Getenv("MESS_AUTO_EXPIRE") != "1" {
+		return
+	}
+	cleanupMaxAge := 24 * time.Hour
+	if v := os.Getenv("MESS_CLEANUP_MAXAGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cleanupMaxAge = d
+		}
+	}
+	expireMaxAge := defaultExpireMaxAge
+	if v := os.Getenv("MESS_EXPIRE_MAXAGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			expireMaxAge = d
+		}
+	}
+	interval := time.Hour
+	if v := os.Getenv("MESS_CLEANUP_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			interval = d
+		}
+	}
+	elog("auto-sweep enabled: cleanup maxage=%s, expire maxage=%s, every %s", cleanupMaxAge, expireMaxAge, interval)
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if names := d.broker.Cleanup(cleanupMaxAge, false); len(names) > 0 {
+					elog("auto-sweep: cleanup removed %d agent(s): %v", len(names), names)
+				}
+				if expired := d.expireDurably(expireMaxAge); len(expired) > 0 {
+					elog("auto-sweep: expired %d unread message(s)", len(expired))
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
 }
 
 // runDaemon starts the server in the foreground. It exits cleanly if another
@@ -119,6 +213,13 @@ func runDaemon(p paths) error {
 	}
 	d.broker.onChange = d.persist
 
+	journal, err := openJournal(p.journal)
+	if err != nil {
+		elog("warning: could not open journal: %v", err)
+	} else {
+		d.journal = journal
+	}
+
 	// Periodically flush the dedup logger so a trailing collapsed line lands.
 	flushTicker := time.NewTicker(time.Second)
 	go func() {
@@ -132,12 +233,17 @@ func runDaemon(p paths) error {
 		}
 	}()
 
+	d.startAutoSweep(d.stop)
+
 	elog("mess daemon listening on %s", p.sock)
 	go d.acceptLoop()
 	<-d.stop
 	flushTicker.Stop()
 	_ = ln.Close()
 	_ = os.Remove(p.sock)
+	if d.journal != nil {
+		_ = d.journal.close()
+	}
 	elog("mess daemon stopped")
 	events.flush()
 	return nil
@@ -203,6 +309,10 @@ func (d *daemon) handle(conn net.Conn) {
 	}
 	if req.Op == "recv" { // may block (recv --wait); needs disconnect detection
 		writeResp(conn, d.recv(conn, req))
+		return
+	}
+	if req.Op == "ask" || req.Op == "await" { // may block; needs disconnect detection like recv
+		writeResp(conn, d.askOrAwait(conn, req))
 		return
 	}
 	writeResp(conn, d.dispatch(req))
@@ -307,7 +417,7 @@ func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
 		"busy", "unbusy", "recv", "listen", "replay", "unregister", "room-leave",
-		"bridge", "unbridge", "export", "thread-list":
+		"bridge", "unbridge", "export", "thread-list", "ask", "await":
 		return true
 	}
 	return false
@@ -370,13 +480,14 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return Response{OK: true, Count: 0} // idempotent
 	case "send":
-		resp := d.send(req, who, to)
+		resp, m := d.send(req, who, to)
 		if resp.Error == "" {
 			notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
+			d.journalAppend(req.Room, m)
 		}
 		return resp
 	case "broadcast":
-		_, n := b.Broadcast(who, req.Body, req.Loud, req.HostWide)
+		m, n := b.Broadcast(who, req.Body, req.Loud, req.HostWide)
 		if req.Loud {
 			notifyUserLoud(req.As, req.Body)
 			if req.HostWide {
@@ -388,15 +499,17 @@ func (d *daemon) dispatch(req Request) Response {
 			notifyUser(req.As, "", req.Body)
 			elog("broadcast %s -> %d agent(s)", req.As, n)
 		}
+		d.journalAppend(req.Room, m)
 		return Response{OK: true, Count: n}
 	case "pub":
-		_, delivered, woke := b.PubThreaded(who, topic, req.Body, req.ThreadID)
+		m, delivered, woke := b.pub(who, topic, req.Body, req.ThreadID, attachFromRequest(req))
 		notifyUser(req.As, "", req.Body)
 		if woke < delivered {
 			elog("pub %s #%s -> %d sub(s), woke %d (@mention/thread)", req.As, req.Topic, delivered, woke)
 		} else {
 			elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, delivered)
 		}
+		d.journalAppend(req.Room, m)
 		return Response{OK: true, Count: delivered}
 	case "sub":
 		b.Sub(who, topic)
@@ -454,6 +567,19 @@ func (d *daemon) dispatch(req Request) Response {
 	case "thread-list":
 		threads := b.ListThreads(who)
 		return Response{OK: true, Threads: threads, Count: len(threads)}
+	case "log":
+		since, err := parseSince(req.Since)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		msgs, err := searchJournal(d.paths.journal, journalFilter{
+			Room: req.Room, All: req.All, From: req.From, Topic: req.Topic,
+			Grep: req.Grep, Since: since, Max: req.Max, Now: d.broker.now(),
+		})
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "state":
 		b.SetState(who, req.Body)
 		return Response{OK: true}
@@ -522,6 +648,24 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("cleanup removed %d agent(s): %v", len(names), names)
 		}
 		return Response{OK: true, Count: len(names), Removed: names}
+	case "expire":
+		maxAge := defaultExpireMaxAge
+		if req.Timeout != "" {
+			d, err := time.ParseDuration(req.Timeout)
+			if err != nil {
+				return Response{Error: "invalid duration: " + req.Timeout}
+			}
+			maxAge = d
+		}
+		if req.Peek { // dry-run: preview only, never journal or commit
+			expired := b.ExpireInbox(maxAge, true)
+			return Response{OK: true, Expired: len(expired)}
+		}
+		expired := d.expireDurably(maxAge)
+		if len(expired) > 0 {
+			elog("expire dropped %d unread message(s) older than %s", len(expired), maxAge)
+		}
+		return Response{OK: true, Expired: len(expired)}
 	case "ps":
 		agents, topics := b.Ps(req.Room, req.All)
 		return Response{OK: true, Agents: agents, Topics: topics}
@@ -559,39 +703,54 @@ func timerFor(spec string) (<-chan time.Time, func(), error) {
 	return t.C, func() { t.Stop() }, nil
 }
 
-func (d *daemon) send(req Request, who, to string) Response {
+// attachFromRequest builds an *Attachment from a request's attach fields, or
+// nil if none were set (the common case) — shared by the send/pub dispatch
+// cases so they don't each re-check the same four fields.
+func attachFromRequest(req Request) *Attachment {
+	if req.AttachPath == "" {
+		return nil
+	}
+	return &Attachment{Path: req.AttachPath, Hash: req.AttachHash, Size: req.AttachSize, MTime: req.AttachMTime}
+}
+
+// send returns the Response plus the constructed Message (zero Message on
+// error), so the caller can journal it — the message itself is otherwise
+// only visible to the recipient's own inbox.
+func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	b := d.broker
+	attach := attachFromRequest(req)
 	if !req.Ack {
-		if _, err := b.SendThreaded(who, to, req.Body, req.ThreadID); err != nil {
-			return Response{Error: err.Error()}
+		m, _, err := b.send(who, to, req.Body, req.ThreadID, false, attach)
+		if err != nil {
+			return Response{Error: err.Error()}, Message{}
 		}
 		pending, listening := b.Stat(to)
 		elog("send %s -> %s | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
-		return Response{OK: true, Count: 1}
+		return Response{OK: true, Count: 1}, m
 	}
 
 	// Blocking send: wait for a read receipt, honoring an optional timeout.
-	m, ackCh, err := b.SendAckThreaded(who, to, req.Body, req.ThreadID)
+	m, ackCh, err := b.send(who, to, req.Body, req.ThreadID, true, attach)
 	if err != nil {
-		return Response{Error: err.Error()}
+		return Response{Error: err.Error()}, Message{}
 	}
 	pending, listening := b.Stat(to)
 	elog("send %s -> %s (ack) | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
 	timeout, stop, err := timerFor(req.Timeout)
 	if err != nil {
 		b.CancelAck(m.ID)
-		return Response{Error: err.Error()}
+		return Response{Error: err.Error()}, Message{}
 	}
 	defer stop()
 	select {
 	case <-ackCh:
-		return Response{OK: true, Count: 1, Acked: true}
+		return Response{OK: true, Count: 1, Acked: true}, m
 	case <-timeout:
 		// Leave the pending receipt registered: a later read still fires it
 		// (and self-cleans). We just stop waiting.
-		return Response{OK: true, Count: 1, Acked: false}
+		return Response{OK: true, Count: 1, Acked: false}, m
 	case <-d.stop:
-		return Response{Error: "daemon shutting down"}
+		return Response{Error: "daemon shutting down"}, Message{}
 	}
 }
 
@@ -613,6 +772,19 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 		}
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
+	if !req.Wait && req.IfIdle {
+		msgs, idle := b.DrainIfIdle(who, req.Max, trigger)
+		if !idle {
+			dlog("recv %s stood down (busy)", req.As)
+			return Response{OK: true, Busy: true}
+		}
+		if len(msgs) > 0 {
+			elog("recv %s drained %d (if-idle)%s", req.As, len(msgs), peekNote(req.Peek))
+		} else {
+			dlog("recv %s drained 0 (if-idle)", req.As)
+		}
+		return Response{OK: true, Messages: msgs, Count: len(msgs)}
+	}
 	if !req.Wait {
 		msgs := b.DrainKinds(who, req.Peek, req.Max, trigger)
 		if len(msgs) > 0 {
@@ -626,7 +798,23 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 	// Blocking receive: the kind filter is the WAKE TRIGGER (e.g. --no-broadcast
 	// means broadcasts don't wake you), but once woken we drain EVERYTHING so no
 	// queued message (broadcasts included) is left behind.
-	batch, _ := time.ParseDuration(req.Batch) // 0 on empty/invalid = no batching
+	return d.parkAndDrain(conn, who, req.Timeout, req.Batch, fmt.Sprintf("recv %s (waiting on %s)", req.As, kindsLabel(req.Kinds)),
+		func() bool { return b.HasPending(who, trigger) },
+		func() <-chan struct{} { return b.waitChan(who, trigger) },
+		func() []Message { return b.DrainKinds(who, req.Peek, req.Max, nil) },
+	)
+}
+
+// parkAndDrain implements the generic "block until hasPending, then drain"
+// pattern shared by recv --wait and await: park (marking the caller
+// listening and evict-watched), wait on wakeChan, and once woken (or already
+// pending) optionally coalesce a --batch burst before draining via drain().
+// hasPending/wakeChan/drain differ per caller (kind-filtered for recv --wait,
+// thread-filtered for await) but the wait/timeout/evict/disconnect machinery
+// is identical, so it lives here once.
+func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabel string, hasPending func() bool, wakeChan func() <-chan struct{}, drain func() []Message) Response {
+	b := d.broker
+	batch, _ := time.ParseDuration(batchStr) // 0 on empty/invalid = no batching
 
 	// Watch for client disconnect, so a parked waiter whose client dies releases
 	// its listener count instead of leaking it (and showing a false "listening").
@@ -646,49 +834,97 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 				return Response{Error: "daemon shutting down"}
 			}
 		}
-		msgs := b.DrainKinds(who, req.Peek, req.Max, nil)
-		elog("recv %s woke -> drained %d%s", req.As, len(msgs), peekNote(req.Peek))
+		msgs := drain()
+		elog("%s woke -> drained %d", waitLabel, len(msgs))
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
-	if b.HasPending(who, trigger) {
+	if hasPending() {
 		return finish()
 	}
 
-	timeout, stop, err := timerFor(req.Timeout)
+	timeout, stop, err := timerFor(timeoutStr)
 	if err != nil {
 		return Response{Error: err.Error()}
 	}
 	defer stop()
-	// A parked recv --wait is the wake primitive: mark the agent reachable for
-	// the duration of the wait so it shows as listening and is not flagged idle.
+	// A parked wait is the wake primitive: mark the agent reachable for the
+	// duration of the wait so it shows as listening and is not flagged idle.
 	b.AddListener(who)
 	defer b.RemoveListener(who)
 	// Stop waiting if this name is removed/renamed, so the hook exits cleanly
 	// instead of lingering as a ghost listener (and being resurrected on restart).
 	evicted := b.WatchEvict(who)
 	defer b.UnwatchEvict(who, evicted)
-	elog("recv %s parked (waiting on %s)", req.As, kindsLabel(req.Kinds))
+	elog("%s parked", waitLabel)
 	for {
-		ch := b.waitChan(who, trigger)
+		ch := wakeChan()
 		select {
 		case <-ch:
-			if b.HasPending(who, trigger) {
+			if hasPending() {
 				return finish()
 			}
 		case <-evicted:
-			elog("recv %s evicted (removed/renamed)", req.As)
+			elog("%s evicted (removed/renamed)", waitLabel)
 			return Response{OK: true, Messages: nil, Count: 0} // empty -> hook won't wake or re-park
 		case <-timeout:
-			elog("recv %s wait timed out (unparked)", req.As)
+			elog("%s wait timed out (unparked)", waitLabel)
 			return Response{OK: true, Messages: nil, Count: 0}
 		case <-gone:
-			elog("recv %s client gone (unparked)", req.As) // defer RemoveListener fixes presence
+			elog("%s client gone (unparked)", waitLabel) // defer RemoveListener fixes presence
 			return Response{Error: "client gone"}
 		case <-d.stop:
 			return Response{Error: "daemon shutting down"}
 		}
 	}
+}
+
+// askOrAwait handles both "ask" and "await": an ask is a plain threaded direct
+// message whose own ID becomes the correlation token (no new Message field),
+// and awaiting is a thread-scoped, non-quiet wait for any reply under that
+// token — "answered" is simply "a message got drained under this ThreadID",
+// the same semantics `mess recv --thread` already has. The replying side is
+// unchanged: `mess reply` after receiving an ask already opens a thread
+// rooted at the ask's own ID and sends back to the asker.
+func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
+	b := d.broker
+	who := agentKey(req.Room, req.As)
+
+	token := req.ThreadID
+	if req.Op == "ask" {
+		to := agentKey(req.Room, req.To)
+		if isUserHandle(req.To) {
+			to = req.To
+		}
+		m, err := b.SendThreaded(who, to, req.Body, "")
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
+		token = m.ID
+		elog("ask %s -> %s (token %s)", req.As, req.To, token)
+	}
+	if token == "" {
+		return Response{Error: "await requires a token"}
+	}
+
+	if !req.Wait {
+		msgs := b.DrainThread(who, token, req.Peek, req.Max)
+		if len(msgs) > 0 {
+			elog("%s %s drained %d (thread %s)", req.Op, req.As, len(msgs), token)
+		} else {
+			dlog("%s %s drained 0 (thread %s)", req.Op, req.As, token)
+		}
+		return Response{OK: true, ID: token, Messages: msgs, Count: len(msgs)}
+	}
+
+	resp := d.parkAndDrain(conn, who, req.Timeout, req.Batch, fmt.Sprintf("%s %s (waiting on thread %s)", req.Op, req.As, token),
+		func() bool { return b.HasPendingThread(who, token) },
+		func() <-chan struct{} { return b.waitChanThread(who, token) },
+		func() []Message { return b.DrainThread(who, token, req.Peek, req.Max) },
+	)
+	resp.ID = token
+	return resp
 }
 
 // peekNote annotates a drain log line when messages were left in place.
