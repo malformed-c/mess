@@ -896,6 +896,29 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 		if isUserHandle(req.To) {
 			to = req.To
 		}
+		// Unlike a plain send/pub (deliberately fire-and-forget — a message
+		// can sit waiting for a name that hasn't started yet, or for someone
+		// who's merely stepped away), ask BLOCKS for a reply, so it fails
+		// fast against a recipient that can't plausibly answer right now:
+		// - never registered at all: otherwise ensure() inside SendThreaded
+		//   would silently create a phantom agentState for the typo'd/
+		//   nonexistent name (a ghost visible in `mess ps`), and the ask
+		//   would hang forever (no --timeout) or waste one waiting for a
+		//   reply nothing can ever send.
+		// - registered but currently offline: nobody's there to answer, so
+		//   the same hang-or-waste-a-timeout outcome applies even though the
+		//   name is real. The human's mailbox (isUserHandle) is exempt from
+		//   both checks — it's a reserved handle, not a tracked session, so
+		//   it never shows "online" the way an agent does, but asking it is
+		//   always meaningful (they'll see it whenever they next check).
+		if !isUserHandle(req.To) {
+			if !b.IsRegistered(to) {
+				return Response{Error: fmt.Sprintf("no such agent %q — ask requires a previously-registered recipient", req.To)}
+			}
+			if !b.IsOnline(to) {
+				return Response{Error: fmt.Sprintf("%q is offline — ask requires an online recipient (nobody's there to answer right now); use mess send if it can wait", req.To)}
+			}
+		}
 		m, err := b.SendThreaded(who, to, req.Body, "")
 		if err != nil {
 			return Response{Error: err.Error()}

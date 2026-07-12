@@ -316,6 +316,30 @@ func (b *Broker) RegisterOwned(name, session string, force bool) (bool, string) 
 	return true, ""
 }
 
+// IsRegistered reports whether name has ever been claimed via
+// register/room-join/rename — as opposed to merely having a pending inbox
+// because someone sent it a message. ensure() auto-creates an agentState for
+// any recipient of a plain send/pub, registered or not (by design — a
+// fire-and-forget message can wait for a name that hasn't started yet), so
+// presence in b.agents alone isn't a reliable "is this a real identity"
+// signal; b.owners, populated only by an actual identity claim, is.
+func (b *Broker) IsRegistered(name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.owners[name]
+	return ok
+}
+
+// IsOnline reports whether name currently looks alive — listening, working,
+// or recently active — the same signal `mess ps`'s Online column already
+// uses (aliveLocked). Exported so a caller like ask can fail fast against an
+// offline recipient instead of blocking for a reply that may never come.
+func (b *Broker) IsOnline(name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.aliveLocked(name)
+}
+
 // foreignLiveOwnerLocked reports whether name is currently owned by a *different*
 // still-live session than the caller's — i.e. claiming it would be an identity
 // takeover. A "" session can't be distinguished from any other, so it is never

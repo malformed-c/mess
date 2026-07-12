@@ -381,6 +381,7 @@ func TestDispatchRecvIfIdleStandsDownWhenBusy(t *testing.T) {
 // (a plain threaded send, exactly what `mess reply` issues) arrives.
 func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned("bob", "", false)
 	_, server := net.Pipe()
 
 	askResp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
@@ -441,6 +442,67 @@ func TestDispatchAwaitRequiresToken(t *testing.T) {
 	resp := d.askOrAwait(nil, Request{Op: "await", As: "alice", Wait: false})
 	if resp.Error == "" {
 		t.Fatal("expected an error for await with no token")
+	}
+}
+
+// Asking a name that was never registered must fail immediately with a clear
+// error — not silently create a phantom agentState (ensure() would do that
+// for a plain send/pub, but ask blocks for a reply, so it would otherwise
+// hang forever (no --timeout) or waste one waiting for an answer nothing can
+// ever send) and not show up as a ghost in `mess ps`.
+func TestDispatchAskRejectsUnregisteredRecipient(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "ghost-bob", Body: "are you there?", Wait: false})
+	if resp.Error == "" {
+		t.Fatal("expected an error for asking a never-registered name")
+	}
+	if d.broker.IsRegistered("ghost-bob") {
+		t.Fatal("asking an unregistered name must not register it")
+	}
+	agents, _ := d.broker.Ps("", false)
+	for _, a := range agents {
+		if a.Name == "ghost-bob" {
+			t.Fatalf("asking an unregistered name must not create a ghost ps entry, got %+v", a)
+		}
+	}
+}
+
+// A registered-but-currently-offline recipient is still a valid ask target —
+// only a *never-registered* name is rejected.
+// A registered recipient who's gone properly offline (no listener, not busy,
+// no recent activity) is rejected too — nobody's there to answer.
+func TestDispatchAskRejectsRegisteredButOfflineRecipient(t *testing.T) {
+	now := time.Unix(0, 0)
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.now = func() time.Time { return now }
+	d.broker.RegisterOwned("bob", "", false)
+	now = now.Add(3 * time.Minute) // past the 2-minute "recently active" window
+
+	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
+	if resp.Error == "" {
+		t.Fatalf("expected an error for a registered-but-offline recipient, got %+v", resp)
+	}
+}
+
+// A registered recipient who's actually online (a live listener, e.g. a
+// parked recv --wait) is a valid ask target.
+func TestDispatchAskAllowsRegisteredAndOnlineRecipient(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned("bob", "", false)
+	d.broker.AddListener("bob") // genuinely online: has a live listener
+	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
+	if !resp.OK || resp.ID == "" {
+		t.Fatalf("expected ask to succeed for a registered, online recipient, got %+v", resp)
+	}
+}
+
+// Asking the human operator's mailbox is always allowed, even though "user"
+// is never registered via RegisterOwned — it's a reserved handle.
+func TestDispatchAskAllowsUserHandleWithoutRegistration(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "user", Body: "need your input", Wait: false})
+	if !resp.OK || resp.ID == "" {
+		t.Fatalf("expected ask to the human's mailbox to succeed, got %+v", resp)
 	}
 }
 

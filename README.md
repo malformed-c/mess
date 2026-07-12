@@ -77,6 +77,17 @@ side needs no new command: a plain `mess reply` after receiving the ask
 already threads back to it. "Answered" is just "a reply arrived in that
 thread" — the same thing `mess recv --thread <id>` already shows.
 
+`mess ask` fails immediately, with a clear error, against a recipient that
+can't plausibly answer right now — unlike a plain `send`/`pub`, which
+deliberately stays fire-and-forget (a message can wait for someone who hasn't
+started yet, or who's stepped away): a name that's never registered at all
+(otherwise `ask` would silently create a phantom `mess ps` entry for the
+typo'd name, then hang forever with no `--timeout` or waste one with it), or
+a name that's registered but currently offline (nobody's there to answer).
+The human's mailbox (`user`) is exempt from both checks — it's a reserved
+handle, not a tracked session, so it never shows "online" the way an agent
+does, but asking it is always meaningful.
+
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
 within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
 Slack-style and flat: replying to a reply still uses the *root's* id, not the
