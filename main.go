@@ -1556,6 +1556,11 @@ func cmdStop(p paths) error {
 // appended distinctly (hash truncated for readability — message ids in this
 // codebase are short "m42"-style, so a full 64-hex-char sha256 would visually
 // dominate the line; JSON output always carries the full hash untruncated).
+// A `mess ask` root is prepended with a distinct marker — nothing else about
+// the message looks any different from an ordinary direct send, but a plain
+// `mess send`/`broadcast` reply to it won't satisfy the asker's wait (only a
+// threaded one, via `mess reply`/`--thread <id>`, does), so this is the one
+// place the recipient can learn that before answering the "normal" way.
 func formatMessageLine(ts string, m Message) string {
 	var line string
 	switch m.Kind {
@@ -1572,6 +1577,9 @@ func formatMessageLine(ts string, m Message) string {
 			hash = hash[:i+13] // "sha256:" + 12 hex chars
 		}
 		line += fmt.Sprintf(" [attached: %s (%s, %s)]", m.AttachPath, hash, humanBytes(m.AttachSize))
+	}
+	if m.Ask {
+		line = fmt.Sprintf("[ask %s — reply with `mess reply`, not a plain send] %s", m.ID, line)
 	}
 	return line
 }

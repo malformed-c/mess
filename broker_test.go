@@ -1482,6 +1482,36 @@ func TestPubThreadedAttachRecordsFields(t *testing.T) {
 	}
 }
 
+// SendAsk flags the delivered message as Ask, distinguishing it from an
+// ordinary SendThreaded — this is what lets recv/log rendering and the
+// auto-wake injection tell the recipient a plain reply won't satisfy the
+// asker's wait (only a threaded one does).
+func TestSendAskFlagsMessage(t *testing.T) {
+	b := newTestBroker()
+	m, err := b.SendAsk("alice", "bob", "status?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Ask {
+		t.Fatalf("expected the sent message to be flagged Ask, got %+v", m)
+	}
+	got := b.Drain("bob", false, 0)
+	if len(got) != 1 || !got[0].Ask {
+		t.Fatalf("expected the delivered message to carry Ask, got %+v", got)
+	}
+}
+
+func TestSendThreadedIsNotFlaggedAsk(t *testing.T) {
+	b := newTestBroker()
+	m, err := b.SendThreaded("alice", "bob", "just a reply", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Ask {
+		t.Fatalf("a plain threaded send/reply must not be flagged Ask, got %+v", m)
+	}
+}
+
 func TestSendThreadedTagsMessageAndTracksParticipant(t *testing.T) {
 	b := newTestBroker()
 	m, err := b.SendThreaded("alice", "bob", "starting a DM thread", "root123")

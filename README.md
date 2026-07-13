@@ -88,6 +88,16 @@ The human's mailbox (`user`) is exempt from both checks — it's a reserved
 handle, not a tracked session, so it never shows "online" the way an agent
 does, but asking it is always meaningful.
 
+An ask is otherwise an ordinary direct message — nothing else marks it as
+expecting a threaded reply, so a recipient answering with a plain
+`mess send`/`broadcast` (instead of `mess reply`/`--thread <id>`) leaves the
+asker's wait unsatisfied even though a perfectly good answer is sitting
+unthreaded in their inbox. `recv`/`export`/`log` all prepend a `[ask <id> —
+reply with mess reply, not a plain send]` marker to an ask's rendering, and
+the auto-wake injection (and, if you're mid-turn, the steer notice's unread
+count) calls it out the same way, so the recipient learns this before
+answering the "normal" way.
+
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
 within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
 Slack-style and flat: replying to a reply still uses the *root's* id, not the

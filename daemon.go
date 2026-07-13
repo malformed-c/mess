@@ -720,7 +720,7 @@ func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	b := d.broker
 	attach := attachFromRequest(req)
 	if !req.Ack {
-		m, _, err := b.send(who, to, req.Body, req.ThreadID, false, attach)
+		m, _, err := b.send(who, to, req.Body, req.ThreadID, false, attach, false)
 		if err != nil {
 			return Response{Error: err.Error()}, Message{}
 		}
@@ -730,7 +730,7 @@ func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	}
 
 	// Blocking send: wait for a read receipt, honoring an optional timeout.
-	m, ackCh, err := b.send(who, to, req.Body, req.ThreadID, true, attach)
+	m, ackCh, err := b.send(who, to, req.Body, req.ThreadID, true, attach, false)
 	if err != nil {
 		return Response{Error: err.Error()}, Message{}
 	}
@@ -919,7 +919,7 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 				return Response{Error: fmt.Sprintf("%q is offline — ask requires an online recipient (nobody's there to answer right now); use mess send if it can wait", req.To)}
 			}
 		}
-		m, err := b.SendThreaded(who, to, req.Body, "")
+		m, err := b.SendAsk(who, to, req.Body)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}

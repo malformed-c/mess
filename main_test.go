@@ -69,6 +69,26 @@ func TestFormatMessageLineOmitsSuffixWithoutAttachment(t *testing.T) {
 	}
 }
 
+// An ask root gets a prominent, distinct marker telling the recipient a
+// plain reply won't satisfy the asker's wait — this is the actual fix for
+// "devops answered via plain send and the asker's `mess ask` timed out
+// anyway" (nothing else about the message looked any different).
+func TestFormatMessageLinePrependsAskMarker(t *testing.T) {
+	m := Message{ID: "m42", From: "alice", Kind: KindDirect, Body: "status?", Ask: true}
+	line := formatMessageLine("12:00:00", m)
+	if !strings.Contains(line, "[ask m42") || !strings.Contains(line, "mess reply") {
+		t.Fatalf("expected a prominent ask marker naming the token, got %q", line)
+	}
+}
+
+func TestFormatMessageLineOmitsAskMarkerForOrdinaryMessage(t *testing.T) {
+	m := Message{From: "alice", Kind: KindDirect, Body: "just a status update"}
+	line := formatMessageLine("12:00:00", m)
+	if strings.Contains(line, "[ask") {
+		t.Fatalf("expected no ask marker on an ordinary message, got %q", line)
+	}
+}
+
 func TestHumanBytes(t *testing.T) {
 	cases := []struct {
 		n    int64

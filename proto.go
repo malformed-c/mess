@@ -42,6 +42,17 @@ type Message struct {
 	// attaches to the same root). Empty means this message isn't part of a thread.
 	ThreadID string `json:"threadId,omitempty"`
 
+	// Ask marks a message created via `mess ask` (the root, not a reply to
+	// it — ThreadID is empty here). The asker's `mess ask`/`mess await` only
+	// detects an answer that's itself threaded back to this message's own ID
+	// (via `mess reply` or `--thread <id>`) — a plain `mess send`/`broadcast`
+	// reply, however relevant, won't satisfy it and the ask will time out
+	// with the answer just sitting unthreaded in the asker's inbox. This flag
+	// exists purely so recv/log rendering and the auto-wake injection can
+	// tell the recipient that plainly, since nothing else about the message
+	// looks any different from an ordinary direct send.
+	Ask bool `json:"ask,omitempty"`
+
 	// Bridge provenance, set only on a message that arrived via a topic bridge
 	// (see Bridge/Unbridge). BridgeID is the specific hop that delivered *this*
 	// copy; OriginRoom/OriginTopic are the room/topic of the original publish,

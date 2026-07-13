@@ -446,7 +446,7 @@ func (b *Broker) aliveLocked(name string) bool {
 
 // Send delivers a direct message to a single recipient.
 func (b *Broker) Send(from, to, body string) (Message, error) {
-	m, _, err := b.send(from, to, body, "", false, nil)
+	m, _, err := b.send(from, to, body, "", false, nil, false)
 	return m, err
 }
 
@@ -454,7 +454,7 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 // recipient reads (consumes) it. The caller can block on the channel, with its
 // own timeout, to implement a read receipt.
 func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, "", true, nil)
+	return b.send(from, to, body, "", true, nil, false)
 }
 
 // SendThreaded is Send, tagging the message as a reply within threadID (the
@@ -463,18 +463,28 @@ func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error
 // here, only participant bookkeeping (so the same person showing up in a
 // topic thread later is already recognized as a participant).
 func (b *Broker) SendThreaded(from, to, body, threadID string) (Message, error) {
-	m, _, err := b.send(from, to, body, threadID, false, nil)
+	m, _, err := b.send(from, to, body, threadID, false, nil, false)
 	return m, err
 }
 
 // SendAckThreaded is SendAck with a thread tag (see SendThreaded).
 func (b *Broker) SendAckThreaded(from, to, body, threadID string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, threadID, true, nil)
+	return b.send(from, to, body, threadID, true, nil, false)
 }
 
 // SendThreadedAttach is SendThreaded with a file attachment (mess send --attach).
 func (b *Broker) SendThreadedAttach(from, to, body, threadID string, attach *Attachment) (Message, error) {
-	m, _, err := b.send(from, to, body, threadID, false, attach)
+	m, _, err := b.send(from, to, body, threadID, false, attach, false)
+	return m, err
+}
+
+// SendAsk is Send, flagging the message as a `mess ask` root (see
+// Message.Ask) so recv/log rendering and the auto-wake injection can tell the
+// recipient it expects a threaded reply (`mess reply`/`--thread <id>`), not a
+// plain send back — the asker's `mess ask`/`mess await` wait only detects an
+// answer threaded to this message's own ID.
+func (b *Broker) SendAsk(from, to, body string) (Message, error) {
+	m, _, err := b.send(from, to, body, "", false, nil, true)
 	return m, err
 }
 
@@ -492,7 +502,7 @@ type Attachment struct {
 // send's from/to are composite keys (agentKey(room, name)) except when to is
 // the bare human mailbox handle (never room-scoped — see dispatch). The
 // delivered Message always carries bare names.
-func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachment) (Message, <-chan struct{}, error) {
+func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachment, isAsk bool) (Message, <-chan struct{}, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if to == "" {
@@ -500,7 +510,7 @@ func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachm
 	}
 	_, fromName := splitAgentKey(from)
 	_, toName := splitAgentKey(to)
-	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID}
+	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID, Ask: isAsk}
 	if attach != nil {
 		m.AttachPath, m.AttachHash, m.AttachSize, m.AttachMTime = attach.Path, attach.Hash, attach.Size, attach.MTime
 	}
