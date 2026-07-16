@@ -74,6 +74,8 @@ Receiving and threads:
   mess reply [body...]            reply to the most recent message (or continue
                                   the open thread — see "mess thread close");
                                   no need to know/pass a message id
+                                  (--thread ID replies to that specific
+                                  message/thread instead, overriding the above)
   mess thread close                end the thread "mess reply" is continuing;
                                   the next reply starts a fresh one
   mess thread list                 list threads you've seen activity in
@@ -1014,6 +1016,7 @@ func cmdReplay(p paths, args []string) error {
 // depending on what the root message was.
 func cmdReply(p paths, args []string) error {
 	fs, as := newFlags("reply")
+	thread := fs.String("thread", "", "reply to this specific message/thread id instead of the last-seen message or open thread")
 	parseAnywhere(fs, args)
 	body, err := bodyFrom(fs.Args())
 	if err != nil {
@@ -1022,6 +1025,17 @@ func cmdReply(p paths, args []string) error {
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
+	}
+
+	if *thread != "" {
+		kind, topic, to, err := resolveThreadRoute(p, name, *thread)
+		if err != nil {
+			return err
+		}
+		if err := writeOpenThread(p, openThreadInfo{ThreadID: *thread, Kind: kind, Topic: topic, To: to}); err != nil {
+			return err
+		}
+		return sendReply(p, name, kind, topic, to, *thread, body)
 	}
 
 	if open, ok := readOpenThread(p); ok {
@@ -1036,6 +1050,54 @@ func cmdReply(p paths, args []string) error {
 		return err
 	}
 	return sendReply(p, name, last.Kind, last.Topic, last.From, last.ID, body)
+}
+
+// resolveThreadRoute figures out how to route a reply to threadID when the
+// caller names it explicitly (mess reply --thread <id>), since that's the
+// one piece of information a bare id doesn't carry on its own — unlike the
+// implicit last-message/open-thread path, which already has it cached.
+// Looks at name's own received view of the thread (same "your own view"
+// caveat as `mess export --thread`: a message you sent yourself won't
+// appear, so a thread you started and only ever replied to, never received a
+// reply in, won't be found this way — use send/pub --thread <id> directly
+// for that case). Errors clearly if the thread is empty/unknown, rather than
+// silently swallowing the id into the message body (the original bug this
+// flag exists to fix).
+func resolveThreadRoute(p paths, name, threadID string) (kind, topic, to string, err error) {
+	resp, err := call(p, Request{Op: "export", As: name, ThreadID: threadID})
+	if err != nil {
+		return "", "", "", err
+	}
+	return routeFromThreadMessages(name, threadID, resp.Messages)
+}
+
+// routeFromThreadMessages is resolveThreadRoute's pure logic, split out so
+// it's unit-testable without a live daemon: given name's own received view of
+// a thread (already fetched), figures out whether to route a reply as a
+// topic pub or a direct send, and to whom/where.
+func routeFromThreadMessages(name, threadID string, msgs []Message) (kind, topic, to string, err error) {
+	if len(msgs) == 0 {
+		return "", "", "", fmt.Errorf("no such thread %q in your received view — check the id, or use `mess send`/`mess pub --thread %s` directly if you sent the root yourself", threadID, threadID)
+	}
+	for _, m := range msgs {
+		if m.ID != threadID {
+			continue // prefer the root itself when it's present
+		}
+		if m.Kind == KindDirect {
+			return m.Kind, "", m.From, nil
+		}
+		return m.Kind, m.Topic, "", nil
+	}
+	// Root itself isn't in our view (e.g. scrolled out of history) — fall
+	// back to any reply we did see for the routing info.
+	m := msgs[0]
+	if m.Kind == KindDirect {
+		if m.From != name {
+			return m.Kind, "", m.From, nil
+		}
+		return m.Kind, "", m.To, nil
+	}
+	return m.Kind, m.Topic, "", nil
 }
 
 // sendReply posts body as a threaded reply, routing to a topic or a direct
@@ -1579,7 +1641,7 @@ func formatMessageLine(ts string, m Message) string {
 		line += fmt.Sprintf(" [attached: %s (%s, %s)]", m.AttachPath, hash, humanBytes(m.AttachSize))
 	}
 	if m.Ask {
-		line = fmt.Sprintf("[ask %s — reply with `mess reply`, not a plain send] %s", m.ID, line)
+		line = fmt.Sprintf("[question %s — reply with `mess reply`, not a plain send] %s", m.ID, line)
 	}
 	return line
 }

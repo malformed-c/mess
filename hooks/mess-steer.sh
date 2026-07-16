@@ -20,6 +20,11 @@
 [ -n "$MESS_NO_STEER" ] && exit 0
 [ -n "$MESS_CHANNEL" ] && exit 0
 
+# Grok Build: map hook-injected GROK_SESSION_ID so whoami resolves mid-turn.
+if [ -z "$MESS_SESSION_ID" ] && [ -n "$GROK_SESSION_ID" ]; then
+  export MESS_SESSION_ID="$GROK_SESSION_ID"
+fi
+
 # The hook event this fires on (PreToolUse before a tool, or UserPromptSubmit on
 # a user message). additionalContext's hookEventName must match. Default keeps
 # older single-arg installs working.
@@ -34,12 +39,37 @@ MESS=/home/engi/.local/bin/mess
 who=$("$MESS" whoami 2>/dev/null)
 [ -z "$who" ] && exit 0
 
-# Peek pending direct/topic messages (broadcasts ignored), dropping quiet ones
-# (a topic message that @-mentioned other subscribers, not me); derive count + id.
-json=$("$MESS" recv --kind direct,topic --peek --json 2>/dev/null | jq -c 'select(.quiet != true)' 2>/dev/null)
+# Peek pending direct/topic messages (broadcasts ignored except a --loud one,
+# which is meant to surface even to a busy agent), dropping quiet ones (a topic
+# message that @-mentioned other subscribers, not me); derive count + id.
+direct=$("$MESS" recv --kind direct,topic --peek --json 2>/dev/null | jq -c 'select(.quiet != true)' 2>/dev/null)
+loud=$("$MESS" recv --kind broadcast --peek --json 2>/dev/null | jq -c 'select(.loud == true)' 2>/dev/null)
+json=$(printf '%s\n%s\n' "$direct" "$loud" | sed '/^$/d')
 n=$(printf '%s\n' "$json" | grep -c .)
 maxid=$(printf '%s\n' "$json" | jq -rs 'if length==0 then 0 else ([.[].id | ltrimstr("m") | tonumber] | max) end' 2>/dev/null)
 [ -z "$maxid" ] && maxid=0
+[ "$n" -eq 0 ] && exit 0
+# Call out any pending `mess ask` roots distinctly — a plain mess recv/mess
+# send back won't satisfy the asker's wait (only a threaded reply does), and
+# this notice is the one place a busy agent (not seeing the wake hook's fuller
+# injection) would otherwise miss that.
+askn=$(printf '%s\n' "$json" | jq -s 'map(select(.ask == true)) | length')
+asknote=""
+if [ "${askn:-0}" -gt 0 ]; then
+  asknote=" ($askn of them a question — reply with \`mess reply\`, not a plain send)"
+fi
+
+# Claude Code can dispatch several tool calls from one turn in parallel (each
+# with its own PreToolUse), so two instances of this script can run at the same
+# moment — e.g. one of the parallel calls is itself `mess recv`. Without a lock,
+# both instances can read the same stale prev before either writes, so both fire
+# the same notice — one of them for a message the *other* call is about to (or
+# just did) consume, which reads to the agent as a stale/redundant notification
+# for mail it already fetched. flock serializes the read-check-write so only one
+# instance of a simultaneous batch ever announces a given id.
+lockf="${TMPDIR:-/tmp}/mess-steer-$who.lock"
+exec 9>"$lockf"
+flock 9
 
 statef="${TMPDIR:-/tmp}/mess-steer-$who.id"
 prev=$(cat "$statef" 2>/dev/null || echo 0)
@@ -47,8 +77,8 @@ prev=$(cat "$statef" 2>/dev/null || echo 0)
 # (The auto-wake hook consumes on an idle wake, so a woken turn's inbox is empty
 # here — no flag coordination needed. When the agent is working, the wake stands
 # down and this hook is the sole notifier.)
-if [ "$n" -gt 0 ] && [ "$maxid" -gt "$prev" ]; then
-  jq -cn --arg c "[mess] $n unread peer message(s) as of $at — run \`mess recv\` to read them." \
+if [ "$maxid" -gt "$prev" ]; then
+  jq -cn --arg c "[mess] $n unread peer message(s)$asknote as of $at — run \`mess recv\` to read them." \
     --arg ev "$EVENT" \
     '{hookSpecificOutput:{hookEventName:$ev,additionalContext:($c)}}'
   printf '%s' "$maxid" > "$statef"

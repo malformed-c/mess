@@ -76,16 +76,16 @@ func TestFormatMessageLineOmitsSuffixWithoutAttachment(t *testing.T) {
 func TestFormatMessageLinePrependsAskMarker(t *testing.T) {
 	m := Message{ID: "m42", From: "alice", Kind: KindDirect, Body: "status?", Ask: true}
 	line := formatMessageLine("12:00:00", m)
-	if !strings.Contains(line, "[ask m42") || !strings.Contains(line, "mess reply") {
-		t.Fatalf("expected a prominent ask marker naming the token, got %q", line)
+	if !strings.Contains(line, "[question m42") || !strings.Contains(line, "mess reply") {
+		t.Fatalf("expected a prominent question marker naming the token, got %q", line)
 	}
 }
 
 func TestFormatMessageLineOmitsAskMarkerForOrdinaryMessage(t *testing.T) {
 	m := Message{From: "alice", Kind: KindDirect, Body: "just a status update"}
 	line := formatMessageLine("12:00:00", m)
-	if strings.Contains(line, "[ask") {
-		t.Fatalf("expected no ask marker on an ordinary message, got %q", line)
+	if strings.Contains(line, "[question") {
+		t.Fatalf("expected no question marker on an ordinary message, got %q", line)
 	}
 }
 
@@ -105,5 +105,73 @@ func TestHumanBytes(t *testing.T) {
 		if got := humanBytes(c.n); got != c.want {
 			t.Errorf("humanBytes(%d) = %q, want %q", c.n, got, c.want)
 		}
+	}
+}
+
+// --- mess reply --thread routing ---
+
+// The empty case is the original bug's fix: an unknown/empty thread must
+// error clearly, not silently let the id fall through as literal body text.
+func TestRouteFromThreadMessagesErrorsOnEmpty(t *testing.T) {
+	_, _, _, err := routeFromThreadMessages("bob", "m99", nil)
+	if err == nil {
+		t.Fatal("expected an error for an empty/unknown thread")
+	}
+}
+
+func TestRouteFromThreadMessagesPrefersRootForDirect(t *testing.T) {
+	msgs := []Message{
+		{ID: "m1", Kind: KindDirect, From: "alice", To: "bob"}, // root
+		{ID: "m2", Kind: KindDirect, From: "bob", To: "alice", ThreadID: "m1"},
+	}
+	kind, topic, to, err := routeFromThreadMessages("bob", "m1", msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != KindDirect || topic != "" || to != "alice" {
+		t.Fatalf("expected to route back to alice, got kind=%q topic=%q to=%q", kind, topic, to)
+	}
+}
+
+func TestRouteFromThreadMessagesPrefersRootForTopic(t *testing.T) {
+	msgs := []Message{
+		{ID: "m1", Kind: KindTopic, Topic: "eng", From: "alice"}, // root
+		{ID: "m2", Kind: KindTopic, Topic: "eng", From: "bob", ThreadID: "m1"},
+	}
+	kind, topic, to, err := routeFromThreadMessages("bob", "m1", msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != KindTopic || topic != "eng" || to != "" {
+		t.Fatalf("expected to route to #eng, got kind=%q topic=%q to=%q", kind, topic, to)
+	}
+}
+
+// If the root itself scrolled out of view, fall back to a reply we did see.
+func TestRouteFromThreadMessagesFallsBackWithoutRoot(t *testing.T) {
+	msgs := []Message{
+		{ID: "m2", Kind: KindDirect, From: "alice", To: "bob", ThreadID: "m1"},
+	}
+	kind, topic, to, err := routeFromThreadMessages("bob", "m1", msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != KindDirect || topic != "" || to != "alice" {
+		t.Fatalf("expected to route back to alice from the fallback reply, got kind=%q topic=%q to=%q", kind, topic, to)
+	}
+}
+
+// Fallback must route to the OTHER party, not myself, when I'm the sender
+// of the only reply we happen to have in view.
+func TestRouteFromThreadMessagesFallbackUsesOtherParty(t *testing.T) {
+	msgs := []Message{
+		{ID: "m2", Kind: KindDirect, From: "bob", To: "alice", ThreadID: "m1"},
+	}
+	kind, _, to, err := routeFromThreadMessages("bob", "m1", msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != KindDirect || to != "alice" {
+		t.Fatalf("expected to route to alice (the other party), got kind=%q to=%q", kind, to)
 	}
 }

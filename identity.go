@@ -31,7 +31,8 @@ import (
 // in priority order. MESS_SESSION_ID is an explicit override for any other host.
 //   - CLAUDE_CODE_SESSION_ID — Claude Code
 //   - CODEX_THREAD_ID        — OpenAI Codex CLI
-var sessionEnvVars = []string{"MESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}
+//   - GROK_SESSION_ID        — Grok Build (injected into hook processes)
+var sessionEnvVars = []string{"MESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "GROK_SESSION_ID"}
 
 // sessionID returns the host agent's session identifier, or "" when run outside
 // a recognized agent (e.g. a plain shell). It is the sole key for identity: it is

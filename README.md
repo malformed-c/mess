@@ -92,11 +92,12 @@ An ask is otherwise an ordinary direct message — nothing else marks it as
 expecting a threaded reply, so a recipient answering with a plain
 `mess send`/`broadcast` (instead of `mess reply`/`--thread <id>`) leaves the
 asker's wait unsatisfied even though a perfectly good answer is sitting
-unthreaded in their inbox. `recv`/`export`/`log` all prepend a `[ask <id> —
-reply with mess reply, not a plain send]` marker to an ask's rendering, and
-the auto-wake injection (and, if you're mid-turn, the steer notice's unread
-count) calls it out the same way, so the recipient learns this before
-answering the "normal" way.
+unthreaded in their inbox. `recv`/`export`/`log` all prepend a `[question <id>
+— reply with mess reply, not a plain send]` marker to an ask's rendering (from
+the *answerer's* point of view it reads as "a question", not internal
+"ask" jargon), and the auto-wake injection (and, if you're mid-turn, the
+steer notice's unread count) calls it out the same way, so the recipient
+learns this before answering the "normal" way.
 
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
 within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
@@ -125,6 +126,17 @@ direct message via `send`) automatically. Once it opens a thread it keeps
 replying there on every subsequent call — regardless of what else arrives in
 the meantime — until you `mess thread close`; use `--thread <id>` directly on
 `send`/`pub` instead if you want a one-off reply without touching that state.
+
+`mess reply --thread <id> "text"` explicitly targets a specific message/
+thread id instead of the implicit last-seen/open-thread tracking above (and
+also becomes the new open thread, so a following bare `mess reply` continues
+it). It looks up routing (topic vs. direct, and who/where) from your own
+received view of that thread, the same "your own view" caveat `mess export`
+has — a thread you started and only ever *replied* in, never *received* a
+reply in, won't resolve this way (use `send`/`pub --thread <id>` directly for
+that). Passing a bare id as `mess reply`'s first argument does **not** work —
+`mess reply` takes no positional target, so an id typed there is swallowed as
+literal body text; `--thread` is the only way to target one explicitly.
 
 ## Rooms
 
