@@ -94,7 +94,7 @@ func readIdentFile(path string) string {
 func writeIdentity(p paths, name string) error {
 	path := identityPath(p)
 	if path == "" {
-		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / MESS_SESSION_ID); cannot persist a mid-session identity (pass --as or set MESS_AGENT instead)")
+		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / GROK_SESSION_ID / MESS_SESSION_ID); cannot persist a mid-session identity (pass --as or set MESS_AGENT instead)")
 	}
 	return writeIdentFile(path, name)
 }
@@ -140,7 +140,7 @@ func readRoom(p paths) string {
 func writeRoom(p paths, room string) error {
 	path := roomPath(p)
 	if path == "" {
-		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / MESS_SESSION_ID); cannot persist a room (pass --room or set MESS_ROOM instead)")
+		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / GROK_SESSION_ID / MESS_SESSION_ID); cannot persist a room (pass --room or set MESS_ROOM instead)")
 	}
 	return writeIdentFile(path, room)
 }

@@ -318,16 +318,42 @@ func (b *Broker) RegisterOwned(name, session string, force bool) (bool, string) 
 
 // IsRegistered reports whether name has ever been claimed via
 // register/room-join/rename — as opposed to merely having a pending inbox
-// because someone sent it a message. ensure() auto-creates an agentState for
-// any recipient of a plain send/pub, registered or not (by design — a
-// fire-and-forget message can wait for a name that hasn't started yet), so
-// presence in b.agents alone isn't a reliable "is this a real identity"
-// signal; b.owners, populated only by an actual identity claim, is.
+// because someone sent it a message. ensure() itself auto-creates an
+// agentState for any name handed to it, registered or not — still true for
+// pub's topic-subscriber delivery, which has no registration concept — but
+// dispatch's "send"/"ask" cases now gate on IsRegistered before ever
+// reaching it, so a plain `mess send` to a name that's never registered
+// anywhere is rejected rather than silently creating a phantom agentState;
+// presence in b.agents alone was never a reliable "is this a real identity"
+// signal, b.owners (populated only by an actual identity claim) is.
 func (b *Broker) IsRegistered(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	_, ok := b.owners[name]
 	return ok
+}
+
+// FindOtherRoom looks for bareName registered (an actual identity claim, per
+// b.owners — same bar as IsRegistered) under any room OTHER than
+// callerRoom, returning the first match. Exists to catch a real footgun
+// rooms introduced: from a plain `mess send <name>`, an unregistered name in
+// the caller's own room looks identical whether it's genuinely new or
+// already registered under a different room — without this check, the
+// message silently creates a same-named-but-disconnected ghost instead of
+// reaching the real, already-registered agent, and the real recipient never
+// wakes because nothing was ever delivered to *its* inbox. Not a uniqueness
+// guarantee (the same bare name can legitimately exist in several rooms at
+// once) — just a best-effort signal for the one-match common case.
+func (b *Broker) FindOtherRoom(callerRoom, bareName string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for key := range b.owners {
+		room, name := splitAgentKey(key)
+		if name == bareName && room != callerRoom {
+			return room, true
+		}
+	}
+	return "", false
 }
 
 // IsOnline reports whether name currently looks alive — listening, working,
@@ -350,7 +376,10 @@ func (b *Broker) foreignLiveOwnerLocked(name, session string) bool {
 }
 
 func ownershipMsg(name string) string {
-	return fmt.Sprintf("name %q is in use by another live session; choose a different name (mess register <name>) or pass --force to take it over", name)
+	// name may be a composite agentKey(room, bare); never leak the internal
+	// NUL separator into operator-facing errors.
+	room, bare := splitAgentKey(name)
+	return fmt.Sprintf("name %q is in use by another live session; choose a different name (mess register <name>) or pass --force to take it over", displayName(room, bare))
 }
 
 // ClaimIdentity binds name to the caller's session for any identity-asserting
@@ -375,6 +404,41 @@ func (b *Broker) ClaimIdentity(name, session string) (bool, string) {
 	return true, ""
 }
 
+// migrateLocked moves from's inbox, topic subscriptions, state, and
+// busy/last-seen bookkeeping into to (ensuring it exists first, keyed by
+// to's own room for topic re-subscription), then removes from. Held lock.
+// Shared by Rename and JoinRoom — both are "move this identity to a new
+// composite key" operations, just differing in what changes (name vs room)
+// and, more importantly, in how the collision guard is ordered relative to
+// the from==to no-op case (see JoinRoom's doc comment for why that ordering
+// actually matters, not just style).
+func (b *Broker) migrateLocked(from, to string) {
+	dst := b.ensure(to)
+	room, _ := splitAgentKey(to)
+	if src := b.agents[from]; src != nil {
+		dst.inbox = append(dst.inbox, src.inbox...)
+		if dst.state == "" {
+			dst.state = src.state
+		}
+		for topicName := range src.topics {
+			dst.topics[topicName] = true
+			tk := topicKey(room, topicName)
+			if b.topics[tk] == nil {
+				b.topics[tk] = map[string]bool{}
+			}
+			b.topics[tk][to] = true
+		}
+	}
+	// Carry over activity/turn markers (keep the fresher of the two).
+	if t, ok := b.lastSeen[from]; ok && t.After(b.lastSeen[to]) {
+		b.lastSeen[to] = t
+	}
+	if t, ok := b.busyUntil[from]; ok && t.After(b.busyUntil[to]) {
+		b.busyUntil[to] = t
+	}
+	b.removeAgentLocked(from) // also unsubscribes from from topics and clears its maps
+}
+
 // Rename moves an agent from old to new, migrating its inbox, topic
 // subscriptions, state, and busy/last-seen bookkeeping, then removing old. It
 // honors the same collision guard as RegisterOwned on the destination name
@@ -396,33 +460,42 @@ func (b *Broker) Rename(old, newName, session string, force bool) (bool, string)
 	if !force && b.foreignLiveOwnerLocked(newName, session) {
 		return false, ownershipMsg(newName)
 	}
-
-	dst := b.ensure(newName)
-	room, _ := splitAgentKey(newName)
-	if src := b.agents[old]; src != nil {
-		dst.inbox = append(dst.inbox, src.inbox...)
-		if dst.state == "" {
-			dst.state = src.state
-		}
-		for topicName := range src.topics {
-			dst.topics[topicName] = true
-			tk := topicKey(room, topicName)
-			if b.topics[tk] == nil {
-				b.topics[tk] = map[string]bool{}
-			}
-			b.topics[tk][newName] = true
-		}
-	}
-	// Carry over activity/turn markers (keep the fresher of the two).
-	if t, ok := b.lastSeen[old]; ok && t.After(b.lastSeen[newName]) {
-		b.lastSeen[newName] = t
-	}
-	if t, ok := b.busyUntil[old]; ok && t.After(b.busyUntil[newName]) {
-		b.busyUntil[newName] = t
-	}
-	b.removeAgentLocked(old) // also unsubscribes old from topics and clears its maps
+	b.migrateLocked(old, newName)
 	b.touch(newName)
 	b.owners[newName] = ownerInfo{session: session}
+	b.changed()
+	return true, ""
+}
+
+// JoinRoom migrates the caller's identity from a previous composite key
+// (from) into a new one (who) when they cross rooms via `mess room join` —
+// otherwise a bare-global (or other-room) registration and the new
+// room-scoped one both end up existing at once, and mail/presence land on
+// whichever one a given caller happens to address. A real incident, hit
+// independently twice (aphelion-frontend-2 here; townlife/grok-game's
+// "game" room).
+//
+// Unlike Rename, the collision guard runs BEFORE the from==who fast path,
+// not after — Rename's ordering is safe there because "old" is always the
+// caller's own already-owned identity (agentName resolved it), so a no-op
+// self-rename skipping the guard is fine. Here "from" is reconstructed from
+// a client-supplied FromRoom, which for a session that has never
+// legitimately registered anywhere could coincidentally equal who (e.g.
+// both empty/global) — checking the guard first closes that gap, so a
+// caller can never bypass ownership enforcement by aiming FromRoom at its
+// own target.
+func (b *Broker) JoinRoom(from, who, session string, force bool) (bool, string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !force && b.foreignLiveOwnerLocked(who, session) {
+		return false, ownershipMsg(who)
+	}
+	if from != who {
+		b.migrateLocked(from, who)
+	}
+	b.ensure(who)
+	b.touch(who)
+	b.owners[who] = ownerInfo{session: session}
 	b.changed()
 	return true, ""
 }

@@ -37,14 +37,20 @@ Rooms (namespace isolation):
   mess room [join <room> | leave] print your current room, or join/leave one —
                                   an exclusive namespace isolating identities,
                                   broadcast, ps, and topics from other rooms
-                                  (global/default room until you join one)
+                                  (global/default room until you join one);
+                                  join migrates your existing identity
+                                  (inbox/subscriptions) from your previous
+                                  room instead of leaving a stale duplicate
   mess room bridge <topic> <room>/<topic> [--direction both|out|in] [--ttl DUR]
                                   relay a local topic to a topic in another room
   mess room unbridge <id>          tear down a bridge
   mess room bridges                list active bridges
 
 Sending:
-  mess send <to> [body...]        send a direct message to an agent
+  mess send <to> [body...]        send a direct message to an agent; the
+                                  recipient must have registered at some
+                                  point (a never-registered name is
+                                  rejected, not silently ghost-created) —
                                   (--ack blocks until it's read; --timeout DUR)
                                   (to "user" or your login name = the human's
                                   mailbox: desktop-notifies, read via recv --as user)
@@ -54,6 +60,11 @@ Sending:
                                   use this, not args, for text with backticks/
                                   $()/etc.: the calling shell expands those in
                                   a quoted arg before mess ever sees it)
+                                  (--room NAME messages an agent in a
+                                  different room than your own explicitly;
+                                  a name that exists only in another room is
+                                  otherwise rejected with that room named,
+                                  not silently duplicated in yours)
   mess broadcast [body...]        send to every known agent in your room (plain
                                   broadcasts don't wake the standard --no-broadcast
                                   auto-wake hook; --loud bypasses that, goes
@@ -76,6 +87,8 @@ Sending:
                                   kills the wait early; --async prints the
                                   token and returns immediately instead
                                   (--file PATH reads the question from a file)
+                                  (--room NAME asks an agent in a different
+                                  room than your own explicitly)
   mess await <token>              wait for an ask's reply later (the token
                                   mess ask printed, async or not)
 
@@ -423,10 +436,11 @@ func cmdSend(p paths, args []string) error {
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output)")
 	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	room := fs.String("room", "", "message an agent in this room instead of your own (explicit cross-room send)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] [--file PATH] <to> [body...]")
+		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] [--file PATH] [--room NAME] <to> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -437,7 +451,7 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	req := Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread}
+	req := Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread, Room: *room}
 	if *attach != "" {
 		if err := setAttach(&req, *attach); err != nil {
 			return err
@@ -465,10 +479,11 @@ func cmdAsk(p paths, args []string) error {
 	timeout := fs.String("timeout", "", "how long to wait for a reply; default: wait forever")
 	async := fs.Bool("async", false, "don't wait — print the token immediately for a later `mess await`")
 	file := fs.String("file", "", "read the question from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	room := fs.String("room", "", "ask an agent in this room instead of your own (explicit cross-room ask)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] [--file PATH] <agent> [question...]")
+		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] [--file PATH] [--room NAME] <agent> [question...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -489,7 +504,7 @@ func cmdAsk(p paths, args []string) error {
 	// answer later, by accident, on the next unrelated wake. Printing the
 	// token up front means it survives in the caller's own output even if
 	// the process is killed a moment later, regardless of signal.
-	resp, err := call(p, Request{Op: "ask", As: from, To: to, Body: body, Wait: false})
+	resp, err := call(p, Request{Op: "ask", As: from, To: to, Body: body, Wait: false, Room: *room})
 	if err != nil {
 		return err
 	}
@@ -657,7 +672,11 @@ func cmdRoomJoinLeave(p paths, op string, args []string) error {
 			return fmt.Errorf("usage: mess room join [--force] <room>")
 		}
 		newRoom := rest[0]
-		if _, err := call(p, Request{Op: "room-join", As: name, Room: newRoom, Force: *force}); err != nil {
+		// The caller's PREVIOUS room, so the daemon migrates the existing
+		// identity (inbox/subscriptions/owner) into the new room instead of
+		// leaving a stale duplicate behind under the old one.
+		oldRoom := resolveRoom(p, "")
+		if _, err := call(p, Request{Op: "room-join", As: name, Room: newRoom, FromRoom: oldRoom, Force: *force}); err != nil {
 			return err
 		}
 		if err := writeRoom(p, newRoom); err != nil {
@@ -835,7 +854,27 @@ func cmdRegister(p paths, args []string) error {
 			return err
 		}
 	}
-	if _, err := call(p, Request{Op: "register", As: name, Force: *force}); err != nil {
+	// Detect an auto-join room BEFORE registering, so a genuinely new
+	// registration lands directly in the room-scoped identity in ONE call
+	// instead of first claiming a bare-global one and separately
+	// room-joining after — which used to leave BOTH a stale global owner
+	// entry and the real room-scoped one behind (a real incident, hit
+	// independently twice: aphelion-frontend-2 here, and townlife/
+	// grok-game's "game" room). Only for a genuinely new registration (not
+	// a bare re-validation) and only when no room is already explicitly
+	// chosen (--room / a prior `room join` / MESS_ROOM) — never overrides a
+	// deliberate choice. Best-effort: no git repo/no git installed just
+	// means no auto-join, same as before this existed.
+	autoRoom := ""
+	if newName != "" && resolveRoom(p, "") == "" {
+		autoRoom = detectRepoRoom(".")
+	}
+
+	req := Request{Op: "register", As: name, Force: *force}
+	if autoRoom != "" {
+		req.Room = autoRoom
+	}
+	if _, err := call(p, req); err != nil {
 		return err // includes the collision message + the --force hint
 	}
 	if newName != "" {
@@ -843,22 +882,12 @@ func cmdRegister(p paths, args []string) error {
 			return err
 		}
 	}
-
-	// Auto-join a room derived from the calling git repo — but only for a
-	// genuinely new registration (not a bare re-validation) and only when no
-	// room is already explicitly chosen (--room / a prior `room join` /
-	// MESS_ROOM), so this never overrides a deliberate choice. Best-effort:
-	// a detection or join failure just falls back to plain registration,
-	// never breaks it.
-	if newName != "" && resolveRoom(p, "") == "" {
-		if room := detectRepoRoom("."); room != "" {
-			if _, err := call(p, Request{Op: "room-join", As: name, Room: room}); err == nil {
-				if err := writeRoom(p, room); err == nil {
-					fmt.Printf("registered as %s (auto-joined room %q — detected from this git repo)\n", name, room)
-					return nil
-				}
-			}
+	if autoRoom != "" {
+		if err := writeRoom(p, autoRoom); err != nil {
+			return err
 		}
+		fmt.Printf("registered as %s (auto-joined room %q — detected from this git repo)\n", name, autoRoom)
+		return nil
 	}
 
 	fmt.Printf("registered as %s\n", name)

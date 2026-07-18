@@ -1,5 +1,29 @@
 # Known issues
 
+## Fixed (2026-07-18): Grok Build tool shells lacked `GROK_SESSION_ID` → mess auto-wake never parked
+
+**Symptom:** Grok sessions could `mess register` and appear in `mess ps`, but peers'
+`mess send` always saw `listening=false`; `mess ask` timed out; `--ack` never
+completed. Claude Code agents on the same host woke normally.
+
+**Root cause:** Grok injects `GROK_SESSION_ID` into **hook** processes (Stop /
+PreToolUse / SessionStart) but **not** into tool/bash shells. `mess` keys
+mid-session identity on the host session id (`GROK_SESSION_ID` among others).
+Agents then either failed `mess register` or invented a fake
+`MESS_SESSION_ID=grok-build-game-$$` that did not match the real UUID the
+Stop-hook `mess-wake.sh` uses. Result: wake script's `mess whoami` was empty →
+exit 0 without parking → no listener.
+
+**Fix (in grok-build, not mess):** inject `GROK_SESSION_ID` from
+`owner_session_id` into every agent tool shell (persistent + non-persistent),
+exclude it from shell-state dumps like `GROK_AGENT`, re-export after snapshot
+restore. mess already accepted `GROK_SESSION_ID` in `sessionEnvVars`; error
+messages updated to mention it. New Grok binary must be installed and sessions
+restarted for tool shells to pick it up.
+
+**After upgrade:** re-`mess register <name>` once in each Grok session (or copy
+identity from any fake key onto the real session UUID under `~/.mess/ident/`).
+
 ## Fixed (plausible root cause): auto-wake hook could steal a message out from under a turn that just started, leaving `mess recv` to find nothing
 
 **Symptom, as reported (2026-07-09, habr-editor):** a peer sent a long

@@ -460,6 +460,9 @@ func (d *daemon) dispatch(req Request) Response {
 	case "ping":
 		return Response{OK: true}
 	case "register":
+		if err := rejectSlashName(req.As); err != nil {
+			return Response{Error: err.Error()}
+		}
 		if ok, msg := b.RegisterOwned(who, req.Session, req.Force); !ok {
 			elog("register %s refused: %s", req.As, msg)
 			return Response{Error: msg}
@@ -467,7 +470,11 @@ func (d *daemon) dispatch(req Request) Response {
 		elog("register %s", req.As)
 		return Response{OK: true}
 	case "room-join":
-		if ok, msg := b.RegisterOwned(who, req.Session, req.Force); !ok {
+		if err := rejectSlashName(req.As); err != nil {
+			return Response{Error: err.Error()}
+		}
+		from := agentKey(req.FromRoom, req.As)
+		if ok, msg := b.JoinRoom(from, who, req.Session, req.Force); !ok {
 			elog("room-join %s in %q refused: %s", req.As, req.Room, msg)
 			return Response{Error: msg}
 		}
@@ -480,6 +487,14 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return Response{OK: true, Count: 0} // idempotent
 	case "send":
+		if !isUserHandle(req.To) && !b.IsRegistered(to) {
+			if other, found := b.FindOtherRoom(req.Room, req.To); found {
+				elog("send %s -> %s refused: registered in room %q, not %q", req.As, req.To, other, req.Room)
+				return Response{Error: crossRoomGhostMsg(req.To, req.Room, other)}
+			}
+			elog("send %s -> %s refused: not a registered agent", req.As, req.To)
+			return Response{Error: fmt.Sprintf("no such agent %q — send requires a previously-registered recipient (it may just not have registered yet, or the name is a typo)", req.To)}
+		}
 		resp, m := d.send(req, who, to)
 		if resp.Error == "" {
 			notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
@@ -626,6 +641,9 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return Response{OK: true, Count: 0} // idempotent
 	case "rename":
+		if err := rejectSlashName(req.To); err != nil {
+			return Response{Error: err.Error()}
+		}
 		// Rename stays within one room: old and new are composited with the same
 		// req.Room. Moving to a *different* room is `mess room join` instead.
 		if ok, msg := b.Rename(who, to, req.Session, req.Force); !ok {
@@ -879,6 +897,56 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 	}
 }
 
+// rejectSlashName errors on a bare name containing '/' — reserved for
+// displayName()'s "room/name" rendering (mess ps --all, error messages).
+// Someone typing that rendered form back into a command (mess register
+// "game/grok-game") would register a literal, confusing name: visually
+// indistinguishable from a real room/name pair everywhere it's displayed,
+// but not one internally, and not reachable by anyone addressing the real
+// room-scoped agent by name alone. Gates identity-creating ops (register,
+// room-join, rename) — a slash-containing send/ask To already fails
+// cleanly on its own via the ghost guard (no such agent).
+func rejectSlashName(name string) error {
+	if strings.Contains(name, "/") {
+		return fmt.Errorf("agent names can't contain '/' (reserved for displaying room/name pairs) — got %q; use `mess room join <room>` to scope an identity to a room instead", name)
+	}
+	return nil
+}
+
+// roomLabel renders a room for a human-facing message ("(global)" for "").
+func roomLabel(room string) string {
+	if room == "" {
+		return "(global)"
+	}
+	return room
+}
+
+// crossRoomGhostMsg is send's rejection when bareName isn't registered in
+// callerRoom but IS registered under otherRoom — the real footgun rooms
+// introduced: an unregistered name in the caller's own room looks identical
+// whether it's genuinely new or already registered elsewhere, so without
+// this check the message would silently create a same-named-but-
+// disconnected ghost agent instead of ever reaching the real one, and the
+// real recipient never wakes since nothing was delivered to *its* inbox.
+func crossRoomGhostMsg(bareName, callerRoom, otherRoom string) string {
+	return fmt.Sprintf(
+		"%q is registered in room %s, not your room %s — pass --room %s to reach it there, or have it join your room",
+		bareName, roomLabel(otherRoom), roomLabel(callerRoom), otherRoom)
+}
+
+// crossRoomHint appends a room-specific explanation to a "no such agent"
+// error when bareName turns out to be registered under a different room —
+// so the caller learns WHY it didn't resolve here (a room mismatch) instead
+// of just being told the name doesn't exist at all.
+func crossRoomHint(b *Broker, callerRoom, bareName string) string {
+	other, found := b.FindOtherRoom(callerRoom, bareName)
+	if !found {
+		return ""
+	}
+	return fmt.Sprintf(" (it IS registered, but in room %s, not your room %s — pass --room %s to reach it there)",
+		roomLabel(other), roomLabel(callerRoom), other)
+}
+
 // askOrAwait handles both "ask" and "await": an ask is a plain threaded direct
 // message whose own ID becomes the correlation token (no new Message field),
 // and awaiting is a thread-scoped, non-quiet wait for any reply under that
@@ -896,10 +964,11 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 		if isUserHandle(req.To) {
 			to = req.To
 		}
-		// Unlike a plain send/pub (deliberately fire-and-forget — a message
-		// can sit waiting for a name that hasn't started yet, or for someone
-		// who's merely stepped away), ask BLOCKS for a reply, so it fails
-		// fast against a recipient that can't plausibly answer right now:
+		// ask BLOCKS for a reply, so it fails fast against a recipient that
+		// can't plausibly answer right now (send's dispatch case applies the
+		// same never-registered check below, but not this one — send doesn't
+		// block, so a registered-but-currently-offline recipient is exactly
+		// the valid "message waits for them to come back" case):
 		// - never registered at all: otherwise ensure() inside SendThreaded
 		//   would silently create a phantom agentState for the typo'd/
 		//   nonexistent name (a ghost visible in `mess ps`), and the ask
@@ -913,7 +982,7 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 		//   always meaningful (they'll see it whenever they next check).
 		if !isUserHandle(req.To) {
 			if !b.IsRegistered(to) {
-				return Response{Error: fmt.Sprintf("no such agent %q — ask requires a previously-registered recipient", req.To)}
+				return Response{Error: fmt.Sprintf("no such agent %q — ask requires a previously-registered recipient%s", req.To, crossRoomHint(b, req.Room, req.To))}
 			}
 			if !b.IsOnline(to) {
 				return Response{Error: fmt.Sprintf("%q is offline — ask requires an online recipient (nobody's there to answer right now); use mess send if it can wait", req.To)}

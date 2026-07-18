@@ -97,7 +97,7 @@ func readOpenThread(p paths) (openThreadInfo, bool) {
 func writeOpenThread(p paths, info openThreadInfo) error {
 	path := openThreadPath(p)
 	if path == "" {
-		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / MESS_SESSION_ID); cannot track an open thread")
+		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / GROK_SESSION_ID / MESS_SESSION_ID); cannot track an open thread")
 	}
 	data, err := json.Marshal(info)
 	if err != nil {

@@ -1173,6 +1173,99 @@ func TestRenameStaysWithinRoom(t *testing.T) {
 	}
 }
 
+// --- FindOtherRoom ---
+
+func TestFindOtherRoomFindsRegisteredElsewhere(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", false)
+
+	room, found := b.FindOtherRoom("", "bob")
+	if !found || room != "frontend" {
+		t.Fatalf("expected to find bob in room \"frontend\", got room=%q found=%v", room, found)
+	}
+}
+
+func TestFindOtherRoomNoMatchInCallersOwnRoom(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", false)
+
+	if _, found := b.FindOtherRoom("frontend", "bob"); found {
+		t.Fatal("should not report a match when bob is registered in the caller's OWN room")
+	}
+}
+
+func TestFindOtherRoomNoMatchWhenNeverRegistered(t *testing.T) {
+	b := newTestBroker()
+	if _, found := b.FindOtherRoom("", "nobody"); found {
+		t.Fatal("should not find a match for a name that's never been registered anywhere")
+	}
+}
+
+// --- JoinRoom (room-join's identity migration, not a bare duplicate) ---
+
+// This is the actual fix for a real incident: register (bare-global) then
+// room-join used to leave BOTH a stale global owner entry and the real
+// room-scoped one, so mail/presence landed on whichever one a caller
+// happened to address.
+func TestJoinRoomMigratesFromBareGlobal(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned("bob", "sess1", false)
+	b.Send("peer", "bob", "queued before joining")
+
+	if ok, msg := b.JoinRoom("bob", agentKey("frontend", "bob"), "sess1", false); !ok {
+		t.Fatalf("join should succeed: %s", msg)
+	}
+	if _, ok := b.agents["bob"]; ok {
+		t.Fatal("stale bare-global agent should be gone after joining a room")
+	}
+	if _, ok := b.owners["bob"]; ok {
+		t.Fatal("stale bare-global owner should be gone after joining a room")
+	}
+	got := b.Drain(agentKey("frontend", "bob"), false, 0)
+	if len(got) != 1 || got[0].Body != "queued before joining" {
+		t.Fatalf("inbox not migrated into the room-scoped identity: %+v", got)
+	}
+}
+
+func TestJoinRoomHonorsCollisionGuard(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.RegisterOwned(agentKey("frontend", "taken"), "s2", false) // a different live session
+
+	if ok, msg := b.JoinRoom("me", agentKey("frontend", "taken"), "s1", false); ok || msg == "" {
+		t.Fatal("joining onto a name a different live session owns should be refused")
+	}
+}
+
+// The collision guard must run even when from==who (unlike Rename's
+// old==newName fast path) — a client-supplied FromRoom could coincidentally
+// equal the target room for a session that never legitimately registered
+// anywhere, and that must NOT bypass ownership enforcement.
+func TestJoinRoomChecksCollisionEvenWhenFromEqualsWho(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.RegisterOwned(agentKey("frontend", "taken"), "s2", false) // a different live session
+
+	// An attacker-ish session claims FromRoom == the target room, hoping to
+	// hit Rename-style same-key fast-path semantics and skip the guard.
+	if ok, msg := b.JoinRoom(agentKey("frontend", "taken"), agentKey("frontend", "taken"), "s1", false); ok || msg == "" {
+		t.Fatal("from==who must not bypass the collision guard")
+	}
+}
+
+func TestJoinRoomForceOverridesCollision(t *testing.T) {
+	now := time.Unix(1000, 0)
+	b := NewBroker()
+	b.now = func() time.Time { return now }
+	b.RegisterOwned(agentKey("frontend", "taken"), "s2", false)
+
+	if ok, msg := b.JoinRoom("me", agentKey("frontend", "taken"), "s1", true); !ok {
+		t.Fatalf("--force should override the collision guard: %s", msg)
+	}
+}
+
 func TestSnapshotRoundTripsRooms(t *testing.T) {
 	b := newTestBroker()
 	b.Register(agentKey("A", "alice"))

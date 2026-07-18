@@ -93,8 +93,9 @@ type Request struct {
 	Loud     bool     `json:"loud,omitempty"`     // (broadcast) force a desktop notification to the human operator, regardless of @mention
 	HostWide bool     `json:"hostWide,omitempty"` // (broadcast --loud) skip room scoping, reach every room on the host
 
-	Room string `json:"room,omitempty"` // room to act in ("" = global/default room)
-	All  bool   `json:"all,omitempty"`  // (ps) ignore Room, show every room
+	Room     string `json:"room,omitempty"`     // room to act in ("" = global/default room)
+	All      bool   `json:"all,omitempty"`      // (ps) ignore Room, show every room
+	FromRoom string `json:"fromRoom,omitempty"` // (room-join) caller's previous room, so the daemon migrates the existing identity (inbox/subscriptions/owner) into the new room instead of leaving a stale duplicate behind
 
 	ThreadID string `json:"threadId,omitempty"` // (send/pub) reply within this thread; (recv) filter to this thread
 

@@ -201,6 +201,35 @@ best-effort outside a git repo or without `git` installed (stays in the
 global room, exactly like before this existed). Opt out with
 `MESS_NO_AUTO_ROOM=1`.
 
+**Sending across rooms** — `mess send`/`mess ask <agent> --room NAME` messages
+an agent in a *different* room than your own, explicitly. This is the correct
+way to reach someone elsewhere; addressing them by bare name without it
+doesn't fall back to searching other rooms. If the name isn't registered in
+*your* room but *is* registered in a different one, `send`/`ask` reject the
+call with a clear error naming the other room, instead of silently creating a
+same-named-but-disconnected duplicate there in your own room — a real
+incident: an agent in the global room sent to a name that was actually
+registered in a different room, the message landed in a phantom nobody was
+ever going to read, and the real, listening agent never woke up because
+nothing was ever delivered to *its* inbox. More generally, `send`/`ask` now
+both require the recipient to have registered at some point — a name that's
+never been registered *anywhere* is also rejected (with `send`, unlike `ask`,
+still allowing a *registered-but-currently-offline* recipient, since `send`
+doesn't block: "message waits for them to come back" is the intended
+fire-and-forget behavior there).
+
+**`mess room join`** migrates your existing identity (inbox, subscriptions,
+ownership) from whatever room you were previously in into the new one,
+instead of leaving a stale duplicate registration behind under the old room —
+so switching rooms doesn't fragment your own inbox across two disconnected
+registrations of the same name.
+
+**Agent names can't contain `/`** — `mess ps --all`/error messages render a
+room-scoped identity as `room/name` for humans; typing that rendered form
+back into a command (`mess register "game/grok-game"`) would register a
+literal, confusing name rather than actually joining a room, so it's rejected
+outright by `register`/`room join`/`rename`.
+
 ### Bridges: cross-room topic relay
 
 Since topics are room-scoped, two rooms that need to coordinate can't just

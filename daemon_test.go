@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,6 +130,8 @@ func TestDispatchStripsLeadingHashFromTopic(t *testing.T) {
 // broker's own room-aware methods tested directly in broker_test.go.
 func TestDispatchRoomScopesSend(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned(agentKey("A", "bob"), "", false)
+	d.broker.RegisterOwned(agentKey("B", "bob"), "", false)
 
 	if resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "A", Body: "for room A's bob"}); !resp.OK {
 		t.Fatalf("send failed: %+v", resp)
@@ -506,6 +509,153 @@ func TestDispatchAskAllowsUserHandleWithoutRegistration(t *testing.T) {
 	}
 }
 
+// --- send: ghost guard ---
+//
+// Real incident: aphelion-frontend (global room) sent to aphelion-frontend-2
+// (a name actually registered in room "frontend") — send silently created a
+// same-named-but-disconnected ghost in the global room instead of ever
+// reaching the real, already-registered agent. Fixed by extending the same
+// "must be a previously-registered recipient" guard ask already had to send.
+
+func TestDispatchSendRejectsNeverRegisteredRecipient(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.dispatch(Request{Op: "send", As: "alice", To: "ghost-bob", Body: "hi"})
+	if resp.Error == "" {
+		t.Fatal("expected an error for sending to a never-registered name")
+	}
+	if d.broker.IsRegistered("ghost-bob") {
+		t.Fatal("sending to an unregistered name must not register it")
+	}
+	agents, _ := d.broker.Ps("", false)
+	for _, a := range agents {
+		if a.Name == "ghost-bob" {
+			t.Fatalf("sending to an unregistered name must not create a ghost ps entry, got %+v", a)
+		}
+	}
+}
+
+// The specific footgun: bob exists, but in a different room than the
+// sender's — this must be rejected with a room-specific hint, not silently
+// create a same-named ghost in the sender's own room.
+func TestDispatchSendRejectsCrossRoomGhost(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", false)
+
+	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "hi"}) // no Room: global
+	if resp.Error == "" {
+		t.Fatal("expected an error for a name registered in a different room")
+	}
+	if !strings.Contains(resp.Error, "frontend") {
+		t.Fatalf("expected the error to name the other room, got %q", resp.Error)
+	}
+	if _, ok := d.broker.agents["bob"]; ok {
+		t.Fatal("must not create a same-named ghost in the sender's own (global) room")
+	}
+}
+
+// Explicit --room bypasses the guard entirely — this is the legitimate way
+// to reach an agent registered in a different room.
+func TestDispatchSendAllowsExplicitRoomTargeting(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", false)
+
+	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "frontend", Body: "hi"})
+	if !resp.OK {
+		t.Fatalf("explicit --room targeting should succeed, got %+v", resp)
+	}
+	got := d.broker.Drain(agentKey("frontend", "bob"), false, 0)
+	if len(got) != 1 || got[0].Body != "hi" {
+		t.Fatalf("message should have reached the real frontend-room bob, got %+v", got)
+	}
+}
+
+// A registered-but-offline recipient is still a valid send target (unlike
+// ask) — send doesn't block, so "message waits for them to come back" is
+// exactly the intended fire-and-forget behavior.
+func TestDispatchSendAllowsRegisteredButOfflineRecipient(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned("bob", "", false)
+	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "hi"})
+	if !resp.OK {
+		t.Fatalf("expected send to a registered-but-offline recipient to succeed, got %+v", resp)
+	}
+}
+
+// Sending to the human operator's mailbox is always allowed, unregistered
+// or not — it's a reserved handle, exempt from the registration guard.
+func TestDispatchSendAllowsUserHandleWithoutRegistration(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.dispatch(Request{Op: "send", As: "alice", To: "user", Body: "hi"})
+	if !resp.OK {
+		t.Fatalf("expected send to the human's mailbox to succeed, got %+v", resp)
+	}
+}
+
+// ask's existing "no such agent" error gains the same room-specific hint
+// when the name is registered elsewhere.
+func TestDispatchAskCrossRoomHint(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", false)
+
+	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
+	if resp.Error == "" {
+		t.Fatal("expected an error for a name registered in a different room")
+	}
+	if !strings.Contains(resp.Error, "frontend") {
+		t.Fatalf("expected the error to name the other room, got %q", resp.Error)
+	}
+}
+
+// --- register/room-join/rename: reject a slash in the name ---
+
+func TestDispatchRegisterRejectsSlashName(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.dispatch(Request{Op: "register", As: "game/grok-game"})
+	if resp.Error == "" {
+		t.Fatal("expected an error registering a name containing '/'")
+	}
+	if d.broker.IsRegistered("game/grok-game") {
+		t.Fatal("a slash-containing name must not be registered")
+	}
+}
+
+func TestDispatchRoomJoinRejectsSlashName(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	resp := d.dispatch(Request{Op: "room-join", As: "game/grok-game", Room: "game"})
+	if resp.Error == "" {
+		t.Fatal("expected an error room-joining a name containing '/'")
+	}
+}
+
+func TestDispatchRenameRejectsSlashName(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned("alice", "", false)
+	resp := d.dispatch(Request{Op: "rename", As: "alice", To: "room/alice"})
+	if resp.Error == "" {
+		t.Fatal("expected an error renaming to a name containing '/'")
+	}
+}
+
+// --- room-join: identity migration end-to-end through dispatch ---
+
+func TestDispatchRoomJoinMigratesFromPreviousRoom(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	d.broker.RegisterOwned("bob", "", false)
+	d.broker.send("peer", "bob", "queued before joining", "", false, nil, false)
+
+	resp := d.dispatch(Request{Op: "room-join", As: "bob", Room: "frontend", FromRoom: ""})
+	if !resp.OK {
+		t.Fatalf("room-join should succeed: %+v", resp)
+	}
+	if _, ok := d.broker.agents["bob"]; ok {
+		t.Fatal("stale bare-global agent should be gone after joining a room")
+	}
+	got := d.broker.Drain(agentKey("frontend", "bob"), false, 0)
+	if len(got) != 1 || got[0].Body != "queued before joining" {
+		t.Fatalf("inbox should have migrated into the room-scoped identity, got %+v", got)
+	}
+}
+
 // --- log ---
 
 func newTestDaemonWithJournal(t *testing.T) *daemon {
@@ -523,6 +673,7 @@ func newTestDaemonWithJournal(t *testing.T) *daemon {
 // — end-to-end through dispatch, not the journal package directly.
 func TestDispatchSendBroadcastPubAllJournal(t *testing.T) {
 	d := newTestDaemonWithJournal(t)
+	d.broker.RegisterOwned("bob", "", false)
 	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "direct hello"})
 	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "broadcast hello"})
 	d.dispatch(Request{Op: "sub", As: "bob", Topic: "eng"})
@@ -546,6 +697,8 @@ func TestDispatchSendBroadcastPubAllJournal(t *testing.T) {
 // log defaults to the caller's own room, matching Ps/Broadcast.
 func TestDispatchLogScopesToCallerRoomByDefault(t *testing.T) {
 	d := newTestDaemonWithJournal(t)
+	d.broker.RegisterOwned(agentKey("A", "bob"), "", false)
+	d.broker.RegisterOwned(agentKey("B", "dave"), "", false)
 	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "A", Body: "room A message"})
 	d.dispatch(Request{Op: "send", As: "carol", To: "dave", Room: "B", Body: "room B message"})
 
