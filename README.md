@@ -409,10 +409,10 @@ under `~/.mess/` (see [The daemon](#the-daemon)); to start clean, `mess stop` an
 No permission rules are needed if your settings use `"defaultMode": "dontAsk"`;
 otherwise allow `Bash(mess *)`.
 
-**Grok Build** — same network; full auto-wake only on a Grok Build **fork** that
-implements Claude's `asyncRewake` Stop hooks (stock Grok does not). Launch with
-`MESS_AGENT=alice grok`, drop hooks under `~/.grok/hooks/` — full setup in
-[Grok Build](#grok-build).
+**Grok Build** — same network; full auto-wake needs a Grok Build that implements
+Claude's `asyncRewake` Stop hooks (not in stock/upstream; see the local patch
+fork). Launch with `MESS_AGENT=alice grok`, drop hooks under `~/.grok/hooks/` —
+full setup in [Grok Build](#grok-build).
 
 **Codex CLI** — same network, but **no** auto-wake; see [Codex CLI](#codex-cli).
 
@@ -770,11 +770,15 @@ achieves the same presence without the hook plumbing.
 
 `mess` is agent-agnostic, so **Grok Build** sessions join the same network as
 Claude Code and Codex. Identity, busy/status hooks, and mid-turn steer work on
-stock Grok; **auto-wake does not** — Claude Code's `asyncRewake` Stop-hook fields
-are only implemented in a **local Grok Build fork** (not upstream/stock). On stock
-Grok the session is still fully reachable — peers `mess send` to it and mail
-**queues** — but the agent only sees it when it runs `mess recv` itself (same
-shape as [Codex CLI](#codex-cli)).
+stock Grok; **auto-wake** needs Claude Code's `asyncRewake` Stop-hook fields,
+which are **not in upstream/stock Grok Build** (that tree does not accept
+external PRs). A working patch lives on the
+[`async-rewake`](https://github.com/malformed-c/grok-build/tree/async-rewake)
+branch of [`malformed-c/grok-build`](https://github.com/malformed-c/grok-build)
+— build from that for Claude-parity auto-wake. On stock Grok the session is
+still fully reachable — peers `mess send` to it and mail **queues** — but the
+agent only sees it when it runs `mess recv` itself (same shape as
+[Codex CLI](#codex-cli)).
 
 Setup:
 
@@ -808,7 +812,7 @@ Setup:
 
 4. **Activate.** New sessions load hooks automatically. After adding/changing
    hooks, start a new session (or reload via `/hooks`) and send one prompt so
-   status hooks (and, on a fork with `asyncRewake`, the parked listener) arm.
+   status hooks (and, when `asyncRewake` is available, the parked listener) arm.
    Confirm with `mess whoami` / `mess ps`.
 
 ### Grok hooks (`~/.grok/hooks/mess.json`)
@@ -817,10 +821,11 @@ Uses an absolute path to the binary when hooks run with a minimal `PATH`
 (adjust to yours). Each command exports `MESS_SESSION_ID` from `GROK_SESSION_ID`
 so identity resolves even if a hook script only forwards `MESS_*`.
 
-On **stock Grok**, keep the busy/unbusy/steer/notify hooks and **omit** the
-`asyncRewake` Stop entry (or leave it — unknown fields are ignored, but a long
-parked `mess-wake.sh` is useless without rewake). On a **fork with
-`asyncRewake`**, include the full Stop block so auto-wake matches Claude Code.
+On **stock Grok** (no rewake), keep the busy/unbusy/steer/notify hooks and
+**omit** the `asyncRewake` Stop entry (or leave it — unknown fields are ignored,
+but a long parked `mess-wake.sh` is useless without rewake). With a build that
+implements `asyncRewake` (e.g. the fork branch above), include the full Stop
+block so auto-wake matches Claude Code.
 
 ```json
 {
@@ -877,11 +882,12 @@ What each piece does (same roles as [Claude Code integration](#claude-code-integ
 - **UserPromptSubmit / PreToolUse → `mess busy`** and **Stop → `mess unbusy`** —
   accurate `working` / `listening` / `idle` in `mess ps`.
 - **Stop → auto-wake** (`asyncRewake`, [`hooks/mess-wake.sh`](hooks/mess-wake.sh)) —
-  **fork only.** Parks with peek, injects peer mail on wake via stderr +
-  `rewakeMessage`. Keep **`"timeout": 86400`** so the waiter isn't reaped after a
-  short default. On stock Grok this entry does nothing useful — drop it.
+  **needs rewake support in Grok.** Parks with peek, injects peer mail on wake
+  via stderr + `rewakeMessage`. Keep **`"timeout": 86400`** so the waiter isn't
+  reaped after a short default. On stock Grok this entry does nothing useful —
+  drop it (or build from the fork branch above).
 - **Steer** ([`hooks/mess-steer.sh`](hooks/mess-steer.sh)) — mid-turn unread-count
-  notice; on a fork with auto-wake it coordinates so a batch is announced once.
+  notice; with auto-wake it coordinates so a batch is announced once.
 - **StopFailure → notify only** — clears busy, `mess warn` + broadcast; does not
   re-arm auto-wake (same design as Claude).
 - **AskUserQuestion / ExitPlanMode → desktop notify** — hard blocks that aren't
@@ -890,12 +896,14 @@ What each piece does (same roles as [Claude Code integration](#claude-code-integ
 Every hook is guarded by `mess whoami`, so a session without an identity is a
 no-op.
 
-> **Auto-wake only on a Grok Build fork with `asyncRewake`.** Stock Grok has no
-> "wake the model" primitive for Stop hooks — mail still queues durably; the
-> agent must `mess recv` (or the skill's start-of-turn / `--wait` pattern). On a
-> fork that does implement rewake, the same rules as Claude apply: one receiver
-> per agent, no idle-broadcast wake storms, and `mess recv` if the body wasn't
-> already injected — see [Auto-wake](#auto-wake-the-key-pattern) and
+> **Auto-wake needs `asyncRewake` in Grok Build.** Stock/upstream does not ship
+> it (and does not accept external PRs); use
+> [`malformed-c/grok-build@async-rewake`](https://github.com/malformed-c/grok-build/tree/async-rewake)
+> for a build that does. On stock Grok, mail still queues durably and the agent
+> must `mess recv` (or the skill's start-of-turn / `--wait` pattern). With rewake
+> enabled, the same rules as Claude apply: one receiver per agent, no
+> idle-broadcast wake storms, and `mess recv` if the body wasn't already
+> injected — see [Auto-wake](#auto-wake-the-key-pattern) and
 > [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
 
 ## Field notes
