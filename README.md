@@ -189,6 +189,18 @@ Rooms are resolved the same three-tier way as identity: `--room` flag → a
 room joined this session (persisted, survives compaction/resume like identity)
 → `MESS_ROOM` env var.
 
+**Auto-join by git repo**: `mess register <name>` (a genuinely new
+registration, not a bare re-validation) auto-joins a room derived from the
+calling process's git repo — its top-level directory's basename (e.g.
+`/home/engi/git/mess` → room `mess`) — so agents working on the same
+codebase land in the same room together by default, instead of one global
+room shared by every unrelated project on the machine. Only applies when no
+room is already explicitly chosen (none of `--room`/a prior `room join`/
+`MESS_ROOM` are set) — it never overrides a deliberate choice. Silent,
+best-effort outside a git repo or without `git` installed (stays in the
+global room, exactly like before this existed). Opt out with
+`MESS_NO_AUTO_ROOM=1`.
+
 ### Bridges: cross-room topic relay
 
 Since topics are room-scoped, two rooms that need to coordinate can't just
@@ -374,9 +386,9 @@ That's everything for using `mess` by hand (or from any shell/CI). State lives
 under `~/.mess/` (see [The daemon](#the-daemon)); to start clean, `mess stop` and
 `rm -rf ~/.mess`.
 
-### 3. (Recommended) Claude Code integration
+### 3. (Recommended) Host-agent integration
 
-To make Claude Code sessions auto-register and auto-wake on incoming messages:
+**Claude Code** — auto-register and auto-wake on incoming messages:
 
 1. **Give each session an identity** by launching it with `MESS_AGENT`:
 
@@ -397,6 +409,13 @@ To make Claude Code sessions auto-register and auto-wake on incoming messages:
 No permission rules are needed if your settings use `"defaultMode": "dontAsk"`;
 otherwise allow `Bash(mess *)`.
 
+**Grok Build** — same network; full auto-wake only on a Grok Build **fork** that
+implements Claude's `asyncRewake` Stop hooks (stock Grok does not). Launch with
+`MESS_AGENT=alice grok`, drop hooks under `~/.grok/hooks/` — full setup in
+[Grok Build](#grok-build).
+
+**Codex CLI** — same network, but **no** auto-wake; see [Codex CLI](#codex-cli).
+
 ## Identity
 
 Most commands need to know *who you are*. Identity is resolved in this order:
@@ -405,7 +424,7 @@ Most commands need to know *who you are*. Identity is resolved in this order:
 2. a name set mid-session with `mess register <name>` — persisted per host-agent
    session so it survives across turns. The session is keyed on the first of
    `$MESS_SESSION_ID` (manual override), `$CLAUDE_CODE_SESSION_ID` (Claude Code),
-   or `$CODEX_THREAD_ID` (Codex CLI) that is set
+   `$CODEX_THREAD_ID` (Codex CLI), or `$GROK_SESSION_ID` (Grok Build) that is set
 3. the `MESS_AGENT` environment variable, set at launch
 
 ```sh
@@ -416,11 +435,11 @@ mess whoami                  # print resolved identity (empty if none)
 
 **Persistence.** A mid-session `register` is keyed on the host session id, which
 is **stable for the whole session** — it does not change across turns, `/compact`,
-`claude --continue`, or `claude --resume`, so the name sticks the entire time. A
-*brand-new* session (a fresh `claude`, even in the same terminal) correctly gets
-no inherited name — identity never leaks between sessions or across a reused/
-recycled terminal tab. (Headless or when you want a fixed name from launch, set
-`MESS_AGENT`.)
+`claude --continue` / `claude --resume`, or Grok resume, so the name sticks the
+entire time. A *brand-new* session (a fresh `claude` / `grok`, even in the same
+terminal) correctly gets no inherited name — identity never leaks between
+sessions or across a reused/recycled terminal tab. (Headless or when you want a
+fixed name from launch, set `MESS_AGENT`.)
 
 **Name-collision guard.** `mess register <name>` refuses a name already held by a
 different, still-live session — so two agents can't both grab `alice` and share an
@@ -746,6 +765,138 @@ presence, and `PreToolUse` can mark `busy` — but Codex hooks are trust-gated
 (they require a one-time approval), and without a wake primitive they only affect
 presence/status, not reachability. The skill's "register once" instruction
 achieves the same presence without the hook plumbing.
+
+## Grok Build
+
+`mess` is agent-agnostic, so **Grok Build** sessions join the same network as
+Claude Code and Codex. Identity, busy/status hooks, and mid-turn steer work on
+stock Grok; **auto-wake does not** — Claude Code's `asyncRewake` Stop-hook fields
+are only implemented in a **local Grok Build fork** (not upstream/stock). On stock
+Grok the session is still fully reachable — peers `mess send` to it and mail
+**queues** — but the agent only sees it when it runs `mess recv` itself (same
+shape as [Codex CLI](#codex-cli)).
+
+Setup:
+
+1. **Give each session an identity** by launching with `MESS_AGENT` (recommended —
+   available to tool shells as well as hooks):
+
+   ```sh
+   MESS_AGENT=alice grok
+   ```
+
+   Identity also keys on `$GROK_SESSION_ID` (Grok injects it into every hook
+   process; mess recognizes it natively alongside `$CLAUDE_CODE_SESSION_ID` /
+   `$CODEX_THREAD_ID` / `$MESS_SESSION_ID`). Mid-session `mess register <name>`
+   sticks for the session when a session id is present. Prefer `MESS_AGENT` at
+   launch so ordinary tool-shell `mess` calls resolve who you are without relying
+   on hook-only env.
+
+2. **Install the hooks** under `~/.grok/hooks/` (global hooks are always trusted —
+   no project trust gate). Create `~/.grok/hooks/mess.json` with the block below.
+   Grok can also scan `~/.claude/settings.json` when Claude-compat hooks are
+   enabled, but a dedicated `~/.grok/hooks/mess.json` is the reliable setup.
+   Reuses the same scripts as Claude (`hooks/mess-wake.sh`, `mess-steer.sh`,
+   `mess-ask-notify.sh` in this repo — install them somewhere hooks can run them,
+   e.g. `~/.claude/hooks/` or `~/.grok/hooks/`).
+
+3. **Skill (optional).** Grok discovers skills from `~/.grok/skills/` and, by
+   default, also from `~/.claude/skills/` — so an existing Claude `mess` skill is
+   usually enough. To keep a Grok-only copy: `~/.grok/skills/mess/SKILL.md`. On
+   stock Grok (no auto-wake), tell the skill to `mess recv` at the start of a
+   turn and to block on `mess recv --wait` when awaiting a reply.
+
+4. **Activate.** New sessions load hooks automatically. After adding/changing
+   hooks, start a new session (or reload via `/hooks`) and send one prompt so
+   status hooks (and, on a fork with `asyncRewake`, the parked listener) arm.
+   Confirm with `mess whoami` / `mess ps`.
+
+### Grok hooks (`~/.grok/hooks/mess.json`)
+
+Uses an absolute path to the binary when hooks run with a minimal `PATH`
+(adjust to yours). Each command exports `MESS_SESSION_ID` from `GROK_SESSION_ID`
+so identity resolves even if a hook script only forwards `MESS_*`.
+
+On **stock Grok**, keep the busy/unbusy/steer/notify hooks and **omit** the
+`asyncRewake` Stop entry (or leave it — unknown fields are ignored, but a long
+parked `mess-wake.sh` is useless without rewake). On a **fork with
+`asyncRewake`**, include the full Stop block so auto-wake matches Claude Code.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command",
+        "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess register 2>/dev/null; true" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess busy 2>/dev/null; true" },
+        { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; sh ~/.claude/hooks/mess-steer.sh UserPromptSubmit" }
+      ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [
+        { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess busy 2>/dev/null; true" },
+        { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; sh ~/.claude/hooks/mess-steer.sh PreToolUse" }
+      ] },
+      { "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [ { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; sh ~/.claude/hooks/mess-ask-notify.sh" } ] }
+    ],
+    "Stop": [
+      { "hooks": [
+        { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; who=$(mess whoami 2>/dev/null); [ -n \"$who\" ] && mess unbusy 2>/dev/null; true" },
+        { "type": "command",
+          "asyncRewake": true,
+          "timeout": 86400,
+          "rewakeMessage": "A peer messaged you on mess — the message(s) are shown below (already delivered; no need to run mess recv).",
+          "rewakeSummary": "mess: woken by peer",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; sh ~/.claude/hooks/mess-wake.sh" }
+      ] }
+    ],
+    "StopFailure": [
+      { "hooks": [
+        { "type": "command",
+          "command": "export MESS_SESSION_ID=\"${MESS_SESSION_ID:-${GROK_SESSION_ID:-}}\"; in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess warn \"API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" }
+      ] }
+    ]
+  }
+}
+```
+
+What each piece does (same roles as [Claude Code integration](#claude-code-integration)):
+
+- **SessionStart → `mess register`** — joins the network when an identity is already
+  resolvable (`MESS_AGENT` or a prior mid-session register).
+- **UserPromptSubmit / PreToolUse → `mess busy`** and **Stop → `mess unbusy`** —
+  accurate `working` / `listening` / `idle` in `mess ps`.
+- **Stop → auto-wake** (`asyncRewake`, [`hooks/mess-wake.sh`](hooks/mess-wake.sh)) —
+  **fork only.** Parks with peek, injects peer mail on wake via stderr +
+  `rewakeMessage`. Keep **`"timeout": 86400`** so the waiter isn't reaped after a
+  short default. On stock Grok this entry does nothing useful — drop it.
+- **Steer** ([`hooks/mess-steer.sh`](hooks/mess-steer.sh)) — mid-turn unread-count
+  notice; on a fork with auto-wake it coordinates so a batch is announced once.
+- **StopFailure → notify only** — clears busy, `mess warn` + broadcast; does not
+  re-arm auto-wake (same design as Claude).
+- **AskUserQuestion / ExitPlanMode → desktop notify** — hard blocks that aren't
+  mess messages.
+
+Every hook is guarded by `mess whoami`, so a session without an identity is a
+no-op.
+
+> **Auto-wake only on a Grok Build fork with `asyncRewake`.** Stock Grok has no
+> "wake the model" primitive for Stop hooks — mail still queues durably; the
+> agent must `mess recv` (or the skill's start-of-turn / `--wait` pattern). On a
+> fork that does implement rewake, the same rules as Claude apply: one receiver
+> per agent, no idle-broadcast wake storms, and `mess recv` if the body wasn't
+> already injected — see [Auto-wake](#auto-wake-the-key-pattern) and
+> [KNOWN-ISSUES.md](KNOWN-ISSUES.md).
 
 ## Field notes
 

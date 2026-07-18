@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,7 +22,10 @@ Usage:
 
 Identity:
   mess register [name]            join the network; with a name, set this
-                                  session's identity (persists across turns)
+                                  session's identity (persists across turns);
+                                  auto-joins a room derived from the calling
+                                  git repo if no room is already chosen (see
+                                  Rooms below; opt out with MESS_NO_AUTO_ROOM=1)
   mess unregister                 leave the network and clear this session's
                                   identity (inverse of register)
   mess rename [--force] <name>    rename yourself, migrating your inbox and
@@ -790,6 +794,29 @@ func cmdRoomBridges(p paths, args []string) error {
 	return nil
 }
 
+// detectRepoRoom auto-derives a room name from dir's git repo (its top-level
+// directory's basename), so agents working in the same codebase naturally
+// land in the same room together instead of the noisy global one by default
+// — a real problem in practice: dozens of unrelated agents across unrelated
+// projects sharing one global room makes `mess ps`/`recv` mostly noise for
+// any one of them. Best-effort and silent on failure (not a git repo, git
+// not installed, etc.) — this must never break `mess register` itself.
+// Opt out with MESS_NO_AUTO_ROOM=1.
+func detectRepoRoom(dir string) string {
+	if os.Getenv("MESS_NO_AUTO_ROOM") != "" {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	top := strings.TrimSpace(string(out))
+	if top == "" {
+		return ""
+	}
+	return filepath.Base(top)
+}
+
 func cmdRegister(p paths, args []string) error {
 	fs, as := newFlags("register")
 	force := fs.Bool("force", false, "take over a name already held by another live session")
@@ -816,6 +843,24 @@ func cmdRegister(p paths, args []string) error {
 			return err
 		}
 	}
+
+	// Auto-join a room derived from the calling git repo — but only for a
+	// genuinely new registration (not a bare re-validation) and only when no
+	// room is already explicitly chosen (--room / a prior `room join` /
+	// MESS_ROOM), so this never overrides a deliberate choice. Best-effort:
+	// a detection or join failure just falls back to plain registration,
+	// never breaks it.
+	if newName != "" && resolveRoom(p, "") == "" {
+		if room := detectRepoRoom("."); room != "" {
+			if _, err := call(p, Request{Op: "room-join", As: name, Room: room}); err == nil {
+				if err := writeRoom(p, room); err == nil {
+					fmt.Printf("registered as %s (auto-joined room %q — detected from this git repo)\n", name, room)
+					return nil
+				}
+			}
+		}
+	}
+
 	fmt.Printf("registered as %s\n", name)
 	return nil
 }

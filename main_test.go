@@ -4,10 +4,50 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// --- detectRepoRoom ---
+//
+// mess register auto-joins a room derived from the calling git repo, so
+// agents working on the same codebase naturally group together instead of
+// sharing one noisy global room by default.
+
+func TestDetectRepoRoomInsideGitRepo(t *testing.T) {
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Skipf("git not available: %v: %s", err, out)
+	}
+	got := detectRepoRoom(dir)
+	want := filepath.Base(dir)
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		want = filepath.Base(resolved)
+	}
+	if got != want {
+		t.Fatalf("detectRepoRoom(%q) = %q, want %q", dir, got, want)
+	}
+}
+
+func TestDetectRepoRoomOutsideGitRepo(t *testing.T) {
+	dir := t.TempDir() // no `git init` — not a repo
+	if got := detectRepoRoom(dir); got != "" {
+		t.Fatalf("expected no room outside a git repo, got %q", got)
+	}
+}
+
+func TestDetectRepoRoomRespectsOptOut(t *testing.T) {
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Skipf("git not available: %v: %s", err, out)
+	}
+	t.Setenv("MESS_NO_AUTO_ROOM", "1")
+	if got := detectRepoRoom(dir); got != "" {
+		t.Fatalf("expected MESS_NO_AUTO_ROOM to suppress detection, got %q", got)
+	}
+}
 
 // --- bodyFrom --file ---
 //
