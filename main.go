@@ -46,23 +46,34 @@ Sending:
                                   mailbox: desktop-notifies, read via recv --as user)
                                   (--thread ID replies within a thread)
                                   (--attach PATH records a file's path + hash)
+                                  (--file PATH reads the body from a file —
+                                  use this, not args, for text with backticks/
+                                  $()/etc.: the calling shell expands those in
+                                  a quoted arg before mess ever sees it)
   mess broadcast [body...]        send to every known agent in your room (plain
                                   broadcasts don't wake the standard --no-broadcast
                                   auto-wake hook; --loud bypasses that, goes
                                   host-wide across rooms, and desktop-notifies the
                                   human operator; --loud-room does the same but
                                   stays scoped to your own room)
+                                  (--file PATH reads the body from a file)
   mess pub <topic> [body...]      publish to a topic (@mention wakes only the
                                   tagged subscribers; the rest still receive it)
                                   (--thread ID replies within a thread — quiet
                                   unless @mentioned or already a participant)
+                                  (--attach PATH / --file PATH as above)
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
   mess ask <agent> [q...]         send a question, wait for the reply (a plain
-                                  mess reply answers it); --async prints a
-                                  token immediately instead of waiting
+                                  mess reply answers it); prints the token up
+                                  front, before waiting, so it's recoverable
+                                  via mess await even if something outside
+                                  mess (e.g. a wrapping shell/tool timeout)
+                                  kills the wait early; --async prints the
+                                  token and returns immediately instead
+                                  (--file PATH reads the question from a file)
   mess await <token>              wait for an ask's reply later (the token
-                                  mess ask --async / a timed-out mess ask printed)
+                                  mess ask printed, async or not)
 
 Receiving and threads:
   mess recv [duration]            receive queued messages (--thread ID shows
@@ -70,12 +81,15 @@ Receiving and threads:
   mess listen [idle-timeout]      run continuously (bg): print messages as they
                                   arrive until interrupted (alias: recv --follow)
   mess replay [N]                 reprint the last N messages you already consumed
-                                  (recover a message lost to a dropped wake)
+                                  (recover a message lost to a dropped wake);
+                                  a bounded recent window only, no filters —
+                                  for --since/--from/--grep use "mess log"
   mess reply [body...]            reply to the most recent message (or continue
                                   the open thread — see "mess thread close");
                                   no need to know/pass a message id
                                   (--thread ID replies to that specific
                                   message/thread instead, overriding the above)
+                                  (--file PATH reads the body from a file)
   mess thread close                end the thread "mess reply" is continuing;
                                   the next reply starts a fresh one
   mess thread list                 list threads you've seen activity in
@@ -273,8 +287,26 @@ func resolveRoom(p paths, flagVal string) string {
 	return ""
 }
 
-// bodyFrom joins remaining args as the body, or reads stdin when none given.
-func bodyFrom(args []string) (string, error) {
+// bodyFrom joins remaining args as the body, reads filePath when given, or
+// reads stdin when neither is given. A file (or stdin/heredoc) is the only
+// way to pass text containing backticks/$()/etc. unmodified: by the time
+// mess ever sees a quoted positional arg, the CALLING shell has already
+// expanded any command substitution inside it — e.g. a body arg containing
+// "`go build ./...` exits 0" runs that command locally and splices its
+// stdout into the message before mess reads argv at all. mess itself can't
+// detect this after the fact (the original backticks are already gone), so
+// --file sidesteps the shell entirely instead of trying to.
+func bodyFrom(args []string, filePath string) (string, error) {
+	if filePath != "" {
+		if len(args) > 0 {
+			return "", fmt.Errorf("--file conflicts with a body given on the command line — use one or the other")
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("--file %s: %w", filePath, err)
+		}
+		return strings.TrimRight(string(data), "\n"), nil
+	}
 	if len(args) > 0 {
 		return strings.Join(args, " "), nil
 	}
@@ -386,17 +418,18 @@ func cmdSend(p paths, args []string) error {
 	timeout := fs.String("timeout", "", "ack wait timeout (e.g. 30s); default: wait forever")
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output)")
 	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
+	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] <to> [body...]")
+		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] [--file PATH] <to> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
 	to := rest[0]
-	body, err := bodyFrom(rest[1:])
+	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
 	}
@@ -427,35 +460,51 @@ func cmdAsk(p paths, args []string) error {
 	fs, as := newFlags("ask")
 	timeout := fs.String("timeout", "", "how long to wait for a reply; default: wait forever")
 	async := fs.Bool("async", false, "don't wait — print the token immediately for a later `mess await`")
+	file := fs.String("file", "", "read the question from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] <agent> [question...]")
+		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] [--file PATH] <agent> [question...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
 	to := rest[0]
-	body, err := bodyFrom(rest[1:])
+	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
 	}
-	req := Request{Op: "ask", As: from, To: to, Body: body, Wait: !*async, Timeout: *timeout}
-	dispatch := call
-	if req.Wait {
-		dispatch = callWait
-	}
-	resp, err := dispatch(p, req)
+	// Always create the ask with a non-blocking round trip first, even
+	// though the default is to then wait for the reply — this is what lets
+	// the token be printed BEFORE any blocking starts. A real incident: a
+	// wrapping timeout (the caller's own shell/tool timeout, not --timeout)
+	// killed a blocking `mess ask` mid-wait; the peer's reply still landed
+	// in the asker's inbox, but with nothing printed yet, there was no
+	// breadcrumb pointing at `mess await <token>` — the asker only found the
+	// answer later, by accident, on the next unrelated wake. Printing the
+	// token up front means it survives in the caller's own output even if
+	// the process is killed a moment later, regardless of signal.
+	resp, err := call(p, Request{Op: "ask", As: from, To: to, Body: body, Wait: false})
 	if err != nil {
 		return err
 	}
+	token := resp.ID
 	if *async {
-		fmt.Printf("asked %s (token %s) — run `mess await %s` for the reply\n", to, resp.ID, resp.ID)
+		fmt.Printf("asked %s (token %s) — run `mess await %s` for the reply\n", to, token, token)
 		return nil
 	}
+	fmt.Printf("asked %s (token %s) — if this is interrupted, `mess await %s` picks up the reply\n", to, token, token)
+	if len(resp.Messages) > 0 {
+		printMessages(resp.Messages, false)
+		return nil
+	}
+	resp, err = callWait(p, Request{Op: "await", As: from, ThreadID: token, Wait: true, Timeout: *timeout})
+	if err != nil {
+		return err
+	}
 	if len(resp.Messages) == 0 {
-		fmt.Printf("no reply yet (token %s) — run `mess await %s` to keep waiting\n", resp.ID, resp.ID)
+		fmt.Printf("no reply yet (token %s) — run `mess await %s` to keep waiting\n", token, token)
 		return nil
 	}
 	printMessages(resp.Messages, false)
@@ -493,6 +542,7 @@ func cmdBroadcast(p paths, args []string) error {
 	fs, as := newFlags("broadcast")
 	loud := fs.Bool("loud", false, "wake every recipient host-wide (crosses room boundaries) even if their auto-wake hook filters out broadcasts (--no-broadcast), and desktop-notify the human operator too")
 	loudRoom := fs.Bool("loud-room", false, "like --loud, but stays scoped to your own room instead of going host-wide")
+	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	parseAnywhere(fs, args)
 	if *loud && *loudRoom {
 		return fmt.Errorf("--loud and --loud-room are mutually exclusive")
@@ -501,7 +551,7 @@ func cmdBroadcast(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	body, err := bodyFrom(fs.Args())
+	body, err := bodyFrom(fs.Args(), *file)
 	if err != nil {
 		return err
 	}
@@ -517,16 +567,17 @@ func cmdPub(p paths, args []string) error {
 	fs, as := newFlags("pub")
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output) — quiet-delivered to everyone except an @mention or existing participant")
 	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
+	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	parseAnywhere(fs, args)
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess pub [--thread ID] [--attach PATH] <topic> [body...]")
+		return fmt.Errorf("usage: mess pub [--thread ID] [--attach PATH] [--file PATH] <topic> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
-	body, err := bodyFrom(rest[1:])
+	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
 	}
@@ -894,7 +945,7 @@ func cmdState(p paths, args []string) error {
 	}
 	state := ""
 	if !*clear {
-		if state, err = bodyFrom(fs.Args()); err != nil {
+		if state, err = bodyFrom(fs.Args(), ""); err != nil {
 			return err
 		}
 	}
@@ -923,7 +974,7 @@ func cmdWarn(p paths, args []string) error {
 	}
 	text := ""
 	if !*clear {
-		if text, err = bodyFrom(fs.Args()); err != nil {
+		if text, err = bodyFrom(fs.Args(), ""); err != nil {
 			return err
 		}
 	}
@@ -980,6 +1031,28 @@ func cmdDrain(p paths, args []string) error {
 	return nil
 }
 
+// parseReplayCount reads replay's one optional positional (a plain count).
+// `mess replay` has no registered flags of its own, so parseAnywhere leaves
+// any dash-token untouched as literal positional text (by design — real
+// message text can start with "-"); an unrecognized flag like `--since 3d`
+// silently became rest[0]="--since", producing a baffling "invalid count
+// \"--since\"" with no hint that replay never supported time-range filters
+// at all (`mess log --since` does, against the unbounded journal — replay
+// only ever shows a bounded recent window). This gives that case a clear,
+// actionable error instead.
+func parseReplayCount(rest []string) (int, error) {
+	if len(rest) == 0 {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(rest[0])
+	if err != nil {
+		return 0, fmt.Errorf("mess replay takes a plain count (e.g. `mess replay 20`), not %q — "+
+			"it only ever shows a bounded recent window, with no query filters; "+
+			"for a time range (e.g. --since 3d) or other filters, use `mess log` instead", rest[0])
+	}
+	return n, nil
+}
+
 // cmdReplay reprints the last messages this agent already consumed (from a
 // bounded history) — a recovery path if a consume-on-wake injection was dropped.
 // `mess replay` shows the whole history; `mess replay N` the last N.
@@ -991,11 +1064,9 @@ func cmdReplay(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	n := 0
-	if rest := fs.Args(); len(rest) > 0 {
-		if n, err = strconv.Atoi(rest[0]); err != nil {
-			return fmt.Errorf("invalid count %q", rest[0])
-		}
+	n, err := parseReplayCount(fs.Args())
+	if err != nil {
+		return err
 	}
 	resp, err := call(p, Request{Op: "replay", As: name, Max: n})
 	if err != nil {
@@ -1017,8 +1088,9 @@ func cmdReplay(p paths, args []string) error {
 func cmdReply(p paths, args []string) error {
 	fs, as := newFlags("reply")
 	thread := fs.String("thread", "", "reply to this specific message/thread id instead of the last-seen message or open thread")
+	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	parseAnywhere(fs, args)
-	body, err := bodyFrom(fs.Args())
+	body, err := bodyFrom(fs.Args(), *file)
 	if err != nil {
 		return err
 	}
@@ -1039,6 +1111,10 @@ func cmdReply(p paths, args []string) error {
 	}
 
 	if open, ok := readOpenThread(p); ok {
+		last, hasLast := readLastMsg(p)
+		if warn := staleOpenThreadWarning(open, last, hasLast); warn != "" {
+			fmt.Fprint(os.Stderr, warn)
+		}
 		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body)
 	}
 

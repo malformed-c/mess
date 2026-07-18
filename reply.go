@@ -121,3 +121,24 @@ func clearOpenThread(p paths) error {
 	}
 	return nil
 }
+
+// staleOpenThreadWarning flags the case that silently misrouted a real reply:
+// an old open thread left open (no `mess thread close`) while a newer,
+// unrelated direct/topic message has since arrived. A bare `mess reply` would
+// keep answering the stale thread with no indication anything's off — this
+// surfaces it instead of leaving the mismatch invisible. Returns "" when
+// there's nothing to warn about (no last-seen message, or it's the same
+// thread the open one already tracks).
+func staleOpenThreadWarning(open openThreadInfo, last lastMsgInfo, hasLast bool) string {
+	if !hasLast || last.ID == open.ThreadID {
+		return ""
+	}
+	where := fmt.Sprintf("a direct message from %s", last.From)
+	if last.Kind == KindTopic {
+		where = fmt.Sprintf("a message in #%s", last.Topic)
+	}
+	return fmt.Sprintf(
+		"warning: replying in open thread %s, but the most recent message you received was %s (%s) — "+
+			"if you meant to answer that, use `mess reply --thread %s` or run `mess thread close` first\n",
+		open.ThreadID, last.ID, where, last.ID)
+}

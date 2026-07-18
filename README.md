@@ -77,6 +77,20 @@ side needs no new command: a plain `mess reply` after receiving the ask
 already threads back to it. "Answered" is just "a reply arrived in that
 thread" — the same thing `mess recv --thread <id>` already shows.
 
+Even a blocking (non-`--async`) `ask` prints its token *before* it starts
+waiting — `asked bob (token m42) — if this is interrupted, mess await m42
+picks up the reply` — rather than only after the wait resolves. This is what
+makes the token recoverable if something *outside* mess kills the wait early
+(a real incident: a caller's own wrapping shell/tool timeout — shorter than
+`mess ask --timeout`, or `mess ask` run with no `--timeout` at all — killed
+the process mid-wait; the peer's reply still landed in the asker's inbox, but
+with no token ever printed there was nothing to `mess await` by, so the
+asker only found the answer by accident on a later, unrelated wake). Under
+the hood this is two round trips (create, then wait) instead of one, so the
+token is known and printed before any blocking begins — invisible in normal
+use, but it means the breadcrumb survives regardless of what signal killed
+the process, not just a catchable one.
+
 `mess ask` fails immediately, with a clear error, against a recipient that
 can't plausibly answer right now — unlike a plain `send`/`pub`, which
 deliberately stays fire-and-forget (a message can wait for someone who hasn't
@@ -126,6 +140,12 @@ direct message via `send`) automatically. Once it opens a thread it keeps
 replying there on every subsequent call — regardless of what else arrives in
 the meantime — until you `mess thread close`; use `--thread <id>` directly on
 `send`/`pub` instead if you want a one-off reply without touching that state.
+If a newer, unrelated direct/topic message has arrived since that thread was
+opened, a bare `mess reply` still answers the *old* thread (it never silently
+switches targets) but prints a warning naming both ids and how to fix it
+(`--thread <id>` or `mess thread close`) — this is the actual fix for a real
+incident where a stale open thread silently swallowed the answer to a fresh
+`mess ask`, so the asker timed out despite a good reply existing.
 
 `mess reply --thread <id> "text"` explicitly targets a specific message/
 thread id instead of the implicit last-seen/open-thread tracking above (and
@@ -235,6 +255,43 @@ in text; the full untruncated hash in JSON). A missing/unreadable file is a
 hard error — unlike a missing `notify-send`, a wrong attachment reference is a
 correctness bug, so it's caught before any daemon round trip.
 
+## Backticks and `$()` in a message body
+
+A body passed as a quoted command-line argument is subject to the *calling*
+shell's own expansion — inside a double-quoted arg, bash still runs backticks
+and `$()` as command substitution before mess ever sees the string. So e.g.
+`mess send bob "the `exempt` FlowSchema"` doesn't send that text at all: bash
+tries to run `exempt` as a command, and the (empty, "command not found")
+output gets spliced in — mess only ever sees the corrupted result, silently.
+This is a shell-side effect entirely upstream of mess, so mess can't detect
+or repair it after the fact (the original backticks are already gone by the
+time argv is read).
+
+**Fix: escape it.** Inside a double-quoted string, bash treats `` \` `` (a
+backslash before the backtick) as a literal backtick — no command
+substitution:
+
+```
+mess send bob "the \`exempt\` FlowSchema"     # literal backticks, sent as-is
+```
+
+Same idea for a literal `$`: escape it as `\$`. This is a shell-quoting rule,
+not a mess flag — it's how you'd escape backticks in any double-quoted bash
+string, mess or not.
+
+For a body with heavy/awkward quoting (or multi-line content) where escaping
+every special character gets unwieldy, `mess send`/`ask`/`broadcast`/`pub`/
+`reply --file <path>` reads the body straight from disk instead, sidestepping
+shell expansion entirely:
+
+```
+mess send bob --file /tmp/status.txt
+mess ask trail-main-cli --file /tmp/question.txt
+```
+
+`--file` conflicts with also giving a body argument (pick one); it composes
+normally with `--attach`/`--thread`.
+
 ## Log
 
 `export`/`recv`/`replay` all only ever see a *bounded* recent window (the
@@ -254,6 +311,14 @@ mess log --format json --out audit.jsonl
 
 Combine filters freely (`--from`+`--grep`+`--since` all apply together). Like
 `ps`/`export`, scoped to your own room by default; `--all` crosses rooms.
+
+`mess replay` only ever takes a plain count (`mess replay 20`) — it has no
+`--since`/`--from`/`--grep` of its own, since it's just a recent-window
+recovery tool, not a query engine. Passing one of those (e.g. `mess replay
+--since 3d`) used to fail with a baffling `invalid count "--since"`, since
+the unrecognized flag silently fell through to the count parser; it now
+errors clearly and points at `mess log` instead, which is what actually
+supports these filters.
 
 ## Backlog TTL and roster hygiene
 

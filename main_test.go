@@ -9,6 +9,48 @@ import (
 	"testing"
 )
 
+// --- bodyFrom --file ---
+//
+// The actual fix for a real papercut: a message body containing backticks
+// (very common — pasting `go build ./...`, file/cmd names) gets command-
+// substituted by the SENDER's own shell before mess ever sees the arg, so
+// the peer receives a silently mangled message and the sender's shell runs
+// an arbitrary local command. mess can't detect this after the fact (the
+// original backticks are already gone by the time argv is read) — --file
+// sidesteps the shell entirely by reading the body straight off disk.
+
+func TestBodyFromReadsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "body.txt")
+	if err := os.WriteFile(path, []byte("contains `backticks` and $(command) literally\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := bodyFrom(nil, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "contains `backticks` and $(command) literally" {
+		t.Fatalf("expected the file's literal content (trailing newline trimmed), got %q", got)
+	}
+}
+
+func TestBodyFromErrorsOnMissingFile(t *testing.T) {
+	if _, err := bodyFrom(nil, filepath.Join(t.TempDir(), "nope.txt")); err == nil {
+		t.Fatal("expected an error for a missing --file path")
+	}
+}
+
+func TestBodyFromRejectsFileAndArgsTogether(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "body.txt")
+	if err := os.WriteFile(path, []byte("from file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bodyFrom([]string{"also", "on", "argv"}, path); err == nil {
+		t.Fatal("expected an error when both --file and a body argument are given")
+	}
+}
+
 func TestSetAttachComputesHashAndStat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
@@ -108,6 +150,45 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
+// --- mess replay count parsing ---
+//
+// Real bug: `mess replay --since 3d` produced "invalid count \"--since\"" —
+// replay has no registered --since flag, so parseAnywhere's documented
+// "unknown dash-tokens are literal text" behavior left it as a positional,
+// which then failed Atoi with a baffling message. mess log DOES support
+// --since (against the unbounded journal); replay only ever shows a bounded
+// recent window. Fixed by giving that specific failure mode a clear error.
+
+func TestParseReplayCountAcceptsPlainNumber(t *testing.T) {
+	n, err := parseReplayCount([]string{"20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 20 {
+		t.Fatalf("expected 20, got %d", n)
+	}
+}
+
+func TestParseReplayCountDefaultsToZeroWithNoArgs(t *testing.T) {
+	n, err := parseReplayCount(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 (whole history), got %d", n)
+	}
+}
+
+func TestParseReplayCountErrorsClearlyOnUnsupportedFlag(t *testing.T) {
+	_, err := parseReplayCount([]string{"--since", "3d"})
+	if err == nil {
+		t.Fatal("expected an error for an unsupported flag like --since")
+	}
+	if !strings.Contains(err.Error(), "mess log") {
+		t.Fatalf("expected the error to point at `mess log` for filtered queries, got %q", err.Error())
+	}
+}
+
 // --- mess reply --thread routing ---
 
 // The empty case is the original bug's fix: an unknown/empty thread must
@@ -173,5 +254,40 @@ func TestRouteFromThreadMessagesFallbackUsesOtherParty(t *testing.T) {
 	}
 	if kind != KindDirect || to != "alice" {
 		t.Fatalf("expected to route to alice (the other party), got kind=%q to=%q", kind, to)
+	}
+}
+
+// --- stale open thread warning ---
+//
+// Root cause of a real incident: an agent had an old open thread (never
+// `mess thread close`d) and received a brand new, unrelated ask. A bare
+// `mess reply` kept posting into the STALE thread with zero indication
+// anything was wrong, so the asker's `mess ask` timed out despite a good
+// answer existing — just on the wrong thread.
+
+func TestStaleOpenThreadWarningFiresWhenLastMsgIsADifferentThread(t *testing.T) {
+	open := openThreadInfo{ThreadID: "m4320", Kind: KindDirect, To: "alice"}
+	last := lastMsgInfo{ID: "m4384", Kind: KindDirect, From: "bob"}
+	warn := staleOpenThreadWarning(open, last, true)
+	if warn == "" {
+		t.Fatal("expected a warning when the open thread differs from the most recently received message")
+	}
+	if !strings.Contains(warn, "m4320") || !strings.Contains(warn, "m4384") || !strings.Contains(warn, "--thread m4384") {
+		t.Fatalf("expected the warning to name both threads and the fix, got %q", warn)
+	}
+}
+
+func TestStaleOpenThreadWarningSilentWhenSameThread(t *testing.T) {
+	open := openThreadInfo{ThreadID: "m1", Kind: KindDirect, To: "alice"}
+	last := lastMsgInfo{ID: "m1", Kind: KindDirect, From: "alice"}
+	if warn := staleOpenThreadWarning(open, last, true); warn != "" {
+		t.Fatalf("expected no warning when continuing the same thread, got %q", warn)
+	}
+}
+
+func TestStaleOpenThreadWarningSilentWithNoLastMsg(t *testing.T) {
+	open := openThreadInfo{ThreadID: "m1", Kind: KindDirect, To: "alice"}
+	if warn := staleOpenThreadWarning(open, lastMsgInfo{}, false); warn != "" {
+		t.Fatalf("expected no warning with no last-seen message, got %q", warn)
 	}
 }
