@@ -28,8 +28,14 @@ func withSession(req Request) Request {
 // what makes rooms ambient: send/broadcast/pub/sub/recv/etc. all transparently
 // inherit the caller's joined room with no per-command flag, since every call
 // site already routes through call/callWait/callStream.
+//
+// req.Global skips the auto-fill, leaving Room=="" as an explicit choice
+// rather than "unset" — without it, an empty Room is ambiguous: it could
+// mean "target the global room" or "no override, fall back to ambient",
+// and there was no way to ask for the former. Set by send/ask's --global
+// flag.
 func withRoom(p paths, req Request) Request {
-	if req.Room == "" {
+	if req.Room == "" && !req.Global {
 		req.Room = resolveRoom(p, "")
 	}
 	return req

@@ -49,6 +49,63 @@ func TestDetectRepoRoomRespectsOptOut(t *testing.T) {
 	}
 }
 
+// mess.json's "room" key overrides the repo directory's basename — for a
+// repo whose directory name isn't the room you want, or several repos that
+// should share one room.
+func TestDetectRepoRoomHonorsMessJSONOverride(t *testing.T) {
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Skipf("git not available: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{"room":"custom-room"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectRepoRoom(dir); got != "custom-room" {
+		t.Fatalf("expected mess.json's room override, got %q", got)
+	}
+}
+
+// A malformed mess.json must not break registration itself — falls back to
+// the directory basename (the warning it also prints isn't checked here,
+// only that detectRepoRoom still returns something usable).
+func TestDetectRepoRoomFallsBackOnMalformedMessJSON(t *testing.T) {
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Skipf("git not available: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Base(dir)
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		want = filepath.Base(resolved)
+	}
+	if got := detectRepoRoom(dir); got != want {
+		t.Fatalf("expected fallback to the directory basename %q, got %q", want, got)
+	}
+}
+
+func TestReadRepoConfigMissingFileIsNotAnError(t *testing.T) {
+	cfg, err := readRepoConfig(filepath.Join(t.TempDir(), "mess.json"))
+	if err != nil {
+		t.Fatalf("a missing mess.json should not be an error, got %v", err)
+	}
+	if cfg.Room != "" {
+		t.Fatalf("expected an empty config, got %+v", cfg)
+	}
+}
+
+func TestReadRepoConfigMalformedFileIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mess.json")
+	if err := os.WriteFile(path, []byte(`{not valid json`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRepoConfig(path); err == nil {
+		t.Fatal("expected a malformed mess.json to be a hard error, not silently ignored")
+	}
+}
+
 // --- bodyFrom --file ---
 //
 // The actual fix for a real papercut: a message body containing backticks

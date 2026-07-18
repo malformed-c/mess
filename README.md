@@ -191,15 +191,27 @@ room joined this session (persisted, survives compaction/resume like identity)
 
 **Auto-join by git repo**: `mess register <name>` (a genuinely new
 registration, not a bare re-validation) auto-joins a room derived from the
-calling process's git repo — its top-level directory's basename (e.g.
-`/home/engi/git/mess` → room `mess`) — so agents working on the same
-codebase land in the same room together by default, instead of one global
-room shared by every unrelated project on the machine. Only applies when no
-room is already explicitly chosen (none of `--room`/a prior `room join`/
-`MESS_ROOM` are set) — it never overrides a deliberate choice. Silent,
-best-effort outside a git repo or without `git` installed (stays in the
-global room, exactly like before this existed). Opt out with
-`MESS_NO_AUTO_ROOM=1`.
+calling process's git repo — its top-level directory's basename by default
+(e.g. `/home/engi/git/mess` → room `mess`), or the `"room"` key of a
+`mess.json` file at the repo's top level if one exists (for a repo whose
+directory name isn't the room you want, or several repos that should share
+one room):
+
+```json
+{ "room": "custom-room-name" }
+```
+
+so agents working on the same codebase land in the same room together by
+default, instead of one global room shared by every unrelated project on the
+machine. Only applies when no room is already explicitly chosen (none of
+`--room`/a prior `room join`/`MESS_ROOM` are set) — it never overrides a
+deliberate choice. Silent, best-effort outside a git repo, without `git`
+installed, or with no `mess.json` (stays in the global room, exactly like
+before this existed) — a malformed `mess.json` is the one case that prints a
+warning (it's a real mistake, not an absence of config), but `register`
+itself still succeeds, falling back to the directory basename, rather than
+blocking every session's auto-registration in that repo on one typo'd
+config file. Opt out entirely with `MESS_NO_AUTO_ROOM=1`.
 
 **Sending across rooms** — `mess send`/`mess ask <agent> --room NAME` messages
 an agent in a *different* room than your own, explicitly. This is the correct
@@ -217,6 +229,15 @@ never been registered *anywhere* is also rejected (with `send`, unlike `ask`,
 still allowing a *registered-but-currently-offline* recipient, since `send`
 doesn't block: "message waits for them to come back" is the intended
 fire-and-forget behavior there).
+
+`--room NAME` and `mess send`/`mess ask <agent> --global` are two different
+things: `--room` targets a *specific named* room, while `--global` targets
+the global room specifically — needed because an empty `Room` alone is
+ambiguous (it could mean "target global" or "no override, use my own
+ambient room"), so there was previously no way to explicitly reach the
+global room once you'd joined one; leaving `--room` unset always falls back
+to *your own* current room, never a forced global. `--room` and `--global`
+are mutually exclusive.
 
 **`mess room join`** migrates your existing identity (inbox, subscriptions,
 ownership) from whatever room you were previously in into the new one,

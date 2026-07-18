@@ -65,6 +65,11 @@ Sending:
                                   a name that exists only in another room is
                                   otherwise rejected with that room named,
                                   not silently duplicated in yours)
+                                  (--global targets the global room
+                                  specifically, even if you've joined one —
+                                  Room=="" alone can't tell "target global"
+                                  from "no override", so there was no way
+                                  to say this before)
   mess broadcast [body...]        send to every known agent in your room (plain
                                   broadcasts don't wake the standard --no-broadcast
                                   auto-wake hook; --loud bypasses that, goes
@@ -88,7 +93,8 @@ Sending:
                                   token and returns immediately instead
                                   (--file PATH reads the question from a file)
                                   (--room NAME asks an agent in a different
-                                  room than your own explicitly)
+                                  room than your own explicitly; --global
+                                  targets the global room specifically)
   mess await <token>              wait for an ask's reply later (the token
                                   mess ask printed, async or not)
 
@@ -437,10 +443,14 @@ func cmdSend(p paths, args []string) error {
 	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	room := fs.String("room", "", "message an agent in this room instead of your own (explicit cross-room send)")
+	global := fs.Bool("global", false, "message an agent in the global room, even if you're in one — Room==\"\" alone can't distinguish \"target global\" from \"no override\"")
 	parseAnywhere(fs, args)
+	if *room != "" && *global {
+		return fmt.Errorf("--room and --global are mutually exclusive")
+	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] [--file PATH] [--room NAME] <to> [body...]")
+		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] [--file PATH] [--room NAME | --global] <to> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -451,7 +461,7 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	req := Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread, Room: *room}
+	req := Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread, Room: *room, Global: *global}
 	if *attach != "" {
 		if err := setAttach(&req, *attach); err != nil {
 			return err
@@ -480,10 +490,14 @@ func cmdAsk(p paths, args []string) error {
 	async := fs.Bool("async", false, "don't wait — print the token immediately for a later `mess await`")
 	file := fs.String("file", "", "read the question from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	room := fs.String("room", "", "ask an agent in this room instead of your own (explicit cross-room ask)")
+	global := fs.Bool("global", false, "ask an agent in the global room, even if you're in one")
 	parseAnywhere(fs, args)
+	if *room != "" && *global {
+		return fmt.Errorf("--room and --global are mutually exclusive")
+	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] [--file PATH] [--room NAME] <agent> [question...]")
+		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] [--file PATH] [--room NAME | --global] <agent> [question...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -504,7 +518,7 @@ func cmdAsk(p paths, args []string) error {
 	// answer later, by accident, on the next unrelated wake. Printing the
 	// token up front means it survives in the caller's own output even if
 	// the process is killed a moment later, regardless of signal.
-	resp, err := call(p, Request{Op: "ask", As: from, To: to, Body: body, Wait: false, Room: *room})
+	resp, err := call(p, Request{Op: "ask", As: from, To: to, Body: body, Wait: false, Room: *room, Global: *global})
 	if err != nil {
 		return err
 	}
@@ -813,14 +827,22 @@ func cmdRoomBridges(p paths, args []string) error {
 	return nil
 }
 
-// detectRepoRoom auto-derives a room name from dir's git repo (its top-level
-// directory's basename), so agents working in the same codebase naturally
+// detectRepoRoom auto-derives a room name from dir's git repo: an explicit
+// "room" key in a `mess.json` file at the repo's top level takes priority
+// (for a repo whose directory basename isn't the room name you want, or
+// several repos that should share one room); otherwise the top-level
+// directory's basename, so agents working in the same codebase naturally
 // land in the same room together instead of the noisy global one by default
 // — a real problem in practice: dozens of unrelated agents across unrelated
 // projects sharing one global room makes `mess ps`/`recv` mostly noise for
-// any one of them. Best-effort and silent on failure (not a git repo, git
-// not installed, etc.) — this must never break `mess register` itself.
-// Opt out with MESS_NO_AUTO_ROOM=1.
+// any one of them. Never fails `mess register` itself — not a git repo, no
+// git installed, and no mess.json are all silent no-ops/fallbacks. A
+// malformed mess.json is the one case worth surfacing (it's a real mistake,
+// not an absence of config), but as a visible stderr warning with a
+// fallback to the directory basename, not a hard failure: `register` often
+// runs unattended from a hook, and blocking every session's auto-
+// registration in a repo on one typo'd config file would be worse than the
+// warning going unnoticed once.
 func detectRepoRoom(dir string) string {
 	if os.Getenv("MESS_NO_AUTO_ROOM") != "" {
 		return ""
@@ -833,7 +855,37 @@ func detectRepoRoom(dir string) string {
 	if top == "" {
 		return ""
 	}
+	cfg, err := readRepoConfig(filepath.Join(top, "mess.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mess: warning: %v (falling back to the repo directory name for room auto-join)\n", err)
+	} else if cfg.Room != "" {
+		return cfg.Room
+	}
 	return filepath.Base(top)
+}
+
+// repoConfig is mess.json's shape: currently just an explicit room override.
+type repoConfig struct {
+	Room string `json:"room"`
+}
+
+// readRepoConfig reads and parses a repo's mess.json, if present. A missing
+// file is not an error (the common case — no config, fall back to the repo
+// basename); a malformed one is, so a typo'd mess.json doesn't silently get
+// ignored the same way as "no config at all".
+func readRepoConfig(path string) (repoConfig, error) {
+	var cfg repoConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("mess.json: %w", err)
+	}
+	return cfg, nil
 }
 
 func cmdRegister(p paths, args []string) error {

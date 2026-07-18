@@ -94,6 +94,7 @@ type Request struct {
 	HostWide bool     `json:"hostWide,omitempty"` // (broadcast --loud) skip room scoping, reach every room on the host
 
 	Room     string `json:"room,omitempty"`     // room to act in ("" = global/default room)
+	Global   bool   `json:"global,omitempty"`   // (send/ask) explicitly target the global room, bypassing withRoom's ambient-room auto-fill (Room=="" is otherwise indistinguishable from "not set")
 	All      bool   `json:"all,omitempty"`      // (ps) ignore Room, show every room
 	FromRoom string `json:"fromRoom,omitempty"` // (room-join) caller's previous room, so the daemon migrates the existing identity (inbox/subscriptions/owner) into the new room instead of leaving a stale duplicate behind
 
