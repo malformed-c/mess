@@ -26,6 +26,16 @@ type agentSnap struct {
 	Topics   []string  `json:"topics,omitempty"`
 	State    string    `json:"state,omitempty"`
 	LastSeen time.Time `json:"lastSeen,omitzero"`
+	// Owned/Session persist b.owners — without this, EVERY daemon restart
+	// silently wiped registration status fleet-wide (b.agents/inbox/topics
+	// survived, but IsRegistered would say no for everyone until each agent
+	// happened to take some action that re-claims ownership via
+	// ClaimIdentity). Most agents self-heal near-instantly since almost any
+	// activity re-registers them, but a quiet or session-less agent could
+	// be incorrectly rejected by send/ask's registered-recipient check
+	// right after a restart — a real incident, caught live.
+	Owned   bool   `json:"owned,omitempty"`
+	Session string `json:"session,omitempty"`
 }
 
 type topicSnap struct {
@@ -90,7 +100,11 @@ func (b *Broker) snapshot() snapshot {
 			topics = append(topics, t)
 		}
 		sort.Strings(topics)
-		s.Agents = append(s.Agents, agentSnap{Room: a.room, Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state, LastSeen: b.lastSeen[key]})
+		owner, owned := b.owners[key]
+		s.Agents = append(s.Agents, agentSnap{
+			Room: a.room, Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state, LastSeen: b.lastSeen[key],
+			Owned: owned, Session: owner.session,
+		})
 	}
 	sort.Slice(s.Agents, func(i, j int) bool {
 		return roomThenNameLess(s.Agents[i].Room, s.Agents[i].Name, s.Agents[j].Room, s.Agents[j].Name)
@@ -140,6 +154,7 @@ func (b *Broker) load(s snapshot) {
 	b.bridges = map[string]*bridge{}
 	b.bridgesByTopic = map[string][]*bridge{}
 	b.topicHistory = map[string][]Message{}
+	b.owners = map[string]ownerInfo{}
 	for _, as := range s.Agents {
 		key := agentKey(as.Room, as.Name)
 		a := b.ensure(key)
@@ -147,6 +162,9 @@ func (b *Broker) load(s snapshot) {
 		a.state = as.State
 		for _, t := range as.Topics {
 			a.topics[t] = true
+		}
+		if as.Owned {
+			b.owners[key] = ownerInfo{session: as.Session}
 		}
 		// Default a missing timestamp (legacy snapshot) to load time, so an
 		// upgrade gives every existing agent a full grace period before cleanup

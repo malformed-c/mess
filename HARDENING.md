@@ -37,6 +37,38 @@ duplicate coverage and instead find what was *actually* missing.
 
 ## Real gaps found and fixed
 
+### 0. `b.owners` (registration) was never persisted at all (FIXED — found live, after this pass's own deploy)
+
+Caught in the wild, not by test-writing: right after deploying this pass's
+own fixes (which restart the daemon), a live agent (`lead`) that had been
+active earlier suddenly got rejected by `send` with `"no such agent"` —
+despite still showing `online`/`working` in `mess ps`. Traced it to
+`snapshot()`/`load()`: `agentSnap` persisted inbox/topics/state/lastSeen,
+but **never touched `b.owners` at all** — so every daemon restart silently
+wiped *registration* status fleet-wide, while `b.agents` (what `mess ps`
+reports from) survived intact. The two diverging is what made it
+invisible: an agent still *looks* present and active, but
+`IsRegistered` says no.
+
+This existed before this pass, but its blast radius grew directly because
+of this session's earlier work making `IsRegistered` load-bearing for
+`send` (previously only `ask` depended on it). Most agents self-heal near
+instantly post-restart — any `send`/`recv`/`busy` with a valid session
+silently re-establishes ownership via `ClaimIdentity` — which is exactly
+why this went unnoticed through several earlier restarts this session: the
+window is narrow and self-closing for an active agent. It's only visible
+for a quiet agent (nothing to do post-restart) or a session-less one
+(`ClaimIdentity` explicitly skips enforcement — and population — when
+there's no session id, so it can never self-heal this way at all).
+
+**Fix**: `agentSnap` gains `Owned bool` + `Session string`; `snapshot()`
+populates them from `b.owners`, `load()` restores `b.owners` from them
+(and now resets the map at the start of `load()` like every other broker
+map, instead of never touching it). `TestSnapshotRoundTripsOwnership`
+added and confirmed to fail against the pre-fix code (reverted `persist.go`
+alone, re-ran the test, watched it fail with exactly the symptom
+observed live) before confirming it passes with the fix.
+
 ### 1. Corrupted `state.json` caused silent, total data loss (FIXED)
 
 `runDaemon` loaded state via `loadSnapshotFile` and, on any parse error,

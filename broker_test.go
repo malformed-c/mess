@@ -1329,6 +1329,38 @@ func TestSnapshotRoundTripsRooms(t *testing.T) {
 	}
 }
 
+// Real bug, caught live: b.owners (registration/ownership) was never
+// persisted at all — snapshot()/load() round-tripped inbox/topics/state/
+// lastSeen but silently dropped ownership entirely, so EVERY daemon
+// restart wiped registration status fleet-wide. b.agents (and therefore
+// `mess ps`'s "online"/pending view) survived restart intact, masking it —
+// an agent LOOKED present and active, but IsRegistered said no, so
+// send/ask's registered-recipient guard would incorrectly reject it as a
+// "no such agent" until it happened to take some action that re-claims
+// ownership via ClaimIdentity. Most agents self-heal near-instantly since
+// almost any activity re-registers them; a quiet or session-less one
+// would not. Caught because a live agent that hadn't acted since a restart
+// this session triggered genuinely got rejected.
+func TestSnapshotRoundTripsOwnership(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned("alice", "sess-alice", false)
+	b.RegisterOwned(agentKey("frontend", "bob"), "sess-bob", false)
+	b.Send("peer", "carol", "hi") // carol: known (ensure'd) but never registered — a ghost
+
+	b2 := newTestBroker()
+	b2.load(b.snapshot())
+
+	if !b2.IsRegistered("alice") {
+		t.Fatal("alice's registration should survive a snapshot round trip")
+	}
+	if !b2.IsRegistered(agentKey("frontend", "bob")) {
+		t.Fatal("bob's room-scoped registration should survive a snapshot round trip")
+	}
+	if b2.IsRegistered("carol") {
+		t.Fatal("carol was never registered — must not become registered via the round trip")
+	}
+}
+
 // This is the single most important regression test given the live daemon's
 // on-disk state: an existing state.json written by a pre-rooms daemon has
 // "topics" as a bare {"name": ["sub", ...]} object, not the current room-aware
