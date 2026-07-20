@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -216,6 +217,34 @@ func loadSnapshotFile(path string) (snapshot, error) {
 	}
 	err = json.Unmarshal(data, &s)
 	return s, err
+}
+
+// loadSnapshotWithRecovery loads path, preserving a corrupt file instead of
+// silently discarding it. Without this, a state file that fails to parse
+// (truncated by a crash mid-write despite saveSnapshot's temp+rename
+// atomicity guarding the common case, hand-edited and broken, whatever the
+// cause) used to make the daemon start with a completely empty broker —
+// every agent's identity, inbox, and subscriptions gone, with only a
+// warning log line easy to miss on a live fleet. Now the corrupt file is
+// renamed aside (path + ".corrupt-<unix-seconds>") before the daemon
+// proceeds with empty state, so it's recoverable rather than silently
+// overwritten by the next save. A missing file (first run) is not
+// "corrupt" — same zero-snapshot, no-error behavior as before. warn is
+// called with a human-readable message either way an error occurred, so
+// the caller can log it loudly instead of via loadSnapshotFile's own
+// easy-to-miss warning line.
+func loadSnapshotWithRecovery(path string, now func() time.Time, warn func(string)) snapshot {
+	snap, err := loadSnapshotFile(path)
+	if err == nil {
+		return snap
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, now().Unix())
+	if renameErr := os.Rename(path, backup); renameErr == nil {
+		warn(fmt.Sprintf("state file %s failed to load (%v) — every agent's identity/inbox/subscriptions would otherwise be silently lost; preserved the corrupt file at %s for recovery, starting with empty state", path, err, backup))
+	} else {
+		warn(fmt.Sprintf("state file %s failed to load (%v) and could not be preserved (%v) — starting with empty state, all prior agent data is lost", path, err, renameErr))
+	}
+	return snapshot{}
 }
 
 // paths resolves the runtime directory and the files within it. The directory

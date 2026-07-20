@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -895,6 +896,50 @@ func TestReplayReturnsConsumedHistory(t *testing.T) {
 	b.Drain("bob", false, 0) // consumes "four"
 	if got := b.Replay("bob", 2); len(got) != 2 || got[0].Body != "three" || got[1].Body != "four" {
 		t.Fatalf("replay 2 should return the last two, got %+v", got)
+	}
+}
+
+// maxHistory bounds a.history to the most recent 50 consumed messages, so a
+// long-running, chatty agent's replay cache can't grow unboundedly (real
+// concern: the live fleet has agents that have run continuously for days).
+// This had zero test coverage before the concurrency/crash-recovery audit —
+// a future refactor could silently drop the cap with nothing to catch it.
+func TestHistoryCapsAtMaxHistory(t *testing.T) {
+	b := newTestBroker()
+	for i := 0; i < maxHistory+20; i++ {
+		b.Send("peer", "bob", fmt.Sprintf("msg-%d", i))
+	}
+	b.Drain("bob", false, 0) // consume everything at once -> history
+
+	got := b.Replay("bob", 0)
+	if len(got) != maxHistory {
+		t.Fatalf("expected history capped at %d, got %d", maxHistory, len(got))
+	}
+	// The cap keeps the MOST RECENT entries, not the oldest.
+	if got[0].Body != fmt.Sprintf("msg-%d", 20) {
+		t.Fatalf("expected history to have dropped the oldest entries, first is %q", got[0].Body)
+	}
+	if got[len(got)-1].Body != fmt.Sprintf("msg-%d", maxHistory+19) {
+		t.Fatalf("expected the newest entry retained, last is %q", got[len(got)-1].Body)
+	}
+}
+
+// Same cap, but hit incrementally (one drain per message) rather than one
+// giant drain — a different code path (history append happens on every
+// drainMatchingLocked call, not just a bulk one), worth covering separately
+// since the two could plausibly diverge in a future edit.
+func TestHistoryCapsAtMaxHistoryIncrementally(t *testing.T) {
+	b := newTestBroker()
+	for i := 0; i < maxHistory+20; i++ {
+		b.Send("peer", "bob", fmt.Sprintf("msg-%d", i))
+		b.Drain("bob", false, 0)
+	}
+	got := b.Replay("bob", 0)
+	if len(got) != maxHistory {
+		t.Fatalf("expected history capped at %d after incremental drains, got %d", maxHistory, len(got))
+	}
+	if got[len(got)-1].Body != fmt.Sprintf("msg-%d", maxHistory+19) {
+		t.Fatalf("expected the newest entry retained, last is %q", got[len(got)-1].Body)
 	}
 }
 

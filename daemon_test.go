@@ -96,6 +96,67 @@ func TestRecvEvictedOnRemove(t *testing.T) {
 	}
 }
 
+// Two waiters parked on the SAME agent at once is a documented anti-pattern
+// ("one receiver per agent" — see CLAUDE.md/skill docs, and mess itself warns
+// on stderr if a second waiter starts), not something mess enforces at the
+// daemon level. This is the concrete test for what actually happens if it's
+// violated anyway (e.g. a manual `mess recv --wait` left running alongside
+// the auto-wake hook): every drain path (DrainKinds et al.) is mutex-
+// protected, so the real question is whether that protects the OUTCOME too
+// — no double-delivery of one message, no message silently dropped between
+// two racing wakes, no deadlock/panic. Run repeatedly (not just once) since
+// a race, if one existed, wouldn't necessarily show on a single run.
+func TestTwoParkedWaitersOnSameAgentNoDoubleDeliveryNoLoss(t *testing.T) {
+	for iter := 0; iter < 20; iter++ {
+		d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+		_, serverA := net.Pipe()
+		_, serverB := net.Pipe()
+
+		// A short timeout so the "loser" (the one that doesn't get the
+		// message) returns on its own instead of parking forever — with
+		// only one message ever sent, exactly one waiter has nothing left
+		// to drain.
+		req := Request{Op: "recv", As: "bob", Wait: true, Timeout: "300ms"}
+		doneA := make(chan Response, 1)
+		doneB := make(chan Response, 1)
+		go func() { doneA <- d.recv(serverA, req) }()
+		go func() { doneB <- d.recv(serverB, req) }()
+
+		listenerCount := func() int {
+			d.broker.mu.Lock()
+			defer d.broker.mu.Unlock()
+			return d.broker.listeners["bob"]
+		}
+		deadline := time.Now().Add(time.Second)
+		for listenerCount() < 2 {
+			if time.Now().After(deadline) {
+				t.Fatalf("iter %d: both waiters never registered as listening (count=%d)", iter, listenerCount())
+			}
+			time.Sleep(time.Millisecond)
+		}
+
+		d.broker.Send("alice", "bob", "only one copy of this exists")
+
+		var respA, respB Response
+		select {
+		case respA = <-doneA:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iter %d: waiter A never returned (deadlock?)", iter)
+		}
+		select {
+		case respB = <-doneB:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iter %d: waiter B never returned (deadlock?)", iter)
+		}
+
+		total := len(respA.Messages) + len(respB.Messages)
+		if total != 1 {
+			t.Fatalf("iter %d: expected exactly 1 message delivered across both waiters, got %d (A=%d B=%d)",
+				iter, total, len(respA.Messages), len(respB.Messages))
+		}
+	}
+}
+
 // A leading "#" on a topic argument (a natural typo, since topics are always
 // *displayed* as #name) must be stripped so `sub #trail` and `pub trail` land on
 // the same topic instead of silently creating a distinct "#trail" one.

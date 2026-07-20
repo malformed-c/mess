@@ -205,12 +205,8 @@ func runDaemon(p paths) error {
 
 	d := &daemon{broker: NewBroker(), paths: p, ln: ln, stop: make(chan struct{})}
 
-	snap, err := loadSnapshotFile(p.state)
-	if err != nil {
-		elog("warning: could not load state: %v", err)
-	} else {
-		d.broker.load(snap)
-	}
+	snap := loadSnapshotWithRecovery(p.state, time.Now, func(msg string) { elog("WARNING: %s", msg) })
+	d.broker.load(snap)
 	d.broker.onChange = d.persist
 
 	journal, err := openJournal(p.journal)
