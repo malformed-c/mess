@@ -23,9 +23,10 @@ Usage:
 Identity:
   mess register [name]            join the network; with a name, set this
                                   session's identity (persists across turns);
-                                  auto-joins a room derived from the calling
-                                  git repo if no room is already chosen (see
-                                  Rooms below; opt out with MESS_NO_AUTO_ROOM=1)
+                                  auto-joins the room a repo's mess.json
+                                  names, if the calling git repo has one and
+                                  no room is already chosen (see Rooms
+                                  below; opt out with MESS_NO_AUTO_ROOM=1)
   mess unregister                 leave the network and clear this session's
                                   identity (inverse of register)
   mess rename [--force] <name>    rename yourself, migrating your inbox and
@@ -827,22 +828,21 @@ func cmdRoomBridges(p paths, args []string) error {
 	return nil
 }
 
-// detectRepoRoom auto-derives a room name from dir's git repo: an explicit
-// "room" key in a `mess.json` file at the repo's top level takes priority
-// (for a repo whose directory basename isn't the room name you want, or
-// several repos that should share one room); otherwise the top-level
-// directory's basename, so agents working in the same codebase naturally
-// land in the same room together instead of the noisy global one by default
-// — a real problem in practice: dozens of unrelated agents across unrelated
-// projects sharing one global room makes `mess ps`/`recv` mostly noise for
-// any one of them. Never fails `mess register` itself — not a git repo, no
-// git installed, and no mess.json are all silent no-ops/fallbacks. A
-// malformed mess.json is the one case worth surfacing (it's a real mistake,
-// not an absence of config), but as a visible stderr warning with a
-// fallback to the directory basename, not a hard failure: `register` often
-// runs unattended from a hook, and blocking every session's auto-
-// registration in a repo on one typo'd config file would be worse than the
-// warning going unnoticed once.
+// detectRepoRoom reads the "room" key from a `mess.json` file at dir's git
+// repo's top level, if the repo has one — this is the ONLY way auto-join
+// activates. There's no fallback to the repo directory's basename: a
+// directory name is often a meaningless generated path (a temp checkout, a
+// worktree, a random clone dir), so defaulting to it produced confusing or
+// outright ugly room names in practice. No mess.json, or one without a
+// "room" key, means auto-join stays dormant for that repo — global room,
+// exactly as if this feature didn't exist; a repo opts in explicitly by
+// adding one. Never fails `mess register` itself: not a git repo and no
+// git installed are silent no-ops. A malformed mess.json still warns to
+// stderr (it's a real mistake, not an absence of config) but otherwise
+// also just leaves auto-join dormant for that repo, not a hard failure —
+// `register` often runs unattended from a hook, and blocking every
+// session's auto-registration in a repo on one typo'd config file would be
+// worse than the warning going unnoticed once.
 func detectRepoRoom(dir string) string {
 	if os.Getenv("MESS_NO_AUTO_ROOM") != "" {
 		return ""
@@ -857,11 +857,10 @@ func detectRepoRoom(dir string) string {
 	}
 	cfg, err := readRepoConfig(filepath.Join(top, "mess.json"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mess: warning: %v (falling back to the repo directory name for room auto-join)\n", err)
-	} else if cfg.Room != "" {
-		return cfg.Room
+		fmt.Fprintf(os.Stderr, "mess: warning: %v (auto-join staying dormant for this repo)\n", err)
+		return ""
 	}
-	return filepath.Base(top)
+	return cfg.Room
 }
 
 // repoConfig is mess.json's shape: currently just an explicit room override.

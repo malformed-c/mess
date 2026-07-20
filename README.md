@@ -189,28 +189,28 @@ Rooms are resolved the same three-tier way as identity: `--room` flag → a
 room joined this session (persisted, survives compaction/resume like identity)
 → `MESS_ROOM` env var.
 
-**Auto-join by git repo**: `mess register <name>` (a genuinely new
-registration, not a bare re-validation) auto-joins a room derived from the
-calling process's git repo — its top-level directory's basename by default
-(e.g. `/home/engi/git/mess` → room `mess`), or the `"room"` key of a
-`mess.json` file at the repo's top level if one exists (for a repo whose
-directory name isn't the room you want, or several repos that should share
-one room):
+**Auto-join by repo config**: `mess register <name>` (a genuinely new
+registration, not a bare re-validation) auto-joins the room named in a
+`mess.json` file at the calling process's git repo's top level, if one
+exists:
 
 ```json
 { "room": "custom-room-name" }
 ```
 
-so agents working on the same codebase land in the same room together by
-default, instead of one global room shared by every unrelated project on the
-machine. Only applies when no room is already explicitly chosen (none of
-`--room`/a prior `room join`/`MESS_ROOM` are set) — it never overrides a
-deliberate choice. Silent, best-effort outside a git repo, without `git`
-installed, or with no `mess.json` (stays in the global room, exactly like
-before this existed) — a malformed `mess.json` is the one case that prints a
-warning (it's a real mistake, not an absence of config), but `register`
-itself still succeeds, falling back to the directory basename, rather than
-blocking every session's auto-registration in that repo on one typo'd
+so agents working on the same codebase land in the same room together,
+instead of one global room shared by every unrelated project on the
+machine. **A repo with no `mess.json` stays dormant — global room, exactly
+as if this feature didn't exist.** There's deliberately no fallback to the
+repo directory's basename: a directory name is often a meaningless
+generated path (a temp checkout, a worktree, a random clone dir), so
+defaulting to it produced confusing or outright ugly room names for repos
+that never asked for auto-join at all. Only applies when no room is already
+explicitly chosen (none of `--room`/a prior `room join`/`MESS_ROOM` are
+set) — it never overrides a deliberate choice. A malformed `mess.json`
+prints a warning (it's a real mistake, not an absence of config) but
+`register` itself still succeeds, leaving auto-join dormant for that repo,
+rather than blocking every session's auto-registration on one typo'd
 config file. Opt out entirely with `MESS_NO_AUTO_ROOM=1`.
 
 **Sending across rooms** — `mess send`/`mess ask <agent> --room NAME` messages

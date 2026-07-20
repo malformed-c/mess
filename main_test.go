@@ -12,22 +12,22 @@ import (
 
 // --- detectRepoRoom ---
 //
-// mess register auto-joins a room derived from the calling git repo, so
+// mess register auto-joins a room derived from a repo's mess.json, so
 // agents working on the same codebase naturally group together instead of
-// sharing one noisy global room by default.
+// sharing one noisy global room by default — but only for a repo that
+// explicitly opts in. There's deliberately no fallback to the repo
+// directory's basename (there used to be — removed because a directory
+// name is often a meaningless generated path, a temp checkout or worktree,
+// producing confusing/ugly room names for a repo that never asked for
+// auto-join at all).
 
-func TestDetectRepoRoomInsideGitRepo(t *testing.T) {
+func TestDetectRepoRoomDormantWithoutMessJSON(t *testing.T) {
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
 	}
-	got := detectRepoRoom(dir)
-	want := filepath.Base(dir)
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		want = filepath.Base(resolved)
-	}
-	if got != want {
-		t.Fatalf("detectRepoRoom(%q) = %q, want %q", dir, got, want)
+	if got := detectRepoRoom(dir); got != "" {
+		t.Fatalf("expected no auto-join without a mess.json, got %q", got)
 	}
 }
 
@@ -38,14 +38,19 @@ func TestDetectRepoRoomOutsideGitRepo(t *testing.T) {
 	}
 }
 
+// MESS_NO_AUTO_ROOM overrides even an explicit mess.json — proven by giving
+// the repo one that WOULD otherwise activate auto-join.
 func TestDetectRepoRoomRespectsOptOut(t *testing.T) {
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{"room":"custom-room"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("MESS_NO_AUTO_ROOM", "1")
 	if got := detectRepoRoom(dir); got != "" {
-		t.Fatalf("expected MESS_NO_AUTO_ROOM to suppress detection, got %q", got)
+		t.Fatalf("expected MESS_NO_AUTO_ROOM to suppress detection even with a mess.json present, got %q", got)
 	}
 }
 
@@ -65,10 +70,10 @@ func TestDetectRepoRoomHonorsMessJSONOverride(t *testing.T) {
 	}
 }
 
-// A malformed mess.json must not break registration itself — falls back to
-// the directory basename (the warning it also prints isn't checked here,
-// only that detectRepoRoom still returns something usable).
-func TestDetectRepoRoomFallsBackOnMalformedMessJSON(t *testing.T) {
+// A malformed mess.json must not break registration itself — auto-join just
+// stays dormant for that repo (the warning it also prints isn't checked
+// here, only that detectRepoRoom doesn't error or panic).
+func TestDetectRepoRoomDormantOnMalformedMessJSON(t *testing.T) {
 	dir := t.TempDir()
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
@@ -76,12 +81,8 @@ func TestDetectRepoRoomFallsBackOnMalformedMessJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{not valid json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Base(dir)
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		want = filepath.Base(resolved)
-	}
-	if got := detectRepoRoom(dir); got != want {
-		t.Fatalf("expected fallback to the directory basename %q, got %q", want, got)
+	if got := detectRepoRoom(dir); got != "" {
+		t.Fatalf("expected auto-join to stay dormant on a malformed mess.json, got %q", got)
 	}
 }
 
