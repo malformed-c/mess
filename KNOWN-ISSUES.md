@@ -1,5 +1,29 @@
 # Known issues
 
+## Fixed (2026-07-21): Grok Stop armed asyncRewake before `unbusy` → wake lost on pending mail
+
+**Symptom:** Grok session registers, sometimes parks, but a peer `mess send` while
+idle (or mail already queued at turn end) never re-enters the agent. Inbox stays
+pending; `mess islistening` is false after a brief park.
+
+**Root cause:** On `Stop`, Grok armed `asyncRewake` *before* running sync Stop
+hooks. `mess-wake.sh` peeks mail then drains with `recv --if-idle`. If mail was
+already queued and busy was still set (unbusy not run yet), drain returned
+`{"busy":true}` and the script **exited 0** — which does not rewake and does
+not re-arm. Mid-turn stand-down is intentional, but exit-0 on busy at arm time
+is permanent un-park until the next human Stop (which hit the same race).
+
+**Fix:**
+1. **grok-build** (`hook_dispatch.rs`): run sync Stop hooks first, then arm
+   asyncRewake. Commit after `24884fe` on `async-rewake`.
+2. **mess-wake.sh**: on busy, poll until idle and drain — never exit 0 solely
+   because the agent is mid-turn (belt-and-suspenders for arm-order races and
+   hosts that still arm early).
+
+**After upgrade:** install new `grok-from-source`, restart the Grok session so
+the new arm order is live. mess-wake.sh is picked up on next Stop without
+restart.
+
 ## Fixed (2026-07-18): Grok Build tool shells lacked `GROK_SESSION_ID` → mess auto-wake never parked
 
 **Symptom:** Grok sessions could `mess register` and appear in `mess ps`, but peers'
@@ -20,6 +44,12 @@ exclude it from shell-state dumps like `GROK_AGENT`, re-export after snapshot
 restore. mess already accepted `GROK_SESSION_ID` in `sessionEnvVars`; error
 messages updated to mention it. New Grok binary must be installed and sessions
 restarted for tool shells to pick it up.
+
+**Landed:** grok-build branch `async-rewake`:
+- `0ce88e6` — Claude-compatible `asyncRewake` Stop hooks (park + exit-2 synthetic turn)
+- `24884fe` — inject `GROK_SESSION_ID` into tool shells (this issue)
+Installed as `~/.grok/downloads/grok-from-source` (`grok 0.1.220-alpha.4 (24884fe)`).
+Stock `0.2.101` still lacks both.
 
 **After upgrade:** re-`mess register <name>` once in each Grok session (or copy
 identity from any fake key onto the real session UUID under `~/.mess/ident/`).
