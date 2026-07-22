@@ -354,6 +354,24 @@ mess ask trail-main-cli --file /tmp/question.txt
 `--file` conflicts with also giving a body argument (pick one); it composes
 normally with `--attach`/`--thread`.
 
+**A sole `-` means stdin, explicitly** — the standard Unix convention, for
+when a positional argument comes before the body (so the usual "no body
+args = read stdin" fallback doesn't apply on its own):
+
+```
+cat notes.txt | mess send bob -
+cat <<'EOF' | mess send bob -
+multi-line body piped in
+EOF
+```
+
+Real incident this fixed: `cat <<'EOF' | mess send platform -` sent the
+literal dash as the body instead of the heredoc's content, since `platform`
+being present as a positional meant the body-from-stdin fallback never
+triggered — only a lone `-` with nothing else now activates it (a dash
+alongside other words, e.g. `mess send bob "- status ok"`, is obviously
+literal text, not a stdin marker). Same convention on `--file -`.
+
 ## Log
 
 `export`/`recv`/`replay` all only ever see a *bounded* recent window (the

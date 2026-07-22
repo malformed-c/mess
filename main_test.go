@@ -149,6 +149,66 @@ func TestBodyFromRejectsFileAndArgsTogether(t *testing.T) {
 	}
 }
 
+// withStdin temporarily replaces os.Stdin with content for the duration of
+// fn, restoring the original afterward.
+func withStdin(t *testing.T, content string, fn func()) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = orig }()
+	go func() {
+		_, _ = w.WriteString(content)
+		w.Close()
+	}()
+	fn()
+}
+
+// A sole "-" positional is the standard Unix convention for "read from
+// stdin explicitly" — the actual fix for a real incident: `cat <<'EOF' |
+// mess send bob -` sent the literal dash as the body instead of the
+// heredoc's content, since a positional arg was already present so the
+// implicit "no args = read stdin" fallback never triggered.
+func TestBodyFromSoleDashReadsStdin(t *testing.T) {
+	withStdin(t, "heredoc content\n", func() {
+		got, err := bodyFrom([]string{"-"}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "heredoc content" {
+			t.Fatalf("expected stdin content via sole \"-\", got %q", got)
+		}
+	})
+}
+
+// A dash alongside other words is obviously literal text, not a stdin
+// marker — only a SOLE "-" triggers the special case.
+func TestBodyFromDashAmongOtherWordsIsLiteral(t *testing.T) {
+	got, err := bodyFrom([]string{"status", "-", "ok"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "status - ok" {
+		t.Fatalf("expected the dash preserved as literal text, got %q", got)
+	}
+}
+
+// --file - is the same convention applied to the --file flag.
+func TestBodyFromFileDashReadsStdin(t *testing.T) {
+	withStdin(t, "piped via --file -\n", func() {
+		got, err := bodyFrom(nil, "-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "piped via --file -" {
+			t.Fatalf("expected stdin content via --file -, got %q", got)
+		}
+	})
+}
+
 func TestSetAttachComputesHashAndStat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")

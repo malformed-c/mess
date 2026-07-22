@@ -160,7 +160,10 @@ Room resolution (same order, independently of identity):
      way as identity
   3. the MESS_ROOM environment variable
 
-If no body args are given, the body is read from stdin.
+If no body args are given, the body is read from stdin. A sole "-" (as the
+body, or as --file's argument) reads stdin explicitly — for piping into a
+command that already has a positional argument before it, e.g.
+"cat notes.txt | mess send bob -".
 
 recv flags:
   --wait            block until a message arrives (also implied by a
@@ -321,6 +324,18 @@ func resolveRoom(p paths, flagVal string) string {
 // detect this after the fact (the original backticks are already gone), so
 // --file sidesteps the shell entirely instead of trying to.
 func bodyFrom(args []string, filePath string) (string, error) {
+	// "-" is the standard Unix convention for "read from stdin explicitly" —
+	// real gap hit live: `cat <<'EOF' | mess send bob -` sent the literal
+	// dash as the body instead of the heredoc's content, since a positional
+	// arg was already present (len(args) > 0) so the implicit "no args =
+	// read stdin" path never triggered. Only a SOLE "-" triggers this — a
+	// dash alongside other words (e.g. "mess send bob - is my status") is
+	// obviously meant as literal text, not a stdin marker. Same convention
+	// for --file -, so --file's own "read from a path" flag can also mean
+	// stdin explicitly instead of only working via the bare-args fallback.
+	if filePath == "-" {
+		return readStdinBody()
+	}
 	if filePath != "" {
 		if len(args) > 0 {
 			return "", fmt.Errorf("--file conflicts with a body given on the command line — use one or the other")
@@ -331,9 +346,18 @@ func bodyFrom(args []string, filePath string) (string, error) {
 		}
 		return strings.TrimRight(string(data), "\n"), nil
 	}
+	if len(args) == 1 && args[0] == "-" {
+		return readStdinBody()
+	}
 	if len(args) > 0 {
 		return strings.Join(args, " "), nil
 	}
+	return readStdinBody()
+}
+
+// readStdinBody reads the message body from stdin, trimming a single
+// trailing newline (matching how a shell heredoc/pipe usually ends).
+func readStdinBody() (string, error) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return "", err
