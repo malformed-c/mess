@@ -185,6 +185,7 @@ type Response struct {
 	Count    int          `json:"count,omitempty"`
 	Removed  []string     `json:"removed,omitempty"` // (cleanup) agents pruned (or, with dry-run, eligible)
 	Busy     bool         `json:"busy,omitempty"`    // (recv --if-idle) the agent was busy, so nothing was drained
+	Woke     int          `json:"woke,omitempty"`    // (pub) how many of Count were actually woken — an @mention or threaded reply quiets the rest
 	ID       string       `json:"id,omitempty"`      // (ask) the created message's own id — the await token
 	Expired  int          `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
 	// Reason classifies an empty blocking recv, so a parked caller can tell

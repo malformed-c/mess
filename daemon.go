@@ -521,7 +521,7 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, delivered)
 		}
 		d.journalAppend(req.Room, m)
-		return Response{OK: true, Count: delivered}
+		return Response{OK: true, Count: delivered, Woke: woke}
 	case "sub":
 		b.Sub(who, topic)
 		return Response{OK: true}

@@ -776,7 +776,15 @@ func cmdPub(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("delivered to %d subscriber(s)\n", resp.Count)
+	// Say how many were actually WOKEN, not just delivered to. An @mention (or a
+	// threaded reply) quiets every other subscriber — you mention someone to
+	// highlight them and, as a side effect, silence the notification for
+	// everyone else. "delivered to 2 subscriber(s)" reads as "both were told".
+	if resp.Woke < resp.Count {
+		fmt.Printf("delivered to %d subscriber(s), woke %d — an @mention/threaded reply quiets the rest, who see it on their next recv\n", resp.Count, resp.Woke)
+	} else {
+		fmt.Printf("delivered to %d subscriber(s)\n", resp.Count)
+	}
 	return nil
 }
 

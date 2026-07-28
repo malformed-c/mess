@@ -944,3 +944,30 @@ func TestBlockingRecvHasNoReasonWhenItDelivers(t *testing.T) {
 		t.Fatalf("want 1 message and no reason, got %d messages reason=%q", len(resp.Messages), resp.Reason)
 	}
 }
+
+// The daemon worked out how many subscribers a pub actually woke, logged it,
+// and then dropped it from the response — so `mess pub` could only ever report
+// the delivered count. An @mention quiets every other subscriber, which means
+// you mention someone to highlight them and, as a side effect, silence the
+// notification for everyone else. "delivered to 2 subscriber(s)" reads as
+// "both were told", so the publisher has to be given the real number.
+func TestPubResponseReportsHowManyItWoke(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	for _, who := range []string{"alice", "bob", "carol"} {
+		d.broker.Sub(who, "work")
+	}
+
+	resp := d.dispatch(Request{Op: "pub", As: "alice", Topic: "work", Body: "@bob this one's yours"})
+	if resp.Count != 2 {
+		t.Fatalf("want delivery to both non-senders, got %d", resp.Count)
+	}
+	if resp.Woke != 1 {
+		t.Fatalf("want woke=1 (only the @mentioned bob), got %d — the publisher can't see that carol was quieted", resp.Woke)
+	}
+
+	// With no @mention every subscriber is woken, and there's nothing to warn about.
+	resp = d.dispatch(Request{Op: "pub", As: "alice", Topic: "work", Body: "for everyone"})
+	if resp.Count != 2 || resp.Woke != 2 {
+		t.Fatalf("an unmentioned pub must wake every subscriber, got count=%d woke=%d", resp.Count, resp.Woke)
+	}
+}
