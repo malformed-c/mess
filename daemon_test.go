@@ -851,3 +851,96 @@ func TestExpireDurablySkipsCommitOnJournalFailure(t *testing.T) {
 		t.Fatalf("message must remain queued when the journal write failed, got %+v", got)
 	}
 }
+
+// An empty blocking recv must say WHY it is empty. The auto-wake hook parks on
+// `recv --wait` and treats "no messages" as "stand down" — and standing down
+// un-parks the agent until its next Stop, which for a genuinely idle agent
+// never comes. So "another consumer beat me to the inbox" (re-park, I'm still
+// the waiter) must be distinguishable from "stop waiting".
+//
+// This is the race that made waking unreliable in practice: --batch makes
+// parkAndDrain sleep BEFORE it drains, so for the whole batch window a second
+// wake-hook instance (or the agent's own mid-turn `mess recv`) can empty the
+// inbox out from under a park that has already committed to returning.
+func TestBlockingRecvReportsRacedWhenAnotherConsumerDrainsFirst(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	_, server := net.Pipe()
+	d.broker.Send("alice", "bob", "hello")
+
+	// Mail is already pending, so the park returns via finish() — which waits
+	// out the batch window first. Drain from underneath it during that window.
+	done := make(chan Response, 1)
+	go func() {
+		done <- d.recv(server, Request{Op: "recv", As: "bob", Wait: true, Batch: "300ms"})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if got := d.broker.Drain("bob", false, 0); len(got) != 1 {
+		t.Fatalf("setup: the racing consumer should have taken the message, got %d", len(got))
+	}
+
+	select {
+	case resp := <-done:
+		if len(resp.Messages) != 0 {
+			t.Fatalf("expected an empty return, got %d messages", len(resp.Messages))
+		}
+		if resp.Reason != ReasonRaced {
+			t.Fatalf("an empty wake caused by a racing consumer must report %q so the caller re-parks; got %q", ReasonRaced, resp.Reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking recv never returned")
+	}
+}
+
+// A wait that ends on its own timeout is terminal, not a race — the caller
+// decides whether to park again.
+func TestBlockingRecvReportsTimeout(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	_, server := net.Pipe()
+
+	resp := d.recv(server, Request{Op: "recv", As: "bob", Wait: true, Timeout: "50ms"})
+	if len(resp.Messages) != 0 || resp.Reason != ReasonTimeout {
+		t.Fatalf("want an empty %q return, got reason=%q msgs=%d", ReasonTimeout, resp.Reason, len(resp.Messages))
+	}
+}
+
+// Eviction (rm / rename) is terminal too, and must be distinguishable from a
+// race so the hook stops instead of re-parking under a name it no longer owns.
+func TestBlockingRecvReportsEvicted(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	_, server := net.Pipe()
+
+	done := make(chan Response, 1)
+	go func() { done <- d.recv(server, Request{Op: "recv", As: "ghost", Wait: true}) }()
+
+	deadline := time.Now().Add(time.Second)
+	for !d.broker.IsListening("ghost") {
+		if time.Now().After(deadline) {
+			t.Fatal("recv never registered as listening")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	d.broker.RemoveAgent("ghost")
+
+	select {
+	case resp := <-done:
+		if resp.Reason != ReasonEvicted {
+			t.Fatalf("want reason %q, got %q", ReasonEvicted, resp.Reason)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("parked recv did not stop after eviction")
+	}
+}
+
+// A wake that actually delivers carries no reason — the reason field only ever
+// classifies an EMPTY return, so a caller can key on it without also having to
+// check the message count.
+func TestBlockingRecvHasNoReasonWhenItDelivers(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	_, server := net.Pipe()
+	d.broker.Send("alice", "bob", "hello")
+
+	resp := d.recv(server, Request{Op: "recv", As: "bob", Wait: true})
+	if len(resp.Messages) != 1 || resp.Reason != "" {
+		t.Fatalf("want 1 message and no reason, got %d messages reason=%q", len(resp.Messages), resp.Reason)
+	}
+}

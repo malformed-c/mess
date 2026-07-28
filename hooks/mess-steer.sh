@@ -12,6 +12,13 @@
 # phrased "as of this tool call" because additionalContext is sticky (saved to
 # the transcript), so a lingering line reads as a point-in-time event.
 #
+# Dedup is also time-bounded (RENOTIFY): while the same mail stays unread we
+# re-announce at most once per window. Watermarking purely on id made this
+# fire-and-forget — the marker advanced the moment the notice was *printed*,
+# with no confirmation the agent saw it, so a single dropped injection meant
+# that message was never mentioned again. Re-announcing bounds a drop to one
+# window instead of losing it outright, without spamming every tool call.
+#
 # Scope: fires for any session that has a mess identity. No-op for non-mess
 # sessions. Opt out with MESS_NO_STEER=1. Stands down under MESS_CHANNEL (a
 # channel session delivers messages itself). Messages are peeked (not consumed)
@@ -35,18 +42,49 @@ case "$EVENT" in
   *) at="now" ;;
 esac
 
-MESS=/home/engi/.local/bin/mess
+MESS=${MESS_BIN:-/home/engi/.local/bin/mess}  # MESS_BIN lets the tests drive a throwaway build
 who=$("$MESS" whoami 2>/dev/null)
 [ -z "$who" ] && exit 0
+
+RENOTIFY=${MESS_STEER_RENOTIFY:-60}  # seconds; re-announce still-unread mail at most this often
+
+statedir="${TMPDIR:-/tmp}"
+errf="$statedir/mess-steer-$who.err"  # marks an outage already reported
+
+# emit prints one additionalContext notice. Anything this hook says to the
+# agent goes through here, so there is exactly one JSON object on stdout.
+emit() {
+  jq -cn --arg c "$1" --arg ev "$EVENT" \
+    '{hookSpecificOutput:{hookEventName:$ev,additionalContext:$c}}'
+}
 
 # Peek pending direct/topic messages (broadcasts ignored except a --loud one,
 # which is meant to surface even to a busy agent), dropping quiet ones (a topic
 # message that @-mentioned other subscribers, not me); derive count + id.
-direct=$("$MESS" recv --kind direct,topic --peek --json 2>/dev/null | jq -c 'select(.quiet != true)' 2>/dev/null)
+#
+# A failed peek must NOT look like an empty inbox. Swallowing the error (the old
+# 2>/dev/null) made every mess outage silently indistinguishable from "no mail":
+# `mess whoami` keeps working off a local file even when the daemon refuses
+# every operation (e.g. the name is held by another live session), so the agent
+# had no signal at all that it had stopped receiving. Report it once per episode.
+direct_raw=$("$MESS" recv --kind direct,topic --peek --json 2>"$statedir/mess-steer-$who.stderr")
+if [ $? -ne 0 ]; then
+  if [ ! -f "$errf" ]; then
+    : > "$errf"
+    emit "[mess] can't read your inbox — peer messages may not be reaching you: $(head -1 "$statedir/mess-steer-$who.stderr" 2>/dev/null). Check \`mess whoami\` and \`mess ps\`."
+  fi
+  exit 0
+fi
+rm -f "$errf"
+
+direct=$(printf '%s\n' "$direct_raw" | jq -c 'select(.quiet != true)' 2>/dev/null)
 loud=$("$MESS" recv --kind broadcast --peek --json 2>/dev/null | jq -c 'select(.loud == true)' 2>/dev/null)
 json=$(printf '%s\n%s\n' "$direct" "$loud" | sed '/^$/d')
 n=$(printf '%s\n' "$json" | grep -c .)
-maxid=$(printf '%s\n' "$json" | jq -rs 'if length==0 then 0 else ([.[].id | ltrimstr("m") | tonumber] | max) end' 2>/dev/null)
+# tonumber? skips any id that isn't m<N> instead of erroring out. The old form
+# aborted the whole computation on one unparseable id, leaving maxid empty ->
+# 0 -> no notice at all, suppressing the notice for every message in the batch.
+maxid=$(printf '%s\n' "$json" | jq -rs '[.[].id | tostring | ltrimstr("m") | tonumber?] | max // 0' 2>/dev/null)
 [ -z "$maxid" ] && maxid=0
 [ "$n" -eq 0 ] && exit 0
 # Call out any pending `mess ask` roots distinctly — a plain mess recv/mess
@@ -67,20 +105,29 @@ fi
 # just did) consume, which reads to the agent as a stale/redundant notification
 # for mail it already fetched. flock serializes the read-check-write so only one
 # instance of a simultaneous batch ever announces a given id.
-lockf="${TMPDIR:-/tmp}/mess-steer-$who.lock"
+lockf="$statedir/mess-steer-$who.lock"
 exec 9>"$lockf"
 flock 9
 
-statef="${TMPDIR:-/tmp}/mess-steer-$who.id"
-prev=$(cat "$statef" 2>/dev/null || echo 0)
+# State is "<highest announced id> <when we announced it>". A bare id is the
+# older format; treat its timestamp as 0 so it re-announces once immediately.
+statef="$statedir/mess-steer-$who.id"
+prev=0
+prev_at=0
+if [ -r "$statef" ]; then
+  read -r prev prev_at < "$statef" 2>/dev/null
+fi
+case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+case "$prev_at" in ''|*[!0-9]*) prev_at=0 ;; esac
+now=$(date +%s)
 
 # (The auto-wake hook consumes on an idle wake, so a woken turn's inbox is empty
 # here — no flag coordination needed. When the agent is working, the wake stands
 # down and this hook is the sole notifier.)
-if [ "$maxid" -gt "$prev" ]; then
-  jq -cn --arg c "[mess] $n unread peer message(s)$asknote as of $at — run \`mess recv\` to read them." \
-    --arg ev "$EVENT" \
-    '{hookSpecificOutput:{hookEventName:$ev,additionalContext:($c)}}'
-  printf '%s' "$maxid" > "$statef"
+if [ "$maxid" -gt "$prev" ] || [ "$((now - prev_at))" -ge "$RENOTIFY" ]; then
+  again=""
+  [ "$maxid" -le "$prev" ] && again=" (still unread)"
+  emit "[mess] $n unread peer message(s)$asknote as of $at$again — run \`mess recv\` to read them."
+  printf '%s %s\n' "$maxid" "$now" > "$statef"
 fi
 exit 0

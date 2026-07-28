@@ -698,10 +698,21 @@ What each piece does:
 - **UserPromptSubmit / PreToolUse → `mess busy`** and **Stop → `mess unbusy`** —
   drive the accurate `working` status.
 - **Stop → auto-wake** (`asyncRewake`, [`hooks/mess-wake.sh`](hooks/mess-wake.sh)):
-  the `flock` guard ensures a single parked waiter; `--no-broadcast` avoids a wake
-  storm; `--batch 1s` coalesces a burst; it parks with `--peek` and only wakes on a
-  real wake-worthy message (skips quiet/`@mention`-elsewhere ones — no phantom
-  wake). A `--loud` broadcast bypasses `--no-broadcast` on both ends of this hook —
+  the `flock` guard ensures a single parked waiter — held for the script's whole
+  lifetime, not just the park, so the busy-poll drain loop is covered too;
+  `--no-broadcast` avoids a wake storm; `--batch 1s` coalesces a burst; it parks
+  with `--peek` and only wakes on a real wake-worthy message (skips
+  quiet/`@mention`-elsewhere ones — no phantom wake). The governing rule in the
+  script: **exit 0 un-parks the agent until its next `Stop`, and for a genuinely
+  idle agent that `Stop` never comes** — so it exits only when standing down is
+  actually right (evicted, session gone, another instance holds the park), and
+  goes back to parking for every "nothing to hand over right now" case. The
+  daemon classifies those: an empty `recv --wait` reports `raced` / `timeout` /
+  `evicted` (exit 75 / 76 / 77). Each park is bounded by `PARK_TIMEOUT` (15m) so
+  the hook can re-check that its session is still alive between parks and retire
+  itself if it has been orphaned, rather than holding the lock and a phantom
+  `listening` forever. A mess outage is reported as a wake rather than swallowed,
+  since a swallowed error is indistinguishable from an empty inbox. A `--loud` broadcast bypasses `--no-broadcast` on both ends of this hook —
   it can unblock the park (the daemon's wake check checks `Loud` before the kind
   filter) *and* survives the follow-up consume step, which otherwise re-applies
   `--no-broadcast` and would silently re-queue the very message that woke it. On an
@@ -780,7 +791,14 @@ mid-turn** (like typing into a running session), there are two options:
   that peers have messaged it and reads them itself with `mess recv`. It peeks
   (doesn't consume) and dedups by **newest message id** (monotonic), so it fires
   once per genuinely new arrival — never repeating on later tool calls, and never
-  *missing* a new message just because the unread count matched after a `recv`. It
+  *missing* a new message just because the unread count matched after a `recv`.
+  Dedup is **time-bounded as well**: while the same mail stays unread the notice
+  repeats at most once a minute. Watermarking on id alone made this
+  fire-and-forget — the marker advanced the moment the notice was *printed*, with
+  no confirmation the agent saw it, so a single dropped injection meant that
+  message was never mentioned again. A failed peek is reported as a notice rather
+  than swallowed, since an error that reads as an empty inbox is how an agent
+  silently stops receiving without ever knowing. It
   also **coordinates with the auto-wake hook**: right after a wake (which already
   prompted a recv) it suppresses one notice, so the two don't double-announce the
   same batch. `additionalContext` is append-only and sticky (each emission is a

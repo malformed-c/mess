@@ -180,4 +180,18 @@ type Response struct {
 	Busy     bool         `json:"busy,omitempty"`    // (recv --if-idle) the agent was busy, so nothing was drained
 	ID       string       `json:"id,omitempty"`      // (ask) the created message's own id — the await token
 	Expired  int          `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
+	// Reason classifies an empty blocking recv, so a parked caller can tell
+	// "re-park, someone beat me to the inbox" from "stop waiting". Empty
+	// whenever messages were returned. See the Reason* constants.
+	Reason string `json:"reason,omitempty"`
 }
+
+// Reasons a blocking recv (recv --wait, await) returned no messages. Only
+// ReasonRaced means the wait should be re-established: the agent genuinely
+// had mail, another consumer just drained it first, so the caller is still
+// the right waiter and must go back to parking rather than standing down.
+const (
+	ReasonRaced   = "raced"   // woke on real mail, but another consumer drained it first
+	ReasonTimeout = "timeout" // the wait's own timeout elapsed
+	ReasonEvicted = "evicted" // the agent was removed or renamed while parked
+)

@@ -1,5 +1,98 @@
 # Known issues
 
+## Fixed (2026-07-28): an empty wake was read as "stand down" → idle agents went permanently deaf
+
+**Symptom:** an agent parks correctly, a peer sends, and the agent is never
+woken. Minutes later a send to it logs `listening=false` — there is no parked
+waiter at all, and none appears until the agent's next `Stop`, which for a
+genuinely idle agent never comes. This is the single largest cause of "waking
+up is unreliable", and it accounts for the "never parks at all" class of
+symptom previously recorded (below) as inference about rapid `Stop` events.
+
+**Root cause:** `parkAndDrain` with `--batch` sleeps the coalescing window
+*before* it drains, so for a full second after committing to return, another
+consumer can empty the inbox — a second wake-hook instance, or the agent's own
+mid-turn `mess recv`. The park then returns zero messages. `mess-wake.sh` could
+not tell that from "nothing to do" and ran `[ -z "$peek" ] && exit 0`; under
+`asyncRewake`, exit 0 neither wakes nor re-arms.
+
+Two wake-hook instances routinely coexisted despite the `flock`, because
+`flock -n "$LOCK" mess recv --wait …` held the lock only for the *park* — the
+busy-poll drain loop after it ran unlocked for as long as the agent stayed in
+its turn (16 s in one logged case), and a `Stop` in that window started a second
+instance that took the free lock and parked.
+
+**Evidence:** 31 `woke -> drained 0` events in a five-week daemon log; 5 of the
+9 most recent were followed within minutes by a `listening=false` send to that
+same agent, e.g.
+
+```
+09:27:23  recv periapsis-opus drained 1 (if-idle)      <- instance A takes it
+09:27:23  recv periapsis-opus woke -> drained 0        <- instance B gets nothing, exits 0
+09:31:02  send periapsis-fable -> periapsis-opus | pending=1 listening=false
+```
+
+**Fix:**
+1. **daemon**: an empty blocking recv now says *why* — `Response.Reason` is
+   `raced` (woke on real mail, another consumer drained it first), `timeout`, or
+   `evicted`. The CLI turns those into exit codes 75/76/77 for `recv --wait`.
+2. **mess-wake.sh**: re-parks on `raced` (and on a wake that turned up only
+   quiet mail) instead of exiting; holds its `flock` for the whole script
+   lifetime, so the "one waiter per agent" invariant actually covers the drain
+   loop. An unclassified empty return (daemon older than the CLI) also re-parks,
+   guarded against spinning.
+
+**Tests:** `TestBlockingRecvReports{Raced,Timeout,Evicted}` and
+`TestBlockingRecvHasNoReasonWhenItDelivers` (daemon_test.go);
+`TestWakeHookRepArksAfterLosingTheDrainRace` and
+`TestWakeHookRepArksWhenItsWakeLeavesOnlyQuietMail` (hooks_test.go, which drives
+the real scripts against a throwaway daemon). All fail against the previous
+hooks and pass after.
+
+## Fixed (2026-07-28): every mess error looked exactly like "no mail"
+
+**Symptom:** an agent stops receiving entirely — no wake, no mid-turn notice —
+with no indication anything is wrong. `mess whoami` still reports the right
+name, so the agent has no reason to suspect it is cut off.
+
+**Root cause:** both hooks sent every error to `/dev/null` and treated the
+resulting empty output as an empty inbox. `whoami` reads a local identity file,
+so it keeps working even when the daemon refuses every *operation* — e.g. the
+ownership guard rejecting `name "X" is in use by another live session`, which is
+exactly what an orphaned waiter (below) provokes for a restarted session.
+Reproduced: mail pending, `whoami` → the right name, steer prints nothing, wake
+exits 0 without parking.
+
+**Fix:** `mess-wake.sh` reports an outage as a *wake* (exit 2) so it is actually
+seen, and `mess-steer.sh` emits it as a notice instead of staying silent. Both
+fire once per episode via a marker file cleared on recovery — reporting
+unconditionally would loop, since a rewake ends in another `Stop` that re-runs
+the hook into the same error.
+
+**Test:** `TestSteerHookReportsAnOutageInsteadOfLookingEmpty`.
+
+## Fixed (2026-07-28): the mid-turn notice was fire-and-forget, so one dropped injection lost the message
+
+**Symptom:** mid-turn `[mess] N unread…` notices are unreliable — a message
+arrives while the agent is working and is simply never mentioned.
+
+**Root cause:** `mess-steer.sh` advanced its "highest id already announced"
+watermark the moment it *printed* the notice, with no confirmation the agent
+ever saw it. If Claude Code dropped or ignored that `additionalContext` (or the
+tool call was denied), that message was never announced again — verified: a
+second `PreToolUse` with the same message still unread printed nothing.
+
+**Fix:** dedup is now time-bounded as well as id-bounded — still-unread mail is
+re-announced at most once per `RENOTIFY` window (60 s), so a drop costs one
+window instead of the message. Also hardened `maxid`: it used
+`ltrimstr("m") | tonumber` across the whole batch, so one unparseable id made jq
+error out and suppressed the notice for *every* message in that batch;
+`tonumber?` now skips the offender instead. (Not reachable today — all message
+ids are `m<N>` — but it was one id-format change from silencing the hook
+entirely.)
+
+**Test:** `TestSteerHookReAnnouncesStillUnreadMail`.
+
 ## Fixed (2026-07-21): Grok Stop armed asyncRewake before `unbusy` → wake lost on pending mail
 
 **Symptom:** Grok session registers, sometimes parks, but a peer `mess send` while
@@ -127,7 +220,7 @@ destructive and daemon-serialized, so two wake-hook instances can't both
 print the same message's content (whichever drains first empties the inbox
 for the other).
 
-## An orphaned wake-hook process can make a dead session look falsely online
+## Fixed (2026-07-28, wake-hook half): an orphaned wake-hook process can make a dead session look falsely online
 
 **Symptom:** `mess ps` reports an agent `online`/`listening` (or `working`) long
 after its actual Claude Code session has exited — the human sees the terminal
@@ -167,13 +260,31 @@ agent alive — `listeners[name] > 0`, `busyUntil` in the future, or `lastSeen`
 within 2 minutes — and an orphaned wake process or a not-yet-expired busy TTL
 each independently satisfy one of those with nothing real behind it.
 
-**Current status: unfixed.** No code changes made. Possible directions (not
-attempted): a `SessionEnd` hook that best-effort `unregister`s/`unbusy`s; having
-`mess-wake.sh` periodically verify its own parent is still a live `claude`
-process and self-exit if not; or a real liveness probe (PID-based, per the
-"harden identity" discussion above) instead of the current listening/busy/
-lastSeen heuristic. `mess rm`/`cleanup` already exist as a manual remedy once
-noticed.
+**Confirmed still live (2026-07-28):** three parked wake hooks reparented to
+`systemd --user` with no `claude` anywhere in their ancestry — two of them 2d6h
+old. `mess ps` showed `cp-backend online listening 3 pending (oldest 12h)`:
+senders saw `listening=true` and believed their wake had landed, with nothing
+behind it. Worse, because the park was taken with `flock -n`, a *restarted*
+session under the same name could never park either — it lost the lock race and
+exited 0 — and every daemon op it tried was refused as "in use by another live
+session", which both hooks then swallowed as "no mail" (see the silent-error
+entry above).
+
+**Fixed (wake-hook half):** `mess-wake.sh` now walks up at startup to the
+nearest host-agent ancestor (`claude`/`node`/`grok`) and remembers it, then
+bounds each park (`PARK_TIMEOUT`, 15m) so it re-checks that session between
+parks — re-parking immediately while it lives, standing down once it is gone.
+comm is compared as well as pid, so a recycled pid isn't mistaken for the
+session. If no host-agent ancestor can be identified (unknown harness, no
+procfs) it never stands down, so this can only ever retire a waiter that really
+was orphaned. Test: `TestWakeHookStandsDownWhenItsSessionDies`.
+
+**Still unfixed (the rest):** `mess busy`'s 1-hour backstop TTL can still make a
+dead session read `working` for up to an hour, and there is still no `SessionEnd`
+hook running `unregister`/`unbusy` on an unclean exit. `aliveLocked`'s three
+independent liveness signals (listener count, `busyUntil`, `lastSeen`) remain a
+heuristic rather than a real probe. `mess rm`/`cleanup` are still the manual
+remedy.
 
 ## Identity leaks into Claude Code subagents (Task/Agent tool)
 

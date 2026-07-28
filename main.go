@@ -180,6 +180,13 @@ recv flags:
                     the drain (not combined with --wait/--follow)
   --json            print messages as JSON lines
 
+  With --wait, an empty return is classified by exit code (a recv that
+  delivered messages always exits 0):
+    75  raced   — real mail arrived, another consumer drained it first;
+                  the caller is still the right waiter and should re-park
+    76  timeout — the wait's own timeout elapsed
+    77  evicted — the agent was removed or renamed; stop waiting
+
 Common flags:
   --as NAME         identity of the calling agent
   --json            machine-readable output (recv, ps)
@@ -1634,8 +1641,33 @@ func cmdRecv(p paths, args []string) error {
 		updateLastMsg(p, resp.Messages)
 	}
 	printMessages(resp.Messages, *asJSON)
+	if *wait && len(resp.Messages) == 0 {
+		// Classify an empty blocking wait by exit code so a shell caller (the
+		// auto-wake hook) can act on it without parsing output. Only reached
+		// with --wait and zero messages, so a recv that delivered anything —
+		// and every non-blocking recv — still exits 0 as before.
+		switch resp.Reason {
+		case ReasonRaced:
+			os.Exit(exitRaced)
+		case ReasonTimeout:
+			os.Exit(exitTimeout)
+		case ReasonEvicted:
+			os.Exit(exitEvicted)
+		}
+	}
 	return nil
 }
+
+// Exit codes for a blocking `mess recv --wait` that returned no messages.
+// They exist so a parked shell caller can distinguish "re-park, I'm still the
+// waiter" (raced/timeout) from "stop waiting" (evicted) — treating all three
+// alike is what used to leave an idle agent silently un-parked, and therefore
+// unwakeable, until its next Stop.
+const (
+	exitRaced   = 75 // another consumer drained the inbox first — re-park
+	exitTimeout = 76 // the wait's own timeout elapsed — re-park if still wanted
+	exitEvicted = 77 // the agent was removed or renamed — stand down
+)
 
 // updateLastMsg records the most recent direct/topic message in msgs (skips
 // broadcasts, which have no coherent reply target) as the implicit root for a

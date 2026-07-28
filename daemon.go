@@ -850,6 +850,15 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 		}
 		msgs := drain()
 		elog("%s woke -> drained %d", waitLabel, len(msgs))
+		if len(msgs) == 0 {
+			// We woke on real mail but drained nothing: another consumer got
+			// there first — a second wake-hook instance, or the agent's own
+			// mid-turn `mess recv`. The --batch window widens this gap to its
+			// full duration, since it sleeps before draining. Tell the caller
+			// it raced (not "nothing to do"), so a parked waiter re-parks
+			// instead of standing down and going deaf until its next Stop.
+			return Response{OK: true, Count: 0, Reason: ReasonRaced}
+		}
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -880,10 +889,10 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 			}
 		case <-evicted:
 			elog("%s evicted (removed/renamed)", waitLabel)
-			return Response{OK: true, Messages: nil, Count: 0} // empty -> hook won't wake or re-park
+			return Response{OK: true, Count: 0, Reason: ReasonEvicted} // terminal: hook won't wake or re-park
 		case <-timeout:
 			elog("%s wait timed out (unparked)", waitLabel)
-			return Response{OK: true, Messages: nil, Count: 0}
+			return Response{OK: true, Count: 0, Reason: ReasonTimeout}
 		case <-gone:
 			elog("%s client gone (unparked)", waitLabel) // defer RemoveListener fixes presence
 			return Response{Error: "client gone"}
