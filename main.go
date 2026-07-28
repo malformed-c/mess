@@ -33,6 +33,8 @@ Identity:
                                   subscriptions to the new name
   mess whoami                     print your resolved identity (empty if none)
   mess islistening                exit 0 if you have an active listener, else 1
+  mess session-pid                print the pid of the host agent process this
+                                  session belongs to (exit 1 if undeterminable)
 
 Rooms (namespace isolation):
   mess room [join <room> | leave] print your current room, or join/leave one —
@@ -133,6 +135,8 @@ Status:
   mess warn [text...]             set a transient status warning (auto-clears when
                                   you're next active; --ttl DUR, --clear)
   mess busy / mess unbusy         mark/clear "in a turn" (drives ps working status; for hooks)
+  mess session-end                retire this session (clears busy, stops the
+                                  parked waiter); keeps identity and inbox
 
 Admin and daemon:
   mess rm <agent>                 remove an agent (e.g. a dead session) from the network
@@ -216,6 +220,8 @@ func main() {
 		err = cmdWhoami(p)
 	case "islistening":
 		err = cmdIsListening(p, args)
+	case "session-pid":
+		err = cmdSessionPID()
 
 	// Rooms
 	case "room":
@@ -259,6 +265,8 @@ func main() {
 		err = cmdState(p, args)
 	case "warn":
 		err = cmdWarn(p, args)
+	case "session-end":
+		err = cmdSessionEnd(p, args)
 	case "busy", "unbusy":
 		err = cmdBusy(p, cmd, args)
 
@@ -1163,6 +1171,22 @@ func cmdBusy(p paths, op string, args []string) error {
 	return err
 }
 
+// cmdSessionEnd retires this session on the way out (SessionEnd hook): clears
+// the in-a-turn flag and stops the parked waiter, so a session that ends —
+// cleanly or not — stops reading as present straight away. It deliberately
+// leaves the identity and the inbox alone; ending a session is not the same as
+// leaving the network, and queued mail must survive a relaunch.
+func cmdSessionEnd(p paths, args []string) error {
+	fs, as := newFlags("session-end")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	_, err = call(p, Request{Op: "session-end", As: name})
+	return err
+}
+
 // cmdDrain consumes (clears) another agent's inbox and prints what was there —
 // an operator tool to clear a stuck/dead agent's backlog. Unlike `rm` it leaves
 // the agent registered.
@@ -1544,6 +1568,20 @@ func cmdWhoami(p paths) error {
 	if name, _ := agentName(p, ""); name != "" {
 		fmt.Println(name)
 	}
+	return nil
+}
+
+// cmdSessionPID prints the pid of the host agent process this session belongs
+// to, or exits 1 if there is none to find. This is the same walk the daemon
+// uses to decide whether a session is still alive, exposed so the shell hooks
+// can ask instead of re-implementing "which ancestor is the session" — two
+// copies of that rule would be free to drift apart.
+func cmdSessionPID() error {
+	pid := hostSessionPID()
+	if pid == 0 {
+		os.Exit(1)
+	}
+	fmt.Println(pid)
 	return nil
 }
 

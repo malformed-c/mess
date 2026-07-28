@@ -559,24 +559,24 @@ func TestRegisterOwnedGuard(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 
-	if ok, _ := b.RegisterOwned("arise", "sessA", false); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessA", 0, false); !ok {
 		t.Fatal("first claim of a free name should succeed")
 	}
-	if ok, _ := b.RegisterOwned("arise", "sessA", false); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessA", 0, false); !ok {
 		t.Fatal("same session re-registering its own name should succeed")
 	}
 	// A different live session claiming the same name -> collision, regardless of
 	// terminal (the host session id is stable, so a new id is a new session).
-	if ok, msg := b.RegisterOwned("arise", "sessB", false); ok || msg == "" {
+	if ok, msg := b.RegisterOwned("arise", "sessB", 0, false); ok || msg == "" {
 		t.Fatalf("expected a collision, got ok=%v msg=%q", ok, msg)
 	}
 	// ...but --force takes it over.
-	if ok, _ := b.RegisterOwned("arise", "sessB", true); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessB", 0, true); !ok {
 		t.Fatal("force should take over")
 	}
 	// Once the owner is no longer live, another session may take the name.
 	now = now.Add(3 * time.Minute)
-	if ok, _ := b.RegisterOwned("arise", "sessC", false); !ok {
+	if ok, _ := b.RegisterOwned("arise", "sessC", 0, false); !ok {
 		t.Fatal("takeover of a non-live owner should be allowed")
 	}
 }
@@ -590,51 +590,51 @@ func TestClaimIdentityGuard(t *testing.T) {
 	b.now = func() time.Time { return now }
 
 	// A live agent owns "alice".
-	if ok, _ := b.RegisterOwned("alice", "sessA", false); !ok {
+	if ok, _ := b.RegisterOwned("alice", "sessA", 0, false); !ok {
 		t.Fatal("register should succeed")
 	}
 	// The owning session may act as alice.
-	if ok, _ := b.ClaimIdentity("alice", "sessA"); !ok {
+	if ok, _ := b.ClaimIdentity("alice", "sessA", 0); !ok {
 		t.Fatal("owner should be allowed to act as its own name")
 	}
 	// A different live session must be rejected.
-	if ok, msg := b.ClaimIdentity("alice", "sessB"); ok || msg == "" {
+	if ok, msg := b.ClaimIdentity("alice", "sessB", 0); ok || msg == "" {
 		t.Fatalf("a foreign live session must be rejected, got ok=%v", ok)
 	}
 	// No session id -> no enforcement (bare MESS_AGENT run).
-	if ok, _ := b.ClaimIdentity("alice", ""); !ok {
+	if ok, _ := b.ClaimIdentity("alice", "", 0); !ok {
 		t.Fatal("empty session id should skip the ownership check")
 	}
 	// A free name is claimable by first live use.
-	if ok, _ := b.ClaimIdentity("bob", "sessB"); !ok {
+	if ok, _ := b.ClaimIdentity("bob", "sessB", 0); !ok {
 		t.Fatal("first live use of a free name should claim it")
 	}
-	if ok, msg := b.ClaimIdentity("bob", "sessA"); ok || msg == "" {
+	if ok, msg := b.ClaimIdentity("bob", "sessA", 0); ok || msg == "" {
 		t.Fatalf("bob is now owned by sessB; sessA must be rejected, got ok=%v", ok)
 	}
 	// Once alice's owner goes stale, a new session may take over.
 	now = now.Add(3 * time.Minute)
-	if ok, _ := b.ClaimIdentity("alice", "sessB"); !ok {
+	if ok, _ := b.ClaimIdentity("alice", "sessB", 0); !ok {
 		t.Fatal("takeover of a non-live owner should be allowed")
 	}
 
 	// The shared human mailbox ("user") is exempt: any session may read/act on it
 	// (so the operator is never locked out of their own inbox).
-	if ok, _ := b.ClaimIdentity("user", "sessA"); !ok {
+	if ok, _ := b.ClaimIdentity("user", "sessA", 0); !ok {
 		t.Fatal("user mailbox should be claimable")
 	}
-	if ok, _ := b.ClaimIdentity("user", "sessB"); !ok {
+	if ok, _ := b.ClaimIdentity("user", "sessB", 0); !ok {
 		t.Fatal("a different session must still reach the shared user mailbox")
 	}
 }
 
 func TestRenameMigratesInboxAndSubscriptions(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned("old", "sessX", false)
+	b.RegisterOwned("old", "sessX", 0, false)
 	b.Send("peer", "old", "queued for old")
 	b.Sub("old", "builds")
 
-	if ok, msg := b.Rename("old", "new", "sessX", false); !ok {
+	if ok, msg := b.Rename("old", "new", "sessX", 0, false); !ok {
 		t.Fatalf("rename should succeed: %s", msg)
 	}
 	if _, ok := b.agents["old"]; ok {
@@ -662,13 +662,13 @@ func TestRenameHonorsCollisionGuard(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()
 	b.now = func() time.Time { return now }
-	b.RegisterOwned("me", "s1", false)
-	b.RegisterOwned("taken", "s2", false) // a different live session
+	b.RegisterOwned("me", "s1", 0, false)
+	b.RegisterOwned("taken", "s2", 0, false) // a different live session
 
-	if ok, msg := b.Rename("me", "taken", "s1", false); ok || msg == "" {
+	if ok, msg := b.Rename("me", "taken", "s1", 0, false); ok || msg == "" {
 		t.Fatalf("rename onto a live name should be refused, got ok=%v", ok)
 	}
-	if ok, _ := b.Rename("me", "taken", "s1", true); !ok {
+	if ok, _ := b.Rename("me", "taken", "s1", 0, true); !ok {
 		t.Fatal("--force rename should take the name over")
 	}
 	if _, ok := b.agents["me"]; ok {
@@ -733,7 +733,7 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	}
 	// Re-registering (a resumed session) also clears it.
 	b.SetWarn("bob", "again", time.Minute)
-	b.RegisterOwned("bob", "s", false)
+	b.RegisterOwned("bob", "s", 0, false)
 	if warn() != "" {
 		t.Fatalf("warning should clear on re-register, got %q", warn())
 	}
@@ -1006,14 +1006,14 @@ func TestAgentKeyRoundTrip(t *testing.T) {
 // key with no special-case collision code.
 func TestRoomedIdentitiesDontCollide(t *testing.T) {
 	b := newTestBroker()
-	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessA", false); !ok {
+	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessA", 0, false); !ok {
 		t.Fatalf("first room's admin should register: %s", msg)
 	}
-	if ok, msg := b.RegisterOwned(agentKey("B", "admin"), "sessB", false); !ok {
+	if ok, msg := b.RegisterOwned(agentKey("B", "admin"), "sessB", 0, false); !ok {
 		t.Fatalf("second room's admin should register independently: %s", msg)
 	}
 	// But within the SAME room, the usual collision guard still applies.
-	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessC", false); ok || msg == "" {
+	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessC", 0, false); ok || msg == "" {
 		t.Fatalf("a different session claiming the same room's name should collide, got ok=%v", ok)
 	}
 
@@ -1202,11 +1202,11 @@ func TestCleanupNeverPrunesUserHandleInAnyRoom(t *testing.T) {
 
 func TestRenameStaysWithinRoom(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned(agentKey("A", "old"), "sessX", false)
+	b.RegisterOwned(agentKey("A", "old"), "sessX", 0, false)
 	b.Send("peer", agentKey("A", "old"), "queued for old")
 	b.Sub(agentKey("A", "old"), topicKey("A", "builds"))
 
-	if ok, msg := b.Rename(agentKey("A", "old"), agentKey("A", "new"), "sessX", false); !ok {
+	if ok, msg := b.Rename(agentKey("A", "old"), agentKey("A", "new"), "sessX", 0, false); !ok {
 		t.Fatalf("rename should succeed: %s", msg)
 	}
 	if got := b.Drain(agentKey("A", "new"), false, 0); len(got) != 1 || got[0].Body != "queued for old" {
@@ -1222,7 +1222,7 @@ func TestRenameStaysWithinRoom(t *testing.T) {
 
 func TestFindOtherRoomFindsRegisteredElsewhere(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", false)
+	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", 0, false)
 
 	room, found := b.FindOtherRoom("", "bob")
 	if !found || room != "frontend" {
@@ -1232,7 +1232,7 @@ func TestFindOtherRoomFindsRegisteredElsewhere(t *testing.T) {
 
 func TestFindOtherRoomNoMatchInCallersOwnRoom(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", false)
+	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", 0, false)
 
 	if _, found := b.FindOtherRoom("frontend", "bob"); found {
 		t.Fatal("should not report a match when bob is registered in the caller's OWN room")
@@ -1254,10 +1254,10 @@ func TestFindOtherRoomNoMatchWhenNeverRegistered(t *testing.T) {
 // happened to address.
 func TestJoinRoomMigratesFromBareGlobal(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned("bob", "sess1", false)
+	b.RegisterOwned("bob", "sess1", 0, false)
 	b.Send("peer", "bob", "queued before joining")
 
-	if ok, msg := b.JoinRoom("bob", agentKey("frontend", "bob"), "sess1", false); !ok {
+	if ok, msg := b.JoinRoom("bob", agentKey("frontend", "bob"), "sess1", 0, false); !ok {
 		t.Fatalf("join should succeed: %s", msg)
 	}
 	if _, ok := b.agents["bob"]; ok {
@@ -1276,9 +1276,9 @@ func TestJoinRoomHonorsCollisionGuard(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()
 	b.now = func() time.Time { return now }
-	b.RegisterOwned(agentKey("frontend", "taken"), "s2", false) // a different live session
+	b.RegisterOwned(agentKey("frontend", "taken"), "s2", 0, false) // a different live session
 
-	if ok, msg := b.JoinRoom("me", agentKey("frontend", "taken"), "s1", false); ok || msg == "" {
+	if ok, msg := b.JoinRoom("me", agentKey("frontend", "taken"), "s1", 0, false); ok || msg == "" {
 		t.Fatal("joining onto a name a different live session owns should be refused")
 	}
 }
@@ -1291,11 +1291,11 @@ func TestJoinRoomChecksCollisionEvenWhenFromEqualsWho(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()
 	b.now = func() time.Time { return now }
-	b.RegisterOwned(agentKey("frontend", "taken"), "s2", false) // a different live session
+	b.RegisterOwned(agentKey("frontend", "taken"), "s2", 0, false) // a different live session
 
 	// An attacker-ish session claims FromRoom == the target room, hoping to
 	// hit Rename-style same-key fast-path semantics and skip the guard.
-	if ok, msg := b.JoinRoom(agentKey("frontend", "taken"), agentKey("frontend", "taken"), "s1", false); ok || msg == "" {
+	if ok, msg := b.JoinRoom(agentKey("frontend", "taken"), agentKey("frontend", "taken"), "s1", 0, false); ok || msg == "" {
 		t.Fatal("from==who must not bypass the collision guard")
 	}
 }
@@ -1304,9 +1304,9 @@ func TestJoinRoomForceOverridesCollision(t *testing.T) {
 	now := time.Unix(1000, 0)
 	b := NewBroker()
 	b.now = func() time.Time { return now }
-	b.RegisterOwned(agentKey("frontend", "taken"), "s2", false)
+	b.RegisterOwned(agentKey("frontend", "taken"), "s2", 0, false)
 
-	if ok, msg := b.JoinRoom("me", agentKey("frontend", "taken"), "s1", true); !ok {
+	if ok, msg := b.JoinRoom("me", agentKey("frontend", "taken"), "s1", 0, true); !ok {
 		t.Fatalf("--force should override the collision guard: %s", msg)
 	}
 }
@@ -1343,8 +1343,8 @@ func TestSnapshotRoundTripsRooms(t *testing.T) {
 // this session triggered genuinely got rejected.
 func TestSnapshotRoundTripsOwnership(t *testing.T) {
 	b := newTestBroker()
-	b.RegisterOwned("alice", "sess-alice", false)
-	b.RegisterOwned(agentKey("frontend", "bob"), "sess-bob", false)
+	b.RegisterOwned("alice", "sess-alice", 0, false)
+	b.RegisterOwned(agentKey("frontend", "bob"), "sess-bob", 0, false)
 	b.Send("peer", "carol", "hi") // carol: known (ensure'd) but never registered — a ghost
 
 	b2 := newTestBroker()
@@ -1936,5 +1936,128 @@ func TestListThreadsOrdersByMostRecentActivity(t *testing.T) {
 	}
 	if got[0].ID != rootNew.ID {
 		t.Fatalf("expected most-recently-active thread first, got %+v", got)
+	}
+}
+
+// Presence used to be inferred from three proxies that can all outlive the
+// session they stand for. `mess busy` carries a one-hour crash backstop, so a
+// session that died mid-turn read `working` — and `online` — for up to an hour
+// with no process behind it. A real probe of the owning process must override
+// that.
+func TestDeadSessionIsNotOnlineOrWorking(t *testing.T) {
+	b := NewBroker()
+	live := map[int]string{4242: "claude"}
+	b.probeComm = func(pid int) string { return live[pid] }
+
+	if ok, _ := b.RegisterOwned("alice", "sessA", 4242, false); !ok {
+		t.Fatal("register failed")
+	}
+	b.SetBusy("alice", time.Hour) // the default backstop
+	if !b.IsOnline("alice") || !b.IsWorking("alice") {
+		t.Fatal("a live busy session should read online and working")
+	}
+
+	delete(live, 4242) // the session's process is gone; busyUntil is still an hour out
+	if b.IsWorking("alice") {
+		t.Fatal("a dead session must not read `working` just because busy hasn't expired")
+	}
+	if b.IsOnline("alice") {
+		t.Fatal("a dead session must not read online")
+	}
+}
+
+// An orphaned wake hook keeps its parked listener, which was the other way a
+// dead session read online — senders saw listening=true and believed their wake
+// had landed with nothing behind it.
+func TestDeadSessionWithAParkedListenerIsNotOnline(t *testing.T) {
+	b := NewBroker()
+	live := map[int]string{99: "claude"}
+	b.probeComm = func(pid int) string { return live[pid] }
+	b.RegisterOwned("ghost", "sessG", 99, false)
+	b.AddListener("ghost")
+
+	if !b.IsOnline("ghost") {
+		t.Fatal("a live session with a listener should read online")
+	}
+	delete(live, 99)
+	if b.IsOnline("ghost") {
+		t.Fatal("an orphaned listener must not keep a dead session online")
+	}
+}
+
+// The probe must only ever act on evidence. An agent with no recorded pid (no
+// session id, an unrecognized harness, no procfs) has to keep working exactly
+// as before, or the fix would silently take every such agent offline.
+func TestUnknownSessionPIDNeverCountsAsDead(t *testing.T) {
+	b := NewBroker()
+	b.probeComm = func(int) string { return "" } // nothing is alive, as far as the probe knows
+	b.RegisterOwned("nopid", "sessN", 0, false)  // ...but we never recorded a pid
+	b.SetBusy("nopid", time.Hour)
+
+	if !b.IsOnline("nopid") || !b.IsWorking("nopid") {
+		t.Fatal("absence of a pid must not be treated as a dead session")
+	}
+}
+
+// A recycled pid must not resurrect a dead session: the recorded executable
+// name has to match too.
+func TestRecycledPIDIsNotTheSameSession(t *testing.T) {
+	b := NewBroker()
+	live := map[int]string{777: "claude"}
+	b.probeComm = func(pid int) string { return live[pid] }
+	b.RegisterOwned("alice", "sessA", 777, false)
+	b.SetBusy("alice", time.Hour)
+
+	live[777] = "sshd" // same pid, different program
+	if b.IsOnline("alice") {
+		t.Fatal("a reused pid running something else must not count as the original session")
+	}
+}
+
+// This is what let an orphan poison its own replacement: the ownership guard
+// asks aliveLocked, so a dead-but-online-looking owner made every operation by
+// the relaunched session fail with "in use by another live session" — which
+// both hooks then swallowed as "no mail".
+func TestDeadOwnerReleasesTheNameToARelaunch(t *testing.T) {
+	b := NewBroker()
+	live := map[int]string{1: "claude"}
+	b.probeComm = func(pid int) string { return live[pid] }
+	b.RegisterOwned("agent", "old-session", 1, false)
+	b.AddListener("agent") // its wake hook is still parked
+
+	if ok, _ := b.ClaimIdentity("agent", "new-session", 2); ok {
+		t.Fatal("setup: a genuinely live owner should still be protected")
+	}
+	delete(live, 1) // the old session dies without cleaning up
+	if ok, msg := b.ClaimIdentity("agent", "new-session", 2); !ok {
+		t.Fatalf("a relaunch must be able to reclaim its own name from a dead session: %s", msg)
+	}
+}
+
+// EndSession is the clean path the SessionEnd hook takes. It must drop presence
+// without destroying anything: the identity stays registered and queued mail
+// stays queued, because a session ending is not the same as leaving.
+func TestEndSessionDropsPresenceButKeepsIdentityAndMail(t *testing.T) {
+	b := NewBroker()
+	b.RegisterOwned("alice", "sessA", 0, false)
+	b.Send("bob", "alice", "unread when the session ended")
+	b.SetBusy("alice", time.Hour)
+	evicted := b.WatchEvict("alice")
+
+	b.EndSession("alice")
+
+	if b.IsWorking("alice") {
+		t.Fatal("session-end must clear the in-a-turn flag")
+	}
+	select {
+	case <-evicted:
+	default:
+		t.Fatal("session-end must evict the parked waiter, so it releases its listener and lock")
+	}
+	if !b.IsRegistered("alice") {
+		t.Fatal("session-end must not unregister — the same name usually comes right back")
+	}
+	if got := b.Drain("alice", false, 0); len(got) != 1 {
+		t.Fatalf("session-end must not discard delivered mail, got %d messages", len(got))
 	}
 }

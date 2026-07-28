@@ -279,12 +279,47 @@ session. If no host-agent ancestor can be identified (unknown harness, no
 procfs) it never stands down, so this can only ever retire a waiter that really
 was orphaned. Test: `TestWakeHookStandsDownWhenItsSessionDies`.
 
-**Still unfixed (the rest):** `mess busy`'s 1-hour backstop TTL can still make a
-dead session read `working` for up to an hour, and there is still no `SessionEnd`
-hook running `unregister`/`unbusy` on an unclean exit. `aliveLocked`'s three
-independent liveness signals (listener count, `busyUntil`, `lastSeen`) remain a
-heuristic rather than a real probe. `mess rm`/`cleanup` are still the manual
-remedy.
+**Fixed (the rest, same day):** presence is now probed rather than inferred.
+
+`aliveLocked`'s three signals (listener count, `busyUntil`, `lastSeen`) are all
+proxies that outlive the session they stand for — which is why a parked orphan
+read `listening` and a session that died mid-turn read `working` for up to
+`busy`'s one-hour backstop. Every request now carries `SessionPID`: the pid of
+the host agent process the caller belongs to, found by walking up to the nearest
+`claude`/`node`/`grok` ancestor (`session.go`, also exposed as `mess
+session-pid` so the wake hook asks for it instead of keeping a second copy of
+the rule). `ClaimIdentity`/`RegisterOwned`/`Rename`/`JoinRoom` record it, with
+the process's `comm`, against the owning name; `sessionDeadLocked` re-reads
+`/proc` and gates both `aliveLocked` and the new `workingLocked`.
+
+The probe only ever acts on evidence: an agent with no recorded pid — no session
+id, an unrecognized harness, no procfs — is never treated as dead, so nothing
+regresses where the probe can't see. `comm` is compared as well as the pid, so a
+recycled pid isn't mistaken for the original session.
+
+This also closes the collision that made an orphan poison its own replacement:
+`foreignLiveOwnerLocked` calls `aliveLocked`, so a dead owner now releases its
+name instead of rejecting the relaunched session with "in use by another live
+session" — the refusal both hooks used to swallow as "no mail".
+
+For clean exits there is now a **`SessionEnd` hook**
+(`hooks/mess-session-end.sh` → `mess session-end`), which clears busy and evicts
+the parked waiter so the listener and per-agent lock are released immediately
+rather than at the wake hook's next liveness check. It deliberately does *not*
+`unregister` (as this entry originally suggested): `unregister` is `RemoveAgent`,
+which discards the inbox — a session ending is no reason to drop mail peers
+already delivered, and the same name usually comes straight back.
+
+Tests: `TestDeadSessionIsNotOnlineOrWorking`,
+`TestDeadSessionWithAParkedListenerIsNotOnline`,
+`TestUnknownSessionPIDNeverCountsAsDead`, `TestRecycledPIDIsNotTheSameSession`,
+`TestDeadOwnerReleasesTheNameToARelaunch`,
+`TestEndSessionDropsPresenceButKeepsIdentityAndMail` (broker_test.go) and
+`TestSessionEndHookFreesTheWaiterForARelaunch` (hooks_test.go).
+
+**Remaining:** `mess rm`/`cleanup` are still the manual remedy for an agent
+whose pid was never recorded (a session-less `MESS_AGENT` run, or a harness the
+ancestor walk doesn't recognize).
 
 ## Identity leaks into Claude Code subagents (Task/Agent tool)
 

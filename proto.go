@@ -93,6 +93,13 @@ type Request struct {
 	Loud     bool     `json:"loud,omitempty"`     // (broadcast) force a desktop notification to the human operator, regardless of @mention
 	HostWide bool     `json:"hostWide,omitempty"` // (broadcast --loud) skip room scoping, reach every room on the host
 
+	// SessionPID is the pid of the host session's own process (stamped on every
+	// request; 0 when it can't be determined). It lets the daemon probe whether
+	// a session is still alive instead of inferring it from a listener count, a
+	// busy flag, or a last-seen timestamp — all three outlive a session that
+	// died without cleaning up. See session.go.
+	SessionPID int `json:"sessionPid,omitempty"`
+
 	Room     string `json:"room,omitempty"`     // room to act in ("" = global/default room)
 	Global   bool   `json:"global,omitempty"`   // (send/ask) explicitly target the global room, bypassing withRoom's ambient-room auto-fill (Room=="" is otherwise indistinguishable from "not set")
 	All      bool   `json:"all,omitempty"`      // (ps) ignore Room, show every room

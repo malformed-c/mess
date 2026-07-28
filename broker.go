@@ -17,6 +17,11 @@ type Broker struct {
 	seq    int
 	now    func() time.Time // injectable clock for tests
 
+	// probeComm reads a process's executable name, or "" if it isn't running —
+	// the liveness probe behind sessionDeadLocked. Injectable, so presence can
+	// be tested without spawning real processes.
+	probeComm func(pid int) string
+
 	// pendingAcks maps a message ID to a channel signaled when that message is
 	// read (consumed) by its recipient. Transient; never persisted.
 	pendingAcks map[string]chan struct{}
@@ -91,6 +96,12 @@ const maxHistory = 50
 // different live session can't act under it.
 type ownerInfo struct {
 	session string
+	// pid/comm identify the host session's own process, so liveness can be
+	// probed instead of inferred. pid 0 (unrecognized harness, no procfs) means
+	// "can't tell" and never counts as dead. comm is kept alongside so a
+	// recycled pid isn't mistaken for the session that claimed the name.
+	pid  int
+	comm string
 }
 
 // warnInfo is a transient status warning and its expiry.
@@ -183,6 +194,7 @@ func NewBroker() *Broker {
 		threadParticipants: map[string]map[string]bool{},
 		topicHistory:       map[string][]Message{},
 		now:                time.Now,
+		probeComm:          processComm,
 	}
 }
 
@@ -210,6 +222,30 @@ func (b *Broker) UnwatchEvict(name string, ch chan struct{}) {
 	if len(b.evicts[name]) == 0 {
 		delete(b.evicts, name)
 	}
+}
+
+// evictWaitersLocked stops every parked recv on name, so a waiter doesn't linger
+// as a ghost listener (and get resurrected on a daemon restart). Held lock.
+func (b *Broker) evictWaitersLocked(name string) {
+	for _, ch := range b.evicts[name] {
+		close(ch)
+	}
+	delete(b.evicts, name)
+}
+
+// EndSession retires an agent's host session without touching its identity or
+// its mail: it clears the in-a-turn flag and stops any parked waiter, so
+// presence drops immediately instead of waiting out busy's one-hour crash
+// backstop or the wake hook's park timeout (which would otherwise keep the
+// per-agent lock held, so a relaunch under the same name couldn't park either).
+//
+// Deliberately NOT unregister: a session ending is no reason to discard mail
+// peers have already delivered, and the same name usually comes straight back.
+func (b *Broker) EndSession(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.busyUntil, name)
+	b.evictWaitersLocked(name)
 }
 
 // SetWarn sets (or, with empty text, clears) an agent's transient status warning,
@@ -302,7 +338,7 @@ func (b *Broker) Register(name string) {
 // a name whose owner is no longer live is allowed (reclaiming a dead name). The
 // host session id is stable for a session's whole life, so a different id under
 // the same name is always a distinct session — never a rotation.
-func (b *Broker) RegisterOwned(name, session string, force bool) (bool, string) {
+func (b *Broker) RegisterOwned(name, session string, pid int, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !force && b.foreignLiveOwnerLocked(name, session) {
@@ -311,9 +347,18 @@ func (b *Broker) RegisterOwned(name, session string, force bool) (bool, string) 
 	b.ensure(name)
 	b.touch(name)
 	b.clearWarnLocked(name) // re-registering (fresh/resumed session) clears a stale warning
-	b.owners[name] = ownerInfo{session: session}
+	b.setOwnerLocked(name, session, pid)
 	b.changed()
 	return true, ""
+}
+
+// setOwnerLocked records who owns a name: the host session id, plus the pid and
+// executable name of that session's own process so its liveness can be probed
+// rather than guessed at. Every ownership transition funnels through here, so a
+// call site can't silently drop the pid and quietly fall back to heuristics.
+// Held lock.
+func (b *Broker) setOwnerLocked(name, session string, pid int) {
+	b.owners[name] = ownerInfo{session: session, pid: pid, comm: b.probeComm(pid)}
 }
 
 // IsRegistered reports whether name has ever been claimed via
@@ -366,6 +411,15 @@ func (b *Broker) IsOnline(name string) bool {
 	return b.aliveLocked(name)
 }
 
+// IsWorking reports whether name is mid-turn — the same signal `mess ps`'s
+// working column uses, which is busy corroborated by the owning session still
+// existing (busy on its own is a one-hour crash backstop).
+func (b *Broker) IsWorking(name string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.workingLocked(name)
+}
+
 // foreignLiveOwnerLocked reports whether name is currently owned by a *different*
 // still-live session than the caller's — i.e. claiming it would be an identity
 // takeover. A "" session can't be distinguished from any other, so it is never
@@ -389,7 +443,7 @@ func ownershipMsg(name string) string {
 // speak or receive as another live agent. First live user of a free/dead name
 // takes ownership. No session id (e.g. a bare MESS_AGENT run) means no
 // enforcement — the check is skipped.
-func (b *Broker) ClaimIdentity(name, session string) (bool, string) {
+func (b *Broker) ClaimIdentity(name, session string, pid int) (bool, string) {
 	if name == "" || session == "" || isUserHandle(name) {
 		return true, "" // no id, or the shared human mailbox — never single-session-owned
 	}
@@ -400,7 +454,7 @@ func (b *Broker) ClaimIdentity(name, session string) (bool, string) {
 	}
 	b.ensure(name)
 	b.touch(name) // acting under a name is activity — keeps ownership live-and-enforced
-	b.owners[name] = ownerInfo{session: session}
+	b.setOwnerLocked(name, session, pid)
 	return true, ""
 }
 
@@ -444,7 +498,7 @@ func (b *Broker) migrateLocked(from, to string) {
 // honors the same collision guard as RegisterOwned on the destination name
 // (refuses a different live session's name unless force). Returns ok=false and a
 // message on collision.
-func (b *Broker) Rename(old, newName, session string, force bool) (bool, string) {
+func (b *Broker) Rename(old, newName, session string, pid int, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if newName == "" {
@@ -453,7 +507,7 @@ func (b *Broker) Rename(old, newName, session string, force bool) (bool, string)
 	if old == newName {
 		b.ensure(newName)
 		b.touch(newName)
-		b.owners[newName] = ownerInfo{session: session}
+		b.setOwnerLocked(newName, session, pid)
 		b.changed()
 		return true, ""
 	}
@@ -462,7 +516,7 @@ func (b *Broker) Rename(old, newName, session string, force bool) (bool, string)
 	}
 	b.migrateLocked(old, newName)
 	b.touch(newName)
-	b.owners[newName] = ownerInfo{session: session}
+	b.setOwnerLocked(newName, session, pid)
 	b.changed()
 	return true, ""
 }
@@ -484,7 +538,7 @@ func (b *Broker) Rename(old, newName, session string, force bool) (bool, string)
 // both empty/global) — checking the guard first closes that gap, so a
 // caller can never bypass ownership enforcement by aiming FromRoom at its
 // own target.
-func (b *Broker) JoinRoom(from, who, session string, force bool) (bool, string) {
+func (b *Broker) JoinRoom(from, who, session string, pid int, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !force && b.foreignLiveOwnerLocked(who, session) {
@@ -495,7 +549,7 @@ func (b *Broker) JoinRoom(from, who, session string, force bool) (bool, string) 
 	}
 	b.ensure(who)
 	b.touch(who)
-	b.owners[who] = ownerInfo{session: session}
+	b.setOwnerLocked(who, session, pid)
 	b.changed()
 	return true, ""
 }
@@ -505,6 +559,14 @@ func (b *Broker) JoinRoom(from, who, session string, force bool) (bool, string) 
 // lock. Used by the register collision guard to tell a live owner from a dead
 // one whose name may be reclaimed.
 func (b *Broker) aliveLocked(name string) bool {
+	// A real probe overrides every proxy below. Each of them can outlive the
+	// session it stands for: an orphaned wake hook keeps its listener parked for
+	// as long as it runs, and busyUntil is a one-hour crash backstop. Without
+	// this gate a session that died mid-turn reads online — and, worse, keeps
+	// the ownership guard rejecting its own replacement under the same name.
+	if b.sessionDeadLocked(name) {
+		return false
+	}
 	if b.listeners[name] > 0 {
 		return true
 	}
@@ -515,6 +577,25 @@ func (b *Broker) aliveLocked(name string) bool {
 		return true
 	}
 	return false
+}
+
+// sessionDeadLocked reports that the host session behind name is KNOWN to be
+// gone. Absence of evidence is never "dead": an agent with no recorded pid (no
+// session id, an unrecognized harness, no procfs) returns false, so the probe
+// can only ever retire presence it can actually see has ended. Held lock.
+func (b *Broker) sessionDeadLocked(name string) bool {
+	o, ok := b.owners[name]
+	if !ok || o.pid == 0 || o.comm == "" {
+		return false
+	}
+	return b.probeComm(o.pid) != o.comm
+}
+
+// workingLocked is the "in a turn" status ps reports. busyUntil on its own is a
+// crash backstop that defaults to an hour, so it only means anything while the
+// session that set it still exists. Held lock.
+func (b *Broker) workingLocked(name string) bool {
+	return b.busyUntil[name].After(b.now()) && !b.sessionDeadLocked(name)
 }
 
 // Send delivers a direct message to a single recipient.
@@ -1416,10 +1497,7 @@ func (b *Broker) removeAgentLocked(name string) bool {
 	delete(b.busyUntil, name)
 	delete(b.lastSeen, name)
 	delete(b.owners, name)
-	for _, ch := range b.evicts[name] {
-		close(ch) // wake any parked recv on this name so it stops instead of ghosting
-	}
-	delete(b.evicts, name)
+	b.evictWaitersLocked(name)
 	for topic, subs := range b.topics {
 		delete(subs, name)
 		if len(subs) == 0 {
@@ -1563,7 +1641,7 @@ func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 		if w, ok := b.warnings[key]; ok && w.until.After(b.now()) {
 			warning = w.text // expired warnings are simply not reported
 		}
-		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.busyUntil[key].After(b.now()), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest})
+		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.workingLocked(key), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest})
 	}
 	sort.Slice(agents, func(i, j int) bool {
 		return roomThenNameLess(agents[i].Room, agents[i].Name, agents[j].Room, agents[j].Name)

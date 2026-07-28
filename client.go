@@ -20,6 +20,9 @@ func withSession(req Request) Request {
 	if req.Session == "" {
 		req.Session = sessionID()
 	}
+	if req.SessionPID == 0 {
+		req.SessionPID = hostSessionPID()
+	}
 	return req
 }
 

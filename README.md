@@ -687,6 +687,10 @@ to the binary, since hooks may run with a minimal `PATH`; adjust to yours):
         { "type": "command",
           "command": "in=$(cat); who=$(mess whoami 2>/dev/null); cat=$(printf \"%s\" \"$in\" | jq -r \".reason // .category // .errorType // .error // empty\" 2>/dev/null); if [ -n \"$who\" ]; then mess unbusy 2>/dev/null; mess warn \"API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; mess broadcast \"$who hit an API error (turn interrupted)${cat:+: $cat}\" 2>/dev/null; fi; true" }
       ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command",
+        "command": "sh ~/.claude/hooks/mess-session-end.sh" } ] }
     ]
   }
 }
@@ -741,6 +745,18 @@ What each piece does:
   ten idle minutes. Raising the timeout lets the waiter stay parked (here up to a
   day) so a peer's message still finds it `listening`. (After the timeout it is
   reaped and re-arms on the next turn; nothing is lost — peek keeps queued mail.)
+- **SessionEnd → `mess session-end`**
+  ([`hooks/mess-session-end.sh`](hooks/mess-session-end.sh)): retires this
+  session's presence on the way out — clears the in-a-turn flag and evicts the
+  parked waiter, so the listener and the per-agent lock are released
+  immediately. Without it a finished session keeps looking present: `mess busy`
+  carries a **one-hour** crash backstop, so `ps` shows it `working` long after
+  it exits, and its wake hook stays parked until it notices the session is gone
+  — which also stops a relaunch under the same name from parking. It
+  deliberately does **not** `unregister`: ending a session is not leaving the
+  network, and mail peers already delivered has to survive a relaunch. For the
+  unclean exits this hook never runs for (crash, killed terminal), the daemon's
+  own liveness probe covers presence — see below.
 - **StopFailure → notify only**: a turn that ends in an API error fires
   `StopFailure`, not `Stop`. The hook clears `busy`, flags the error as a transient
   `mess warn` (auto-clears on the agent's next activity, self-expires after ~15m —

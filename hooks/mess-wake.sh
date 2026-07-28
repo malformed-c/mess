@@ -47,22 +47,13 @@ flock -n 9 || exit 0   # a live park already holds it; that instance is the wait
 # terminal), this background hook is reparented to init/systemd and would
 # otherwise park forever: holding the lock so the agent's next session can
 # never park, and keeping a phantom `listening` in `mess ps` that makes senders
-# believe their wake landed. Walk up to the nearest host-agent ancestor — the
-# actual session process, not $PPID, which could be a short-lived wrapper — and
-# remember it. If we can't identify one (unknown harness, no procfs) we never
-# stand down, so this can only ever remove a waiter that has really been
-# orphaned.
-session_pid="${MESS_WAKE_SESSION_PID:-}"  # tests pin this instead of walking
-if [ -z "$session_pid" ]; then
-  _p=$PPID
-  while [ -n "$_p" ] && [ "$_p" -gt 1 ] 2>/dev/null; do
-    case "$(cat "/proc/$_p/comm" 2>/dev/null)" in
-      claude|node|grok) session_pid=$_p; break ;;
-      '') break ;;
-    esac
-    _p=$(awk '/^PPid:/{print $2}' "/proc/$_p/status" 2>/dev/null)
-  done
-fi
+# believe their wake landed. `mess session-pid` resolves the host agent process
+# we belong to — the same walk the daemon uses to probe liveness, asked for
+# rather than re-implemented here, so the two can't drift. If it can't identify
+# one (unknown harness, no procfs) we never stand down, so this can only ever
+# retire a waiter that really was orphaned. The clean path is the SessionEnd
+# hook, which evicts the waiter immediately; this is the crash backstop.
+session_pid="${MESS_WAKE_SESSION_PID:-$("$MESS" session-pid 2>/dev/null)}"
 session_comm=$(cat "/proc/$session_pid/comm" 2>/dev/null)
 
 # session_alive re-reads comm rather than just checking the pid exists, so a

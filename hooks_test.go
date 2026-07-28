@@ -258,6 +258,54 @@ func TestWakeHookStandsDownWhenItsSessionDies(t *testing.T) {
 	}
 }
 
+// The SessionEnd hook is the clean counterpart to the orphan guard: it retires
+// presence the moment a session ends, instead of leaving `working` set for
+// busy's one-hour backstop and the wake hook parked until it notices. Crucially
+// it must free the per-agent lock, or a relaunch under the same name can't park.
+func TestSessionEndHookFreesTheWaiterForARelaunch(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+
+	hook := e.wakeHook("victim")
+	if !e.waitListening("victim", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+	e.mess("victim", "busy", "--ttl", "1h") // mid-turn when the session ends
+
+	cmd := exec.Command("sh", filepath.Join(e.hook, "mess-session-end.sh"))
+	cmd.Env = e.env("victim")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("session-end hook: %v\n%s", err, out)
+	}
+
+	// The parked waiter is evicted, so it exits and releases both its listener
+	// and the lock.
+	if code, _ := hook.wait(t, 5*time.Second); code != 0 {
+		t.Fatalf("evicted wake hook should exit cleanly, got %d", code)
+	}
+	if !e.waitListening("victim", false, 3*time.Second) {
+		t.Fatal("session-end left a phantom listener behind")
+	}
+	for _, line := range strings.Split(e.mess("victim", "ps"), "\n") {
+		if strings.Contains(line, "victim") && strings.Contains(line, "working") {
+			t.Fatalf("session-end must clear `working`, not leave busy's 1h backstop running: %q", line)
+		}
+	}
+
+	// A relaunch under the same name can park straight away, and identity and
+	// queued mail survive — ending a session is not leaving the network.
+	relaunch := e.wakeHook("victim")
+	if !e.waitListening("victim", true, 5*time.Second) {
+		t.Fatal("a relaunch under the same name could not park — the lock was never released")
+	}
+	e.mess("sender", "send", "victim", "mail after the session ended")
+	code, stderr := relaunch.wait(t, 10*time.Second)
+	if code != 2 || !strings.Contains(stderr, "mail after the session ended") {
+		t.Fatalf("relaunched hook did not deliver mail queued while away: exit=%d stderr=%q", code, stderr)
+	}
+}
+
 // steer runs hooks/mess-steer.sh once and returns its stdout (the notice, if any).
 func (e *hookEnv) steer(as string, extra ...string) string {
 	e.t.Helper()

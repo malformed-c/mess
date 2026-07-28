@@ -191,8 +191,8 @@ func TestDispatchStripsLeadingHashFromTopic(t *testing.T) {
 // broker's own room-aware methods tested directly in broker_test.go.
 func TestDispatchRoomScopesSend(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned(agentKey("A", "bob"), "", false)
-	d.broker.RegisterOwned(agentKey("B", "bob"), "", false)
+	d.broker.RegisterOwned(agentKey("A", "bob"), "", 0, false)
+	d.broker.RegisterOwned(agentKey("B", "bob"), "", 0, false)
 
 	if resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "A", Body: "for room A's bob"}); !resp.OK {
 		t.Fatalf("send failed: %+v", resp)
@@ -445,7 +445,7 @@ func TestDispatchRecvIfIdleStandsDownWhenBusy(t *testing.T) {
 // (a plain threaded send, exactly what `mess reply` issues) arrives.
 func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned("bob", "", false)
+	d.broker.RegisterOwned("bob", "", 0, false)
 	_, server := net.Pipe()
 
 	askResp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
@@ -539,7 +539,7 @@ func TestDispatchAskRejectsRegisteredButOfflineRecipient(t *testing.T) {
 	now := time.Unix(0, 0)
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.now = func() time.Time { return now }
-	d.broker.RegisterOwned("bob", "", false)
+	d.broker.RegisterOwned("bob", "", 0, false)
 	now = now.Add(3 * time.Minute) // past the 2-minute "recently active" window
 
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
@@ -552,7 +552,7 @@ func TestDispatchAskRejectsRegisteredButOfflineRecipient(t *testing.T) {
 // parked recv --wait) is a valid ask target.
 func TestDispatchAskAllowsRegisteredAndOnlineRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned("bob", "", false)
+	d.broker.RegisterOwned("bob", "", 0, false)
 	d.broker.AddListener("bob") // genuinely online: has a live listener
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
 	if !resp.OK || resp.ID == "" {
@@ -600,7 +600,7 @@ func TestDispatchSendRejectsNeverRegisteredRecipient(t *testing.T) {
 // create a same-named ghost in the sender's own room.
 func TestDispatchSendRejectsCrossRoomGhost(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", false)
+	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", 0, false)
 
 	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "hi"}) // no Room: global
 	if resp.Error == "" {
@@ -618,7 +618,7 @@ func TestDispatchSendRejectsCrossRoomGhost(t *testing.T) {
 // to reach an agent registered in a different room.
 func TestDispatchSendAllowsExplicitRoomTargeting(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", false)
+	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", 0, false)
 
 	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "frontend", Body: "hi"})
 	if !resp.OK {
@@ -635,7 +635,7 @@ func TestDispatchSendAllowsExplicitRoomTargeting(t *testing.T) {
 // exactly the intended fire-and-forget behavior.
 func TestDispatchSendAllowsRegisteredButOfflineRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned("bob", "", false)
+	d.broker.RegisterOwned("bob", "", 0, false)
 	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "hi"})
 	if !resp.OK {
 		t.Fatalf("expected send to a registered-but-offline recipient to succeed, got %+v", resp)
@@ -656,7 +656,7 @@ func TestDispatchSendAllowsUserHandleWithoutRegistration(t *testing.T) {
 // when the name is registered elsewhere.
 func TestDispatchAskCrossRoomHint(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", false)
+	d.broker.RegisterOwned(agentKey("frontend", "bob"), "", 0, false)
 
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
 	if resp.Error == "" {
@@ -690,7 +690,7 @@ func TestDispatchRoomJoinRejectsSlashName(t *testing.T) {
 
 func TestDispatchRenameRejectsSlashName(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned("alice", "", false)
+	d.broker.RegisterOwned("alice", "", 0, false)
 	resp := d.dispatch(Request{Op: "rename", As: "alice", To: "room/alice"})
 	if resp.Error == "" {
 		t.Fatal("expected an error renaming to a name containing '/'")
@@ -701,7 +701,7 @@ func TestDispatchRenameRejectsSlashName(t *testing.T) {
 
 func TestDispatchRoomJoinMigratesFromPreviousRoom(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
-	d.broker.RegisterOwned("bob", "", false)
+	d.broker.RegisterOwned("bob", "", 0, false)
 	d.broker.send("peer", "bob", "queued before joining", "", false, nil, false)
 
 	resp := d.dispatch(Request{Op: "room-join", As: "bob", Room: "frontend", FromRoom: ""})
@@ -734,7 +734,7 @@ func newTestDaemonWithJournal(t *testing.T) *daemon {
 // — end-to-end through dispatch, not the journal package directly.
 func TestDispatchSendBroadcastPubAllJournal(t *testing.T) {
 	d := newTestDaemonWithJournal(t)
-	d.broker.RegisterOwned("bob", "", false)
+	d.broker.RegisterOwned("bob", "", 0, false)
 	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "direct hello"})
 	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "broadcast hello"})
 	d.dispatch(Request{Op: "sub", As: "bob", Topic: "eng"})
@@ -758,8 +758,8 @@ func TestDispatchSendBroadcastPubAllJournal(t *testing.T) {
 // log defaults to the caller's own room, matching Ps/Broadcast.
 func TestDispatchLogScopesToCallerRoomByDefault(t *testing.T) {
 	d := newTestDaemonWithJournal(t)
-	d.broker.RegisterOwned(agentKey("A", "bob"), "", false)
-	d.broker.RegisterOwned(agentKey("B", "dave"), "", false)
+	d.broker.RegisterOwned(agentKey("A", "bob"), "", 0, false)
+	d.broker.RegisterOwned(agentKey("B", "dave"), "", 0, false)
 	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "A", Body: "room A message"})
 	d.dispatch(Request{Op: "send", As: "carol", To: "dave", Room: "B", Body: "room B message"})
 

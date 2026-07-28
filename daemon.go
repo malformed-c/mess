@@ -293,7 +293,7 @@ func (d *daemon) handle(conn net.Conn) {
 	// so "admin" in one room never collides with "admin" in another.
 	if actsAsSelf(req.Op) {
 		who := agentKey(req.Room, req.As)
-		if ok, msg := d.broker.ClaimIdentity(who, req.Session); !ok {
+		if ok, msg := d.broker.ClaimIdentity(who, req.Session, req.SessionPID); !ok {
 			elog("%s as %s refused: %s", req.Op, req.As, msg)
 			writeResp(conn, Response{Error: msg})
 			return
@@ -412,7 +412,7 @@ func writeResp(conn net.Conn, r Response) {
 func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
-		"busy", "unbusy", "recv", "listen", "replay", "unregister", "room-leave",
+		"busy", "unbusy", "session-end", "recv", "listen", "replay", "unregister", "room-leave",
 		"bridge", "unbridge", "export", "thread-list", "ask", "await":
 		return true
 	}
@@ -459,7 +459,7 @@ func (d *daemon) dispatch(req Request) Response {
 		if err := rejectSlashName(req.As); err != nil {
 			return Response{Error: err.Error()}
 		}
-		if ok, msg := b.RegisterOwned(who, req.Session, req.Force); !ok {
+		if ok, msg := b.RegisterOwned(who, req.Session, req.SessionPID, req.Force); !ok {
 			elog("register %s refused: %s", req.As, msg)
 			return Response{Error: msg}
 		}
@@ -470,7 +470,7 @@ func (d *daemon) dispatch(req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		from := agentKey(req.FromRoom, req.As)
-		if ok, msg := b.JoinRoom(from, who, req.Session, req.Force); !ok {
+		if ok, msg := b.JoinRoom(from, who, req.Session, req.SessionPID, req.Force); !ok {
 			elog("room-join %s in %q refused: %s", req.As, req.Room, msg)
 			return Response{Error: msg}
 		}
@@ -615,6 +615,10 @@ func (d *daemon) dispatch(req Request) Response {
 	case "unbusy":
 		b.ClearBusy(who)
 		return Response{OK: true}
+	case "session-end":
+		b.EndSession(who)
+		elog("session-end %s", req.As)
+		return Response{OK: true}
 	case "rm":
 		if b.RemoveAgent(to) {
 			elog("rm %s", req.To)
@@ -642,7 +646,7 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		// Rename stays within one room: old and new are composited with the same
 		// req.Room. Moving to a *different* room is `mess room join` instead.
-		if ok, msg := b.Rename(who, to, req.Session, req.Force); !ok {
+		if ok, msg := b.Rename(who, to, req.Session, req.SessionPID, req.Force); !ok {
 			elog("rename %s -> %s refused: %s", req.As, req.To, msg)
 			return Response{Error: msg}
 		}
