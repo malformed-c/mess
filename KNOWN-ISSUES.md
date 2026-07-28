@@ -1,5 +1,43 @@
 # Known issues
 
+## Fixed (2026-07-28): `--help` on a subcommand was sent as the message body
+
+**Symptom (hit live 2026-07-27):** `mess reply --help` did not print help — it
+sent the literal text `--help` to a peer (`const-sonnet-5`), in whatever thread
+happened to be open, and needed a follow-up retraction. Same for `-h`, and for
+any misspelled flag: `mess send bob --flie x` sent `--flie x` as content.
+
+**Root cause:** `-h`/`--help` were recognized only at top level (`mess --help`).
+`newFlags` registers just `--as`, and `hoistFlags` hoists only flags the command
+actually defines, deliberately leaving every other dash-token among the
+positionals — where `bodyFrom` turns it into the body.
+
+That leave-unknown-dashes-alone rule is *correct* and stays: it is what lets a
+message legitimately be `-1`. The severity here is about blast radius rather
+than annoyance — for a send-shaped command the failure mode is not a confusing
+error but an unintended message delivered to another agent, and reaching for
+`--help` is the single most likely moment for a caller to be unsure what a
+command does.
+
+**Fix:** `parseAnywhere` — the one place every subcommand parses through — now
+recognizes `-h`/`--help`, prints that command's usage entry plus its real flags
+(the flag list comes from the flagset, so it cannot drift), and exits 0. `--`
+still marks everything after it as literal text, so `mess send bob -- --help`
+sends that content. A bare unrecognized `--long-flag` left among the positionals
+now warns on stderr and is still sent, rather than erroring — the token really
+might be intended text. Single-dash tokens are untouched.
+
+Also fixed the related milder case: an id-shaped lone positional on `reply`
+(`mess reply m6203 …`) now says "use `--thread m6203`" instead of silently
+becoming body text — or, with `--file`, misreporting as "--file conflicts with a
+body given on the command line", which named the wrong mistake entirely.
+
+**Tests:** `TestWantsHelp*`, `TestUsageForFindsPerCommandEntries`,
+`TestHoistFlagsReportsScannedPositionalsForTypoDetection`,
+`TestLooksLikeMessageID`, and `TestReplyHelpPrintsUsageInsteadOfMessagingAPeer`
+— an end-to-end run of the reported incident that asserts the peer's inbox stays
+empty.
+
 ## Fixed (2026-07-28): an empty wake was read as "stand down" → idle agents went permanently deaf
 
 **Symptom:** an agent parks correctly, a peer sends, and the agent is never

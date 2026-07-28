@@ -393,6 +393,18 @@ func newFlags(name string) (*flag.FlagSet, *string) {
 // command actually defines are hoisted; unknown dash-tokens (real message text
 // like "-1") are left untouched in the positionals.
 func parseAnywhere(fs *flag.FlagSet, args []string) error {
+	// -h/--help used to be handled ONLY at top level (`mess --help`). Per
+	// subcommand it fell through to the rule below — unrecognized dash-tokens
+	// stay in the positionals — so bodyFrom turned it into message text and
+	// `mess reply --help` SENT the literal "--help" to a peer. For a
+	// send-shaped command the failure mode isn't a confusing error, it's an
+	// unintended message delivered to someone else; and reaching for --help is
+	// exactly the moment a caller is least sure what the command does. Every
+	// subcommand parses through here, so this is the one place to catch it.
+	if wantsHelp(args) {
+		printCommandUsage(fs)
+		os.Exit(0)
+	}
 	valueFlags, boolFlags := map[string]bool{}, map[string]bool{}
 	fs.VisitAll(func(f *flag.Flag) {
 		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
@@ -401,19 +413,118 @@ func parseAnywhere(fs *flag.FlagSet, args []string) error {
 			valueFlags[f.Name] = true
 		}
 	})
-	return fs.Parse(hoistFlags(args, valueFlags, boolFlags))
+	hoisted, pos := hoistFlags(args, valueFlags, boolFlags)
+	warnUnknownLongFlag(pos, valueFlags, boolFlags)
+	return fs.Parse(hoisted)
+}
+
+// wantsHelp reports whether args is asking for this subcommand's usage.
+// Scanning stops at "--", so a body that really does need that literal text
+// can still be sent as `mess send bob -- --help`.
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "-h" || a == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+// printCommandUsage prints one subcommand's help: its curated entry from the
+// top-level usage text, plus its actual flags. The flag list comes from the
+// flagset rather than the usage string so it can't drift out of date; the
+// prose stays hand-written because generated output can't explain intent.
+func printCommandUsage(fs *flag.FlagSet) {
+	if entry := usageFor(fs.Name()); entry != "" {
+		fmt.Print(entry)
+	} else {
+		fmt.Printf("  mess %s\n", fs.Name())
+	}
+	fs.SetOutput(os.Stdout)
+	fmt.Println("\nflags:")
+	fs.PrintDefaults()
+	fmt.Println("\n(`mess help` for the full command list)")
+}
+
+// usageFor pulls one command's entry out of the top-level usage text: its
+// "  mess <cmd> …" line plus any wrapped continuation lines. Returns "" when a
+// command has no entry of its own, in which case the caller falls back to just
+// listing flags.
+func usageFor(cmd string) string {
+	var out []string
+	lines := strings.Split(usage, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !isUsageEntryFor(lines[i], cmd) {
+			continue
+		}
+		out = append(out, lines[i])
+		for i+1 < len(lines) && strings.HasPrefix(lines[i+1], "   ") {
+			i++
+			out = append(out, lines[i])
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+// isUsageEntryFor matches a usage line documenting cmd, either as the line's
+// own command or as the far side of an alternation ("mess busy / mess unbusy").
+// The character after the name must be a boundary, so "room" doesn't match a
+// hypothetical "rooms".
+func isUsageEntryFor(line, cmd string) bool {
+	for _, prefix := range []string{"  mess " + cmd, "/ mess " + cmd} {
+		i := strings.Index(line, prefix)
+		if i < 0 || (prefix[0] == ' ' && i != 0) {
+			continue
+		}
+		rest := line[i+len(prefix):]
+		if rest == "" || rest[0] == ' ' {
+			return true
+		}
+	}
+	return false
+}
+
+// warnUnknownLongFlag catches the likely-typo case: a bare, unrecognized
+// --long-flag left among the positionals, where it becomes message text.
+// Leaving unknown dash-tokens as text is correct and deliberate — it is what
+// lets a message legitimately be "-1" — so this warns rather than errors: the
+// token really might be intended. Only double-dash tokens qualify; a
+// single-dash "-1" is far likelier to be a message than a mistake. A quoted
+// body mentioning a flag ("use --json for that") is one positional that does
+// not start with "--", so it never trips this.
+func warnUnknownLongFlag(scanned []string, valueFlags, boolFlags map[string]bool) {
+	for _, a := range scanned {
+		if !strings.HasPrefix(a, "--") {
+			continue
+		}
+		name, ok := flagToken(a)
+		if !ok || valueFlags[name] || boolFlags[name] {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "mess: warning: %s is not a flag of this command, so it is being sent as message text — put `--` before the body if that is intended, or see `-h`\n", a)
+		return
+	}
 }
 
 // hoistFlags returns args reordered as: recognized flags, then "--", then
 // positionals. The "--" terminator means a dash-leading body token is treated as
 // text, not a flag.
-func hoistFlags(args []string, valueFlags, boolFlags map[string]bool) []string {
+// The second return is the positionals collected BEFORE any explicit "--".
+// Everything after that terminator is verbatim body text by the caller's own
+// declaration, so it is excluded from the typo warning below.
+func hoistFlags(args []string, valueFlags, boolFlags map[string]bool) (hoisted, scanned []string) {
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
 			pos = append(pos, args[i+1:]...)
-			break
+			return append(append(flags, "--"), pos...), scanned
 		}
 		if name, ok := flagToken(a); ok && (valueFlags[name] || boolFlags[name]) {
 			flags = append(flags, a)
@@ -424,8 +535,9 @@ func hoistFlags(args []string, valueFlags, boolFlags map[string]bool) []string {
 			continue
 		}
 		pos = append(pos, a)
+		scanned = append(scanned, a)
 	}
-	return append(append(flags, "--"), pos...)
+	return append(append(flags, "--"), pos...), scanned
 }
 
 // flagToken extracts the flag name from a "-x"/"--name"/"--name=v" token.
@@ -1270,6 +1382,15 @@ func cmdReply(p paths, args []string) error {
 	thread := fs.String("thread", "", "reply to this specific message/thread id instead of the last-seen message or open thread")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	parseAnywhere(fs, args)
+	// A bare message id as the entire body is a missing --thread, not a body.
+	// It was silently swallowed as text (the original bug --thread exists to
+	// fix, per resolveThreadRoute's own comment), and when it collided with
+	// --file the resulting "--file conflicts with a body given on the command
+	// line" named the wrong mistake entirely. Only a SOLE positional qualifies,
+	// so a reply that merely starts with an id-shaped word is untouched.
+	if rest := fs.Args(); *thread == "" && len(rest) == 1 && looksLikeMessageID(rest[0]) {
+		return fmt.Errorf("%q looks like a message id, not a reply body — use `mess reply --thread %s \"your reply\"` to reply within that thread (or pipe the body in on stdin to send that text literally)", rest[0], rest[0])
+	}
 	body, err := bodyFrom(fs.Args(), *file)
 	if err != nil {
 		return err
@@ -1973,4 +2094,18 @@ func printMessages(msgs []Message, asJSON bool) {
 		}
 		fmt.Println(line)
 	}
+}
+
+// looksLikeMessageID reports whether s has the shape mess gives message ids
+// (m42) — used to tell a mistyped thread id from a genuine reply body.
+func looksLikeMessageID(s string) bool {
+	if len(s) < 2 || s[0] != 'm' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

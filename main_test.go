@@ -449,3 +449,138 @@ func TestStaleOpenThreadWarningSilentWithNoLastMsg(t *testing.T) {
 		t.Fatalf("expected no warning with no last-seen message, got %q", warn)
 	}
 }
+
+// --- subcommand -h/--help ---
+//
+// Hit live (27.07.26): `mess reply --help` did not print help — it SENT the
+// literal text "--help" to a peer, in whatever thread happened to be open.
+// -h/--help was recognized only at top level, and hoistFlags deliberately
+// leaves unrecognized dash-tokens among the positionals (that rule is correct:
+// it is what lets a message legitimately be "-1"), so bodyFrom turned it into
+// the body. For a send-shaped command the blast radius is not a confusing
+// error — it is an unintended message delivered to someone else.
+
+func TestWantsHelpRecognizesSubcommandHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"},
+		{"-h"},
+		{"bob", "--help"},   // after a positional: Go's flag package would miss it
+		{"--as", "x", "-h"}, // after a flag pair
+	} {
+		if !wantsHelp(args) {
+			t.Errorf("wantsHelp(%q) = false, want true — this is the case that sent %q as a message", args, "--help")
+		}
+	}
+}
+
+// "--" is the escape hatch: it means everything after is literal body text, so
+// a message whose content really is "--help" can still be sent.
+func TestWantsHelpRespectsTheEndOfFlagsMarker(t *testing.T) {
+	for _, args := range [][]string{
+		{"bob", "--", "--help"},
+		{"bob", "--", "-h"},
+		{"bob", "please run mess --help"}, // a quoted body, not a bare token
+		{"bob", "-1"},                     // single-dash text is untouched
+		{},
+	} {
+		if wantsHelp(args) {
+			t.Errorf("wantsHelp(%q) = true, want false", args)
+		}
+	}
+}
+
+// Help output must actually describe the command asked about, not the whole
+// tool — otherwise there is no reason for a caller to prefer it over `mess help`.
+func TestUsageForFindsPerCommandEntries(t *testing.T) {
+	for _, cmd := range []string{"reply", "send", "recv", "register", "ps"} {
+		got := usageFor(cmd)
+		if got == "" {
+			t.Errorf("usageFor(%q) is empty — subcommand help would fall back to bare flags", cmd)
+			continue
+		}
+		if !strings.Contains(got, "mess "+cmd) {
+			t.Errorf("usageFor(%q) does not mention the command: %q", cmd, got)
+		}
+	}
+	// Documented as an alternation ("mess busy / mess unbusy") — the far side
+	// of the slash still has to resolve.
+	if got := usageFor("unbusy"); !strings.Contains(got, "unbusy") {
+		t.Errorf("usageFor(\"unbusy\") missed its alternation entry: %q", got)
+	}
+	// A name that isn't a command resolves to nothing rather than to some
+	// other command's entry.
+	if got := usageFor("nosuchcommand"); got != "" {
+		t.Errorf("usageFor of an unknown command should be empty, got %q", got)
+	}
+}
+
+// --- unknown --long-flag among the positionals ---
+//
+// Same root cause, milder symptom: `mess send bob --flie x` sends "--flie x"
+// as the body instead of complaining. Leaving unknown dash-tokens alone stays
+// correct, so this is a warning, not an error — but it must not stay silent.
+
+func TestHoistFlagsReportsScannedPositionalsForTypoDetection(t *testing.T) {
+	value := map[string]bool{"as": true}
+	bool_ := map[string]bool{"json": true}
+
+	_, scanned := hoistFlags([]string{"bob", "--flie", "x"}, value, bool_)
+	if len(scanned) != 3 || scanned[1] != "--flie" {
+		t.Fatalf("a misspelled flag must reach the typo check, got %q", scanned)
+	}
+
+	// Everything after an explicit "--" is body text by the caller's own
+	// declaration, so it must NOT be second-guessed.
+	_, scanned = hoistFlags([]string{"bob", "--", "--help"}, value, bool_)
+	for _, a := range scanned {
+		if a == "--help" {
+			t.Fatalf("tokens after `--` must be exempt from the typo warning, got %q", scanned)
+		}
+	}
+
+	// Recognized flags are hoisted, never treated as positionals.
+	_, scanned = hoistFlags([]string{"bob", "--as", "alice", "hi"}, value, bool_)
+	for _, a := range scanned {
+		if a == "--as" || a == "alice" {
+			t.Fatalf("a recognized flag leaked into the positionals: %q", scanned)
+		}
+	}
+}
+
+// --- reply with a bare message id ---
+//
+// `mess reply m6203 --file f` used to fail with "--file conflicts with a body
+// given on the command line" — technically true (the bare id became the body)
+// but it names the wrong mistake; the real error is "you meant --thread".
+
+func TestLooksLikeMessageID(t *testing.T) {
+	for _, s := range []string{"m1", "m42", "m6203"} {
+		if !looksLikeMessageID(s) {
+			t.Errorf("looksLikeMessageID(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "m", "msg", "6203", "m62a", "mm1", "hello"} {
+		if looksLikeMessageID(s) {
+			t.Errorf("looksLikeMessageID(%q) = true, want false — an ordinary reply body must not be rejected", s)
+		}
+	}
+}
+
+// The reported incident itself, end to end: asking a send-shaped subcommand for
+// help must print help, and must not deliver anything to a peer. Everything
+// else here tests the pieces; this tests the consequence that actually hurt.
+func TestReplyHelpPrintsUsageInsteadOfMessagingAPeer(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("bob", "register", "bob")
+	e.mess("bob", "send", "alice", "hi") // gives alice a thread to reply into
+	e.mess("alice", "recv")              // ...and makes it her reply target
+
+	out := e.mess("alice", "reply", "--help")
+	if !strings.Contains(out, "mess reply") || !strings.Contains(out, "flags:") {
+		t.Fatalf("`mess reply --help` did not print usage: %q", out)
+	}
+	if got := e.mess("bob", "recv"); strings.Contains(got, "help") {
+		t.Fatalf("`mess reply --help` was delivered to a peer as a message: %q", got)
+	}
+}
