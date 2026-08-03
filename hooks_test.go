@@ -369,3 +369,77 @@ func TestSteerHookReportsAnOutageInsteadOfLookingEmpty(t *testing.T) {
 		t.Fatalf("a refused peek was reported as silence, not as an outage: %q", out)
 	}
 }
+
+// `mess shout` supersedes `broadcast --loud`, which went host-wide: it woke
+// every agent in every room, so the one command reached for when something
+// must not be missed was also the only routine way to breach a room boundary.
+// A room is an exclusive namespace, so leaving it is now an explicit choice.
+func TestShoutStaysInItsRoomUnlessAskedToCross(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("bob", "register", "bob")
+	e.mess("outsider", "register", "outsider")
+	e.mess("outsider", "room", "join", "coord")
+
+	out := e.mess("alice", "shout", "everyone in my room")
+	if !strings.Contains(out, "1 agent(s) in your room") {
+		t.Fatalf("a plain shout should reach only the sender's room, got %q", out)
+	}
+	if got := e.mess("outsider", "recv"); strings.Contains(got, "everyone in my room") {
+		t.Fatalf("shout leaked across a room boundary: %q", got)
+	}
+
+	out = e.mess("alice", "shout", "--host-wide", "everyone everywhere")
+	if !strings.Contains(out, "2 agent(s) in every room") {
+		t.Fatalf("--host-wide should cross rooms, got %q", out)
+	}
+	if got := e.mess("outsider", "recv"); !strings.Contains(got, "everyone everywhere") {
+		t.Fatalf("--host-wide shout did not reach the other room: %q", got)
+	}
+	_ = e.mess("bob", "recv")
+}
+
+// A shout has to actually wake a waiter parked with --no-broadcast — that is
+// the whole point of it, and the difference from a plain broadcast.
+func TestShoutWakesAParkedWaiterAndAPlainBroadcastDoesNot(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("bob", "register", "bob")
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+
+	// A plain, unmentioning broadcast must leave it parked.
+	e.mess("alice", "broadcast", "routine status, nobody in particular")
+	time.Sleep(1500 * time.Millisecond)
+	if !e.listening("bob") {
+		t.Fatal("a plain broadcast woke a --no-broadcast waiter — that is the wake storm this filter exists to prevent")
+	}
+
+	e.mess("alice", "shout", "everybody up")
+	code, stderr := h.wait(t, 10*time.Second)
+	if code != 2 || !strings.Contains(stderr, "everybody up") {
+		t.Fatalf("shout did not wake the parked hook: exit=%d stderr=%q", code, stderr)
+	}
+}
+
+// The same, via an @mention on an ordinary broadcast: it must wake the agent
+// named without shouting at the rest of the room.
+func TestBroadcastMentionWakesTheNamedAgentEndToEnd(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("bob", "register", "bob")
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+
+	e.mess("alice", "broadcast", "@bob can you check the deploy?")
+	code, stderr := h.wait(t, 10*time.Second)
+	if code != 2 || !strings.Contains(stderr, "check the deploy") {
+		t.Fatalf("an @mentioning broadcast did not wake the named agent: exit=%d stderr=%q", code, stderr)
+	}
+}

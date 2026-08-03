@@ -2061,3 +2061,68 @@ func TestEndSessionDropsPresenceButKeepsIdentityAndMail(t *testing.T) {
 		t.Fatalf("session-end must not discard delivered mail, got %d messages", len(got))
 	}
 }
+
+// A broadcast wakes nobody by design (waiters park with --no-broadcast, which
+// is what stops every fleet announcement being a wake storm), so there was no
+// way to single one agent out without shouting at the whole room. An @mention
+// now wakes the agent it names — the mirror of topics, where a mention narrows
+// the wake instead of adding one, because a topic's baseline is "wakes all".
+func TestBroadcastMentionWakesOnlyTheMentioned(t *testing.T) {
+	b := newTestBroker()
+	b.Register("bob")
+	b.Register("carol")
+	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // the auto-wake hook's filter
+
+	b.Broadcast("alice", "@bob can you look at the deploy?", false, false)
+
+	if !b.HasPending("bob", noBroadcast) {
+		t.Fatal("an @mentioned agent must be woken by a broadcast")
+	}
+	if b.HasPending("carol", noBroadcast) {
+		t.Fatal("an unmentioned agent must NOT be woken — that would make every mention a wake storm")
+	}
+	// Carol still RECEIVES it; she just reads it on her next recv.
+	if got := b.Drain("carol", false, 0); len(got) != 1 {
+		t.Fatalf("an unmentioned agent must still receive the broadcast, got %d", len(got))
+	}
+	// Only the mentioned copy carries the wake override.
+	got := b.Drain("bob", false, 0)
+	if len(got) != 1 || !got[0].Loud {
+		t.Fatalf("the mentioned copy should be marked loud, got %+v", got)
+	}
+}
+
+// The mention must not become a back door through the room boundary: a
+// broadcast still only reaches the sender's own room unless it is host-wide.
+func TestBroadcastMentionDoesNotCrossRooms(t *testing.T) {
+	b := newTestBroker()
+	b.Register(agentKey("coord", "bob"))
+	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true}
+
+	b.Broadcast("alice", "@bob urgent", false, false) // alice is in the global room
+	if b.HasPending(agentKey("coord", "bob"), noBroadcast) {
+		t.Fatal("an @mention must not carry a broadcast across a room boundary")
+	}
+	if got := b.Drain(agentKey("coord", "bob"), false, 0); len(got) != 0 {
+		t.Fatalf("a room-scoped broadcast must not reach another room at all, got %+v", got)
+	}
+
+	// Host-wide is the explicit opt-in, and the mention still wakes.
+	b.Broadcast("alice", "@bob urgent", false, true)
+	if !b.HasPending(agentKey("coord", "bob"), noBroadcast) {
+		t.Fatal("a host-wide broadcast's @mention should wake across rooms")
+	}
+}
+
+// A mention of a name nobody has must be inert, not an error or a ghost agent.
+func TestBroadcastMentionOfAnUnknownNameIsHarmless(t *testing.T) {
+	b := newTestBroker()
+	b.Register("bob")
+	_, n := b.Broadcast("alice", "@nobody-here ping", false, false)
+	if n != 1 {
+		t.Fatalf("want delivery to the one real agent, got %d", n)
+	}
+	if b.IsRegistered("nobody-here") {
+		t.Fatal("mentioning a name must not conjure an agent")
+	}
+}

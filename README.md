@@ -22,6 +22,28 @@ next `recv`. Slack-style: post to the channel, ping who needs to act. With no
 `@mention`, every subscriber is woken as before. (An `@` mid-word like an email's
 `user@host` isn't a mention.)
 
+`mess pub` reports what it actually did — `delivered to 2 subscriber(s), woke 1`
+— because the mention's effect on *everyone else* is the surprising half: you
+add `@name` to highlight someone and, as a side effect, silence the notification
+for the rest of the topic. If that count is lower than you meant, you tagged
+fewer people than you think; a name written without a leading `@` is just prose.
+
+**Broadcast @mentions** — the same idea, inverted. A broadcast's baseline is
+"wakes *nobody*" (waiters park with `--no-broadcast`, which is what stops every
+fleet announcement being a wake storm), so there was no way to single one agent
+out short of shouting at the whole room. An `@mention` in a broadcast now wakes
+the agent it names, and only that agent — everyone else still receives it and
+reads it on their next `recv`. So a mention *narrows* the wake on a topic and
+*adds* one on a broadcast, in both cases meaning "this one is for you".
+
+**Shout** — `mess shout` is the deliberate "nobody may miss this" channel: it
+wakes every recipient regardless of their `--no-broadcast` filter and
+desktop-notifies the human. It stays inside your room; `--host-wide` crosses
+into every other room. It supersedes `broadcast --loud`, which was host-wide by
+default and so made the one command you reach for in an emergency also the one
+routine way to breach a room boundary. `--loud`/`--loud-room` still work and
+print a pointer to `shout`.
+
 **Messaging the human (`user` mailbox)** — the operator has a reserved mailbox
 under the handle `user` (and your login name, e.g. `engi`). `mess send user "…"`
 delivers *only* there — no agent is touched — and fires a desktop notification
@@ -528,12 +550,16 @@ bare `MESS_AGENT` run with no session id is not enforced.
 mess send bob "build is done"        # direct, fire-and-forget
 mess send --ack bob "build is done"  # block until bob reads it (read receipt)
 mess send --ack --timeout 30s bob "..."  # ...but give up after 30s
-mess broadcast "standup in 5"        # everyone in your room
-mess broadcast --loud "..."          # host-wide (crosses rooms), bypasses a
-                                     # parked --no-broadcast waiter, and
-                                     # desktop-notifies the human operator
-mess broadcast --loud-room "..."     # same bypass + notify, but stays scoped
-                                     # to your own room instead of host-wide
+mess broadcast "standup in 5"        # everyone in your room; wakes nobody
+                                     # (waiters park with --no-broadcast)
+mess broadcast "@alice ship it?"     # ...but an @mention DOES wake alice —
+                                     # single someone out without shouting
+mess shout "prod is down"            # wake EVERYONE in your room (bypasses the
+                                     # --no-broadcast filter) + notify the human
+mess shout --host-wide "host reboot" # ...and cross into every other room too
+                                     # (supersedes broadcast --loud/--loud-room,
+                                     # which still work; note the default
+                                     # differs — --loud was host-wide)
 mess sub builds                      # subscribe to a topic
 mess pub builds "green light"        # publish to a topic (wakes all subscribers)
 mess pub builds "@alice green light" # ...@mention: all receive, only alice wakes

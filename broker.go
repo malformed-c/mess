@@ -710,12 +710,24 @@ func (b *Broker) CancelAck(id string) {
 // room on the host — for host-wide events like a daemon restart, where a
 // room boundary would silently leave other rooms unwarned; hostWide is only
 // ever true alongside loud (a non-loud broadcast is always room-scoped).
+// Broadcast delivers body to every agent in the sender's room, or to every room
+// with hostWide. loud forces a wake even for waiters parked with
+// --no-broadcast; independently of that, an @mention wakes the agent it names.
 func (b *Broker) Broadcast(from, body string, loud, hostWide bool) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	room, fromName := splitAgentKey(from)
 	m := Message{ID: b.nextID(), From: fromName, Kind: KindBroadcast, Body: body, Time: b.now(), Loud: loud}
 	b.touch(from)
+	// An @mention wakes the agent named, even when the broadcast itself is not
+	// loud. Waiters park with --no-broadcast (that is what stops every fleet
+	// announcement being a wake storm), so an ordinary broadcast queues
+	// silently and there was previously no way to single someone out without
+	// shouting at the whole room. Mirrors topics, where a mention *narrows* the
+	// wake — here it *adds* one, because a broadcast's baseline is "wakes
+	// nobody" rather than "wakes everybody". Per recipient, so only the
+	// mentioned copy is loud.
+	mentioned := mentionsIn(body)
 	n := 0
 	for key, a := range b.agents {
 		if key == from {
@@ -726,7 +738,11 @@ func (b *Broker) Broadcast(from, body string, loud, hostWide bool) (Message, int
 				continue
 			}
 		}
-		a.deliver(m)
+		mc := m
+		if _, bare := splitAgentKey(key); mentioned[bare] {
+			mc.Loud = true
+		}
+		a.deliver(mc)
 		n++
 	}
 	b.changed()

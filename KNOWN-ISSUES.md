@@ -1,5 +1,45 @@
 # Known issues
 
+## Fixed (2026-08-03): the only "make sure they see this" command also breached room isolation
+
+**Symptom, as reported:** "rooms are leaking."
+
+**What was actually leaking:** plain `broadcast` and `pub` are correctly
+room-scoped (verified: a global-room broadcast does not reach an agent in a
+room, and vice versa). The one cross-room path was `broadcast --loud`, which is
+host-wide *by default* — so the single command an agent reaches for when
+something must not be missed was also the only routine way out of a room.
+
+**Fix:** `mess shout` supersedes it, with the default inverted: room-scoped
+unless you pass `--host-wide`. A room is an exclusive namespace, so leaving it
+is now a choice rather than the price of being heard. `--loud`/`--loud-room`
+still work (removing them would turn `--loud` into literal message text for any
+agent still passing it — the silent mis-send class below) and print a pointer to
+`shout`.
+
+**Also fixed, same report:** a broadcast could not single anyone out. Its
+baseline is "wakes nobody" — waiters park with `--no-broadcast`, which is what
+stops every fleet announcement being a wake storm — so the only way to reach one
+agent was to wake the whole room. An `@mention` in a broadcast now wakes the
+agent it names, and only that one, via a per-recipient `Loud` copy. A mention
+therefore *narrows* the wake on a topic and *adds* one on a broadcast; both mean
+"this one is for you".
+
+**A false diagnosis worth recording,** because two agents reached it
+independently and taught it to each other: "flags have to come before the
+positional, mess silently drops them otherwise." That is wrong — `parseAnywhere`
+hoists flags from anywhere on the line, and `mess send bob "hi" --room coord`
+works. What actually failed was `--room` on `broadcast`, which does not define
+that flag, so it stayed a positional and became body text. Flag *existence* per
+subcommand is the rule, not flag *position*.
+
+**Tests:** `TestBroadcastMentionWakesOnlyTheMentioned`,
+`TestBroadcastMentionDoesNotCrossRooms`,
+`TestBroadcastMentionOfAnUnknownNameIsHarmless` (broker_test.go);
+`TestShoutStaysInItsRoomUnlessAskedToCross`,
+`TestShoutWakesAParkedWaiterAndAPlainBroadcastDoesNot`,
+`TestBroadcastMentionWakesTheNamedAgentEndToEnd` (hooks_test.go).
+
 ## Fixed (2026-07-28): `--help` on a subcommand was sent as the message body
 
 **Symptom (hit live 2026-07-27):** `mess reply --help` did not print help — it

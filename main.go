@@ -73,12 +73,18 @@ Sending:
                                   Room=="" alone can't tell "target global"
                                   from "no override", so there was no way
                                   to say this before)
-  mess broadcast [body...]        send to every known agent in your room (plain
-                                  broadcasts don't wake the standard --no-broadcast
-                                  auto-wake hook; --loud bypasses that, goes
-                                  host-wide across rooms, and desktop-notifies the
-                                  human operator; --loud-room does the same but
-                                  stays scoped to your own room)
+  mess broadcast [body...]        send to every known agent in your room. Plain
+                                  broadcasts don't wake the standard
+                                  --no-broadcast auto-wake hook — but an
+                                  @mention DOES wake the agent it names, so you
+                                  can single someone out without shouting
+                                  (--file PATH reads the body from a file)
+                                  (--loud/--loud-room are superseded by shout)
+  mess shout [body...]            broadcast that WAKES everyone, bypassing the
+                                  --no-broadcast filter, and desktop-notifies
+                                  the human. Stays in your room; --host-wide
+                                  crosses into every other room. For what
+                                  nobody may miss
                                   (--file PATH reads the body from a file)
   mess pub <topic> [body...]      publish to a topic (@mention wakes only the
                                   tagged subscribers; the rest still receive it)
@@ -236,6 +242,8 @@ func main() {
 		err = cmdAwait(p, args)
 	case "broadcast":
 		err = cmdBroadcast(p, args)
+	case "shout":
+		err = cmdShout(p, args)
 	case "pub":
 		err = cmdPub(p, args)
 	case "sub", "unsub":
@@ -732,6 +740,13 @@ func cmdBroadcast(p paths, args []string) error {
 	if *loud && *loudRoom {
 		return fmt.Errorf("--loud and --loud-room are mutually exclusive")
 	}
+	if *loud || *loudRoom {
+		// Kept working rather than removed: an agent still passing --loud would
+		// otherwise have it silently become message text (unknown dash-tokens
+		// are deliberately left as body), which is the exact silent mis-send
+		// this tool has been burned by before.
+		fmt.Fprintln(os.Stderr, "mess: note: `broadcast --loud`/`--loud-room` is superseded by `mess shout` — note the default differs: shout stays in your room unless you pass --host-wide")
+	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
@@ -745,6 +760,37 @@ func cmdBroadcast(p paths, args []string) error {
 		return err
 	}
 	fmt.Printf("delivered to %d agent(s)\n", resp.Count)
+	return nil
+}
+
+// cmdShout is the deliberate "everyone must see this" channel: it wakes every
+// recipient, bypassing the --no-broadcast filter their auto-wake hook parks
+// with, and desktop-notifies the human. Unlike the `broadcast --loud` it
+// supersedes, it stays inside the caller's room by default — a room is an
+// exclusive namespace, so escaping it is an explicit choice (--host-wide), not
+// the price of being heard.
+func cmdShout(p paths, args []string) error {
+	fs, as := newFlags("shout")
+	hostWide := fs.Bool("host-wide", false, "reach every room on the host, not just your own")
+	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	parseAnywhere(fs, args)
+	from, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	body, err := bodyFrom(fs.Args(), *file)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: true, HostWide: *hostWide})
+	if err != nil {
+		return err
+	}
+	scope := "your room"
+	if *hostWide {
+		scope = "every room on the host"
+	}
+	fmt.Printf("shouted to %d agent(s) in %s — all woken\n", resp.Count, scope)
 	return nil
 }
 
