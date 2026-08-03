@@ -1,5 +1,38 @@
 # Known issues
 
+## Fixed (2026-08-03): answering an ask the natural way didn't count as answering it
+
+**Symptom:** `mess ask` blocks until a message threaded under its token
+arrives. Replying with a plain `mess send`/`broadcast`/`pub` — however good the
+answer — never satisfied it, so the asker blocked to timeout with the answer
+sitting unthreaded in its own inbox. Documented repeatedly (README, the skill,
+a `[question <id> — reply with mess reply]` marker on every ask) precisely
+because telling people about a footgun is all you can do while the tool only
+accepts one shape of answer.
+
+**Fix:** an `@mention` of the asker now also satisfies the wait, when it comes
+from the agent that was asked and postdates the question. `Broker.asks` records
+what each pending token needs (asker, askee, sequence number); message ids are
+monotonic, so the sequence orders "after the question" without a clock. The
+table is capped (`maxPendingAsks`, oldest-first eviction) so an ask that is
+never answered and never awaited can't leak an entry forever.
+
+All three conditions are load-bearing — a mention from a third party, an
+unmentioning reply, or a mention that predates the ask must not count, or every
+ask resolves on the first passing message and returns noise. `mess recv
+--thread` deliberately keeps the old strict thread scope: it's a "show me this
+conversation" query, not a wait, so `DrainAnswers` is a separate method from
+`DrainThread` rather than a widening of it.
+
+Transient by design: a daemon restart drops the table, degrading to
+threads-only matching rather than persisting a guess about what answers what.
+
+**Tests:** `TestMentionFromTheAskeeAnswersAnAsk`,
+`TestThreadedReplyStillAnswersAnAsk`, `TestUnqualifiedMessagesDoNotAnswerAnAsk`
+(three negatives), `TestAMentionOlderThanTheAskDoesNotAnswerIt`,
+`TestRecvThreadStaysThreadScoped`, `TestPendingAskTableIsBounded`, and
+`TestAskIsAnsweredByAPlainMentionEndToEnd` through the real CLI.
+
 ## Fixed (2026-08-03): addressing another room leaked your identity into it, and that ghost swallowed your replies
 
 **Symptom:** "rooms are leaking." Concretely: `mess ps --all` accumulates

@@ -2175,7 +2175,7 @@ func formatMessageLine(ts string, m Message) string {
 		line += fmt.Sprintf(" [attached: %s (%s, %s)]", m.AttachPath, hash, humanBytes(m.AttachSize))
 	}
 	if m.Ask {
-		line = fmt.Sprintf("[question %s — reply with `mess reply`, not a plain send] %s", m.ID, line)
+		line = fmt.Sprintf("[question %s — answer with `mess reply`, or @mention the asker] %s", m.ID, line)
 	}
 	return line
 }

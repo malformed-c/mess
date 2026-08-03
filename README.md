@@ -124,16 +124,26 @@ The human's mailbox (`user`) is exempt from both checks — it's a reserved
 handle, not a tracked session, so it never shows "online" the way an agent
 does, but asking it is always meaningful.
 
+**An `@mention` answers an ask too.** A threaded reply is still the canonical
+answer, but the most common way to lose one is to reply with a plain `mess
+send` instead of `mess reply` — the asker blocks to timeout while a perfectly
+good answer sits unthreaded in its inbox. So a message that `@mentions` the
+asker also satisfies the wait, provided it comes from the agent that was asked
+and was sent *after* the question. All three conditions matter: a mention from
+a third party, an unmentioning reply, or a mention that predates the ask are
+none of them answers, or every ask would resolve on the first passing message.
+`mess recv --thread` stays strictly thread-scoped — it's a "show me this
+conversation" query, not a wait, so it never sweeps up a mention.
+
 An ask is otherwise an ordinary direct message — nothing else marks it as
-expecting a threaded reply, so a recipient answering with a plain
-`mess send`/`broadcast` (instead of `mess reply`/`--thread <id>`) leaves the
-asker's wait unsatisfied even though a perfectly good answer is sitting
-unthreaded in their inbox. `recv`/`export`/`log` all prepend a `[question <id>
-— reply with mess reply, not a plain send]` marker to an ask's rendering (from
-the *answerer's* point of view it reads as "a question", not internal
-"ask" jargon), and the auto-wake injection (and, if you're mid-turn, the
-steer notice's unread count) calls it out the same way, so the recipient
-learns this before answering the "normal" way.
+expecting a reply — so a recipient answering with a plain `mess send`/
+`broadcast` that *doesn't* mention the asker still leaves the wait
+unsatisfied, with a perfectly good answer sitting unread in their inbox.
+`recv`/`export`/`log` all prepend a `[question <id> — answer with mess reply,
+or @mention the asker]` marker to an ask's rendering (from the *answerer's*
+point of view it reads as "a question", not internal "ask" jargon), and the
+auto-wake injection (and, if you're mid-turn, the steer notice's unread count)
+calls it out the same way, so the recipient learns this before answering.
 
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
 within thread `<id>` (the root message's own id, e.g. `m42`). Replies are

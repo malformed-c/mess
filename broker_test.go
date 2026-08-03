@@ -2126,3 +2126,136 @@ func TestBroadcastMentionOfAnUnknownNameIsHarmless(t *testing.T) {
 		t.Fatal("mentioning a name must not conjure an agent")
 	}
 }
+
+// --- an @mention as an answer to `mess ask` ---
+//
+// `mess ask` blocks until a message threaded under its token arrives, and the
+// single most common way to lose an answer is to reply with a plain `mess send`
+// instead of `mess reply`: the asker blocks to timeout while a perfectly good
+// answer sits unthreaded in its inbox (a documented, repeatedly-hit incident).
+// An @mention of the asker, from the agent asked, sent after the question, is a
+// strong enough signal of "this is my answer" to count.
+
+// askSetup wires an ask from asker to askee and returns its token.
+func askSetup(t *testing.T, b *Broker, asker, askee, question string) string {
+	t.Helper()
+	b.Register(asker)
+	b.Register(askee)
+	m, err := b.SendAsk(asker, askee, question)
+	if err != nil {
+		t.Fatalf("ask failed: %v", err)
+	}
+	return m.ID
+}
+
+func TestMentionFromTheAskeeAnswersAnAsk(t *testing.T) {
+	b := newTestBroker()
+	token := askSetup(t, b, "alice", "bob", "ready to deploy?")
+
+	// bob answers with a plain send — no thread, just a mention.
+	b.Send("bob", "alice", "@alice yes, ready")
+
+	if !b.HasPendingAnswer("alice", token) {
+		t.Fatal("an @mention from the agent asked should count as an answer")
+	}
+	got := b.DrainAnswers("alice", token, false, 0)
+	if len(got) != 1 || got[0].Body != "@alice yes, ready" {
+		t.Fatalf("the answer should be handed to the asker, got %+v", got)
+	}
+}
+
+// The canonical threaded reply must keep working exactly as before.
+func TestThreadedReplyStillAnswersAnAsk(t *testing.T) {
+	b := newTestBroker()
+	token := askSetup(t, b, "alice", "bob", "ready?")
+
+	b.SendThreaded("bob", "alice", "yes", token)
+
+	if !b.HasPendingAnswer("alice", token) {
+		t.Fatal("a threaded reply must still answer")
+	}
+	if got := b.DrainAnswers("alice", token, false, 0); len(got) != 1 {
+		t.Fatalf("want the threaded reply, got %+v", got)
+	}
+}
+
+// The rule has to be tight, or every ask resolves on the first passing mention
+// and the answer it returns is noise.
+func TestUnqualifiedMessagesDoNotAnswerAnAsk(t *testing.T) {
+	cases := []struct {
+		name string
+		send func(b *Broker)
+	}{
+		{"a mention from a third party", func(b *Broker) {
+			b.Register("carol")
+			b.Send("carol", "alice", "@alice unrelated chatter")
+		}},
+		{"the askee replying with no mention at all", func(b *Broker) {
+			b.Send("bob", "alice", "yes")
+		}},
+		{"a mention of somebody else", func(b *Broker) {
+			b.Send("bob", "alice", "@carol can you look?")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestBroker()
+			token := askSetup(t, b, "alice", "bob", "ready?")
+			tc.send(b)
+			if b.HasPendingAnswer("alice", token) {
+				t.Fatalf("%s must not satisfy an ask", tc.name)
+			}
+		})
+	}
+}
+
+// A mention that predates the question can't be its answer — otherwise an ask
+// resolves instantly against stale mail already sitting in the inbox.
+func TestAMentionOlderThanTheAskDoesNotAnswerIt(t *testing.T) {
+	b := newTestBroker()
+	b.Register("alice")
+	b.Register("bob")
+	b.Send("bob", "alice", "@alice about that other thing") // BEFORE the ask
+
+	m, err := b.SendAsk("alice", "bob", "ready?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.HasPendingAnswer("alice", m.ID) {
+		t.Fatal("a message that predates the question must not answer it")
+	}
+}
+
+// recv --thread is a "show me this conversation" query, not an ask: it must
+// stay strictly thread-scoped rather than sweeping up mentions.
+func TestRecvThreadStaysThreadScoped(t *testing.T) {
+	b := newTestBroker()
+	token := askSetup(t, b, "alice", "bob", "ready?")
+	b.Send("bob", "alice", "@alice yes")
+
+	if got := b.DrainThread("alice", token, true, 0); len(got) != 0 {
+		t.Fatalf("recv --thread must not pull in a mention, got %+v", got)
+	}
+	if got := b.DrainAnswers("alice", token, true, 0); len(got) != 1 {
+		t.Fatalf("...but the ask itself should still see it, got %+v", got)
+	}
+}
+
+// The pending-ask table must not grow without bound: an ask that is never
+// answered and never awaited would otherwise leak an entry forever.
+func TestPendingAskTableIsBounded(t *testing.T) {
+	b := newTestBroker()
+	b.Register("alice")
+	b.Register("bob")
+	for i := 0; i < maxPendingAsks+50; i++ {
+		if _, err := b.SendAsk("alice", "bob", "q"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.mu.Lock()
+	n := len(b.asks)
+	b.mu.Unlock()
+	if n > maxPendingAsks {
+		t.Fatalf("asks table grew to %d, past the %d cap", n, maxPendingAsks)
+	}
+}

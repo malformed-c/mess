@@ -146,7 +146,7 @@ while true; do
     {
       printf '[mess] %s new peer message(s) (delivered on wake - no recv needed):\n' "$n"
       printf '%s\n' "$drained" | jq -r \
-        '"  " + (if .ask then "[QUESTION \(.id) - reply with mess reply, not a plain send] " else "" end) + .from + (if .topic then " #\(.topic)" else "" end) + ": " + .body'
+        '"  " + (if .ask then "[QUESTION \(.id) - answer with mess reply, or @mention the asker] " else "" end) + .from + (if .topic then " #\(.topic)" else "" end) + ": " + .body'
     } >&2
     exit 2
   done

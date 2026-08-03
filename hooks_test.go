@@ -541,3 +541,40 @@ func TestReplyCanAimAtAnotherRoom(t *testing.T) {
 		t.Fatalf("replying into a room leaked an identity there:\n%s", got)
 	}
 }
+
+// The whole point, end to end: an agent that answers a `mess ask` the natural
+// way — a plain send that @mentions the asker — must satisfy the asker's wait
+// instead of leaving it to time out with the answer sitting unread.
+func TestAskIsAnsweredByAPlainMentionEndToEnd(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("bob", "register", "bob")
+
+	// bob has to look online for `ask` to proceed at all.
+	park := e.command("bob", "recv", "--wait", "20s")
+	if err := park.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = park.Process.Kill() }()
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("bob never parked")
+	}
+
+	asked := make(chan string, 1)
+	go func() {
+		out, _ := e.command("alice", "ask", "bob", "ready to deploy?", "--timeout", "15s").CombinedOutput()
+		asked <- string(out)
+	}()
+
+	time.Sleep(1500 * time.Millisecond)
+	e.mess("bob", "send", "alice", "@alice yes, ready — go ahead")
+
+	select {
+	case out := <-asked:
+		if !strings.Contains(out, "yes, ready") {
+			t.Fatalf("ask was not satisfied by a plain @mention answer: %q", out)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("ask never returned")
+	}
+}

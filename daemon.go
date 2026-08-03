@@ -1034,7 +1034,7 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 	}
 
 	if !req.Wait {
-		msgs := b.DrainThread(who, token, req.Peek, req.Max)
+		msgs := b.DrainAnswers(who, token, req.Peek, req.Max)
 		if len(msgs) > 0 {
 			elog("%s %s drained %d (thread %s)", req.Op, req.As, len(msgs), token)
 		} else {
@@ -1044,9 +1044,9 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 	}
 
 	resp := d.parkAndDrain(conn, who, req.Timeout, req.Batch, fmt.Sprintf("%s %s (waiting on thread %s)", req.Op, req.As, token),
-		func() bool { return b.HasPendingThread(who, token) },
-		func() <-chan struct{} { return b.waitChanThread(who, token) },
-		func() []Message { return b.DrainThread(who, token, req.Peek, req.Max) },
+		func() bool { return b.HasPendingAnswer(who, token) },
+		func() <-chan struct{} { return b.waitChanAnswer(who, token) },
+		func() []Message { return b.DrainAnswers(who, token, req.Peek, req.Max) },
 	)
 	resp.ID = token
 	return resp

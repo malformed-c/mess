@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -42,6 +43,15 @@ type Broker struct {
 	// the runtime identity gate can refuse a *different* live session acting under
 	// a name already in use.
 	owners map[string]ownerInfo
+
+	// asks maps a pending ask's token (the ask message's own id) to what it
+	// takes to answer it. `mess ask` blocks until a message threaded under that
+	// token arrives — but the single most common way to lose an answer is to
+	// reply with a plain send instead of `mess reply`, leaving the asker to
+	// time out while a perfectly good answer sits unthreaded in its inbox.
+	// This lets an @mention of the asker, from the agent asked, count too.
+	// Transient; a daemon restart drops it back to threads-only matching.
+	asks map[string]askInfo
 
 	// warnings holds a transient status warning per agent (e.g. an API error set
 	// by a lifecycle hook). It auto-clears when the agent is next active and
@@ -103,6 +113,18 @@ type ownerInfo struct {
 	pid  int
 	comm string
 }
+
+// askInfo is what a pending ask needs in order to recognize its answer.
+type askInfo struct {
+	asker string // composite key of the agent waiting for the reply
+	askee string // composite key of the agent it asked
+	seq   int    // the ask's own sequence number: only a LATER message can answer it
+}
+
+// maxPendingAsks bounds the asks map. An ask that is never answered and never
+// awaited would otherwise leak an entry forever; oldest-first eviction keeps
+// the recent ones, which are the ones anybody is still waiting on.
+const maxPendingAsks = 1024
 
 // warnInfo is a transient status warning and its expiry.
 type warnInfo struct {
@@ -193,6 +215,7 @@ func NewBroker() *Broker {
 		bridgesByTopic:     map[string][]*bridge{},
 		threadParticipants: map[string]map[string]bool{},
 		topicHistory:       map[string][]Message{},
+		asks:               map[string]askInfo{},
 		now:                time.Now,
 		probeComm:          processComm,
 	}
@@ -639,7 +662,129 @@ func (b *Broker) SendThreadedAttach(from, to, body, threadID string, attach *Att
 // answer threaded to this message's own ID.
 func (b *Broker) SendAsk(from, to, body string) (Message, error) {
 	m, _, err := b.send(from, to, body, "", false, nil, true)
+	if err == nil {
+		b.rememberAsk(m.ID, from, to)
+	}
 	return m, err
+}
+
+// rememberAsk records what would count as an answer to this ask.
+func (b *Broker) rememberAsk(token, asker, askee string) {
+	seq, ok := msgSeq(token)
+	if !ok {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.evictOldestAsksLocked()
+	b.asks[token] = askInfo{asker: asker, askee: askee, seq: seq}
+}
+
+// evictOldestAsksLocked drops the lowest-sequence entries once the map is full.
+// Held lock.
+func (b *Broker) evictOldestAsksLocked() {
+	for len(b.asks) >= maxPendingAsks {
+		oldest, oldestSeq := "", 0
+		for token, info := range b.asks {
+			if oldest == "" || info.seq < oldestSeq {
+				oldest, oldestSeq = token, info.seq
+			}
+		}
+		delete(b.asks, oldest)
+	}
+}
+
+// msgSeq extracts the numeric sequence from a message id ("m42" -> 42). Ids are
+// monotonic, so comparing them orders messages without needing a clock.
+func msgSeq(id string) (int, bool) {
+	if len(id) < 2 || id[0] != 'm' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(id[1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// answersAskLocked reports whether m, sitting in the asker's inbox, should
+// satisfy the pending ask identified by token.
+//
+// A threaded reply always counts — that is the canonical answer, and the only
+// thing that used to. Beyond that, an @mention of the asker counts when it
+// comes from the agent that was asked and was sent AFTER the question, which
+// is a strong enough signal of "this is my answer" to be worth honouring:
+// getting no answer at all is far more costly than occasionally treating a
+// mention as one, since the alternative is the asker blocking until timeout
+// while the answer sits unread in front of it. Held lock.
+func (b *Broker) answersAskLocked(m Message, token string) bool {
+	if m.ThreadID == token || m.ID == token {
+		return true
+	}
+	info, ok := b.asks[token]
+	if !ok {
+		return false
+	}
+	seq, ok := msgSeq(m.ID)
+	if !ok || seq <= info.seq {
+		return false // predates the question, so it cannot be its answer
+	}
+	if _, askee := splitAgentKey(info.askee); m.From != askee {
+		return false
+	}
+	_, asker := splitAgentKey(info.asker)
+	return mentionsIn(m.Body)[asker]
+}
+
+// HasPendingAnswer reports whether an answer to token is already waiting in
+// name's inbox — a threaded reply, or a mention that qualifies.
+func (b *Broker) HasPendingAnswer(name, token string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[name]
+	if a == nil {
+		return false
+	}
+	for _, m := range a.inbox {
+		if b.answersAskLocked(m, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitChanAnswer is waitChanThread widened to the same answer rule.
+func (b *Broker) waitChanAnswer(name, token string) <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.ensure(name)
+	ch := make(chan struct{}, 1)
+	for _, m := range a.inbox {
+		if b.answersAskLocked(m, token) {
+			ch <- struct{}{} // already answered; fire immediately
+			return ch
+		}
+	}
+	a.waiters = append(a.waiters, ch)
+	return ch
+}
+
+// DrainAnswers consumes the messages that answer token. Distinct from
+// DrainThread, which stays strictly thread-scoped: `mess recv --thread` is a
+// "show me this conversation" query and should not sweep up a message merely
+// because it mentions someone.
+func (b *Broker) DrainAnswers(name, token string, peek bool, max int) []Message {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.ensure(name)
+	b.touch(name)
+	msgs := b.drainMatchingLocked(a, peek, max, func(m Message) bool {
+		return b.answersAskLocked(m, token)
+	})
+	if len(msgs) > 0 && !peek {
+		delete(b.asks, token) // answered; stop tracking it
+	}
+	return msgs
 }
 
 // Attachment is a file reference recorded alongside a message (mess send/pub

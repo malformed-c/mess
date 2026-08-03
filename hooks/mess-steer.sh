@@ -87,14 +87,15 @@ n=$(printf '%s\n' "$json" | grep -c .)
 maxid=$(printf '%s\n' "$json" | jq -rs '[.[].id | tostring | ltrimstr("m") | tonumber?] | max // 0' 2>/dev/null)
 [ -z "$maxid" ] && maxid=0
 [ "$n" -eq 0 ] && exit 0
-# Call out any pending `mess ask` roots distinctly — a plain mess recv/mess
-# send back won't satisfy the asker's wait (only a threaded reply does), and
-# this notice is the one place a busy agent (not seeing the wake hook's fuller
-# injection) would otherwise miss that.
+# Call out any pending `mess ask` roots distinctly — an answer only satisfies
+# the asker's wait if it's threaded (`mess reply`) or @mentions them, so a plain
+# unmentioning send back leaves them blocking. This notice is the one place a
+# busy agent (not seeing the wake hook's fuller injection) would otherwise miss
+# that.
 askn=$(printf '%s\n' "$json" | jq -s 'map(select(.ask == true)) | length')
 asknote=""
 if [ "${askn:-0}" -gt 0 ]; then
-  asknote=" ($askn of them a question — reply with \`mess reply\`, not a plain send)"
+  asknote=" ($askn of them a question — answer with \`mess reply\`, or @mention the asker)"
 fi
 
 # Claude Code can dispatch several tool calls from one turn in parallel (each
