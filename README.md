@@ -235,8 +235,9 @@ prints a warning (it's a real mistake, not an absence of config) but
 rather than blocking every session's auto-registration on one typo'd
 config file. Opt out entirely with `MESS_NO_AUTO_ROOM=1`.
 
-**Sending across rooms** — `mess send`/`mess ask <agent> --room NAME` messages
-an agent in a *different* room than your own, explicitly. This is the correct
+**Sending across rooms** — `--room NAME`/`--global` work on `send`, `ask`,
+`broadcast`, `pub`, `shout` and `reply` (and on `rm`/`drain`/`ps` for
+targeting), addressing a *different* room than your own, explicitly. This is the correct
 way to reach someone elsewhere; addressing them by bare name without it
 doesn't fall back to searching other rooms. If the name isn't registered in
 *your* room but *is* registered in a different one, `send`/`ask` reject the
@@ -260,6 +261,16 @@ ambient room"), so there was previously no way to explicitly reach the
 global room once you'd joined one; leaving `--room` unset always falls back
 to *your own* current room, never a forced global. `--room` and `--global`
 are mutually exclusive.
+
+**Addressing a room does not put you in it.** The request carries the caller's
+own room (`SelfRoom`) separately from the room being *targeted*, because
+conflating the two used to key the sender off the target: `send --room coord`
+materialized a ghost `coord/<you>` inside that room. The ghost then absorbed
+that room's broadcasts, and — the expensive part — swallowed direct replies,
+since a peer inside `coord` answering your bare name resolved to the ghost
+rather than to the real you. No error, no trace, message gone. Your identity
+now stays exactly where you registered it, no matter how many rooms you
+address.
 
 **`mess room join`** migrates your existing identity (inbox, subscriptions,
 ownership) from whatever room you were previously in into the new one,

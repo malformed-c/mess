@@ -713,10 +713,10 @@ func (b *Broker) CancelAck(id string) {
 // Broadcast delivers body to every agent in the sender's room, or to every room
 // with hostWide. loud forces a wake even for waiters parked with
 // --no-broadcast; independently of that, an @mention wakes the agent it names.
-func (b *Broker) Broadcast(from, body string, loud, hostWide bool) (Message, int) {
+func (b *Broker) Broadcast(from, room, body string, loud, hostWide bool) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	room, fromName := splitAgentKey(from)
+	_, fromName := splitAgentKey(from)
 	m := Message{ID: b.nextID(), From: fromName, Kind: KindBroadcast, Body: body, Time: b.now(), Loud: loud}
 	b.touch(from)
 	// An @mention wakes the agent named, even when the broadcast itself is not

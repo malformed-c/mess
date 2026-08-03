@@ -1,5 +1,55 @@
 # Known issues
 
+## Fixed (2026-08-03): addressing another room leaked your identity into it, and that ghost swallowed your replies
+
+**Symptom:** "rooms are leaking." Concretely: `mess ps --all` accumulates
+`<room>/<name>` agents nobody registered — a live cleanup pruned 87 agents
+including `frontend/K`, `game/K`, `global/aphelion-frontend`,
+`global/periapsis-opus`. Worse, and this is the expensive part: a peer inside
+that room replying to your bare name gets no error and you never receive it.
+
+**Root cause:** `Request.Room` served two masters — "the room I'm acting in"
+and "the room my target is in" (`--room`/`--global`). The daemon keyed the
+*caller* off it (`who := agentKey(req.Room, req.As)`), so `send --room coord`
+claimed and materialized `coord/<you>`. That ghost then:
+
+- appeared `online` in `mess ps --all`,
+- absorbed that room's broadcasts into an inbox nobody reads,
+- and **swallowed direct replies**: a peer inside `coord` sending to plain
+  `alice` resolved to the ghost, so the real alice never saw it. Silent — the
+  send reported success.
+
+Reproduced directly: after one `send --room coord`, a reply from inside `coord`
+landed in `coord/alice` (2 pending) while the real `alice` inbox stayed empty.
+
+This is the same class as the recipient-side hole `crossRoomGhostMsg` was
+written to catch, but on the *sender* side, where nothing was checking.
+
+**Fix:** `Request.SelfRoom` carries the caller's own room separately, always
+stamped client-side; `callerRoom(req)` keys the caller's identity off it while
+`Room` keeps naming the target. A pointer, so "" (the global room) is
+distinguishable from "not sent by this client version" — an older client falls
+back to the previous meaning. With the ghost gone, that reply is now *refused*
+with the cross-room error naming the real room, which is an actionable failure
+instead of a silent one.
+
+**Also in this change:** `--room`/`--global` now work on `broadcast`, `pub`,
+`shout` and `reply` (previously `send`/`ask` only, so `mess broadcast --room
+coord "Hello"` sent the literal text `"--room coord Hello"` to your *own* room).
+The flag pair is registered by one shared `roomFlags` helper, so the two halves
+can't drift apart between commands. Fixed alongside: the cross-room error
+suggested a bare `--room ` when the other room was global — it now says
+`--global`.
+
+**Tests:** `TestAddressingAnotherRoomDoesNotLeakYourIdentityIntoIt`,
+`TestBroadcastPubAndShoutDoNotLeakTheSenderIntoOtherRooms`,
+`TestReplyCanAimAtAnotherRoom` (hooks_test.go — end-to-end through the real
+CLI, because the key is materialized by the `ClaimIdentity` gate in `handle`,
+above the dispatch layer; dispatch-level tests pass either way and would have
+been false comfort). Plus `TestCrossRoomSendDeliversToTheNamedRoom`,
+`TestCrossRoomBroadcastAndPubReachTheNamedRoom`,
+`TestCallerRoomFallsBackForAClientWithoutSelfRoom`.
+
 ## Fixed (2026-08-03): the only "make sure they see this" command also breached room isolation
 
 **Symptom, as reported:** "rooms are leaking."

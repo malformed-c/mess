@@ -395,6 +395,38 @@ func newFlags(name string) (*flag.FlagSet, *string) {
 	return fs, as
 }
 
+// roomTarget is the resolved --room/--global pair: which room an addressed
+// command is aimed at, as distinct from the room the caller is in. Empty room
+// with global=false means "no override — my own room".
+type roomTarget struct {
+	room   string
+	global bool
+}
+
+// apply stamps the target room onto a request. The caller's own room is
+// stamped separately by withRoom (as SelfRoom), so overriding this one can
+// never re-key who the sender is.
+func (rt roomTarget) apply(req Request) Request {
+	req.Room, req.Global = rt.room, rt.global
+	return req
+}
+
+// roomFlags registers the --room/--global pair on fs and returns a resolver
+// that validates them. Shared by every command that can address something
+// outside the caller's own room, so the flag pair can't drift apart between
+// them — and so a command that grows a cross-room form can't forget one half.
+// `what` names the thing being targeted, for the help text.
+func roomFlags(fs *flag.FlagSet, what string) func() (roomTarget, error) {
+	room := fs.String("room", "", "target a "+what+" in this room instead of your own (explicit cross-room)")
+	global := fs.Bool("global", false, "target a "+what+" in the global room, even if you're in one — an empty --room can't distinguish \"target global\" from \"no override\"")
+	return func() (roomTarget, error) {
+		if *room != "" && *global {
+			return roomTarget{}, fmt.Errorf("--room and --global are mutually exclusive")
+		}
+		return roomTarget{room: *room, global: *global}, nil
+	}
+}
+
 // parseAnywhere parses flags regardless of their position relative to positional
 // args. Go's flag package stops at the first positional, so "mess send bob hi
 // --as alice" would otherwise swallow "--as alice" into the body. Only flags the
@@ -602,11 +634,11 @@ func cmdSend(p paths, args []string) error {
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output)")
 	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
-	room := fs.String("room", "", "message an agent in this room instead of your own (explicit cross-room send)")
-	global := fs.Bool("global", false, "message an agent in the global room, even if you're in one — Room==\"\" alone can't distinguish \"target global\" from \"no override\"")
+	target := roomFlags(fs, "agent")
 	parseAnywhere(fs, args)
-	if *room != "" && *global {
-		return fmt.Errorf("--room and --global are mutually exclusive")
+	rt, err := target()
+	if err != nil {
+		return err
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
@@ -621,7 +653,7 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	req := Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread, Room: *room, Global: *global}
+	req := rt.apply(Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread})
 	if *attach != "" {
 		if err := setAttach(&req, *attach); err != nil {
 			return err
@@ -649,11 +681,11 @@ func cmdAsk(p paths, args []string) error {
 	timeout := fs.String("timeout", "", "how long to wait for a reply; default: wait forever")
 	async := fs.Bool("async", false, "don't wait — print the token immediately for a later `mess await`")
 	file := fs.String("file", "", "read the question from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
-	room := fs.String("room", "", "ask an agent in this room instead of your own (explicit cross-room ask)")
-	global := fs.Bool("global", false, "ask an agent in the global room, even if you're in one")
+	target := roomFlags(fs, "agent")
 	parseAnywhere(fs, args)
-	if *room != "" && *global {
-		return fmt.Errorf("--room and --global are mutually exclusive")
+	rt, err := target()
+	if err != nil {
+		return err
 	}
 	rest := fs.Args()
 	if len(rest) < 1 {
@@ -678,7 +710,7 @@ func cmdAsk(p paths, args []string) error {
 	// answer later, by accident, on the next unrelated wake. Printing the
 	// token up front means it survives in the caller's own output even if
 	// the process is killed a moment later, regardless of signal.
-	resp, err := call(p, Request{Op: "ask", As: from, To: to, Body: body, Wait: false, Room: *room, Global: *global})
+	resp, err := call(p, rt.apply(Request{Op: "ask", As: from, To: to, Body: body, Wait: false}))
 	if err != nil {
 		return err
 	}
@@ -736,7 +768,12 @@ func cmdBroadcast(p paths, args []string) error {
 	loud := fs.Bool("loud", false, "wake every recipient host-wide (crosses room boundaries) even if their auto-wake hook filters out broadcasts (--no-broadcast), and desktop-notify the human operator too")
 	loudRoom := fs.Bool("loud-room", false, "like --loud, but stays scoped to your own room instead of going host-wide")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	target := roomFlags(fs, "room's agents")
 	parseAnywhere(fs, args)
+	rt, err := target()
+	if err != nil {
+		return err
+	}
 	if *loud && *loudRoom {
 		return fmt.Errorf("--loud and --loud-room are mutually exclusive")
 	}
@@ -755,7 +792,7 @@ func cmdBroadcast(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: *loud || *loudRoom, HostWide: *loud})
+	resp, err := call(p, rt.apply(Request{Op: "broadcast", As: from, Body: body, Loud: *loud || *loudRoom, HostWide: *loud}))
 	if err != nil {
 		return err
 	}
@@ -773,7 +810,15 @@ func cmdShout(p paths, args []string) error {
 	fs, as := newFlags("shout")
 	hostWide := fs.Bool("host-wide", false, "reach every room on the host, not just your own")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	target := roomFlags(fs, "room's agents")
 	parseAnywhere(fs, args)
+	rt, err := target()
+	if err != nil {
+		return err
+	}
+	if *hostWide && (rt.room != "" || rt.global) {
+		return fmt.Errorf("--host-wide already reaches every room; drop --room/--global")
+	}
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
@@ -782,13 +827,18 @@ func cmdShout(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "broadcast", As: from, Body: body, Loud: true, HostWide: *hostWide})
+	resp, err := call(p, rt.apply(Request{Op: "broadcast", As: from, Body: body, Loud: true, HostWide: *hostWide}))
 	if err != nil {
 		return err
 	}
 	scope := "your room"
-	if *hostWide {
+	switch {
+	case *hostWide:
 		scope = "every room on the host"
+	case rt.room != "":
+		scope = "room " + rt.room
+	case rt.global:
+		scope = "the global room"
 	}
 	fmt.Printf("shouted to %d agent(s) in %s — all woken\n", resp.Count, scope)
 	return nil
@@ -799,10 +849,15 @@ func cmdPub(p paths, args []string) error {
 	thread := fs.String("thread", "", "reply within this thread (the root message's id, shown as [id] in recv output) — quiet-delivered to everyone except an @mention or existing participant")
 	attach := fs.String("attach", "", "record this file's path + content hash alongside the message")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	target := roomFlags(fs, "topic")
 	parseAnywhere(fs, args)
+	rt, err := target()
+	if err != nil {
+		return err
+	}
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return fmt.Errorf("usage: mess pub [--thread ID] [--attach PATH] [--file PATH] <topic> [body...]")
+		return fmt.Errorf("usage: mess pub [--thread ID] [--attach PATH] [--file PATH] [--room NAME | --global] <topic> [body...]")
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
@@ -812,7 +867,7 @@ func cmdPub(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	req := Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread}
+	req := rt.apply(Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread})
 	if *attach != "" {
 		if err := setAttach(&req, *attach); err != nil {
 			return err
@@ -1435,7 +1490,16 @@ func cmdReply(p paths, args []string) error {
 	fs, as := newFlags("reply")
 	thread := fs.String("thread", "", "reply to this specific message/thread id instead of the last-seen message or open thread")
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
+	// The peer/topic being replied to may live in another room — a cross-room
+	// message arrives under a bare name, so replying to it needs the same
+	// targeting a fresh send would. Route *resolution* stays in your own room:
+	// it reads your own received view of the thread.
+	target := roomFlags(fs, "peer or topic")
 	parseAnywhere(fs, args)
+	rt, err := target()
+	if err != nil {
+		return err
+	}
 	// A bare message id as the entire body is a missing --thread, not a body.
 	// It was silently swallowed as text (the original bug --thread exists to
 	// fix, per resolveThreadRoute's own comment), and when it collided with
@@ -1462,7 +1526,7 @@ func cmdReply(p paths, args []string) error {
 		if err := writeOpenThread(p, openThreadInfo{ThreadID: *thread, Kind: kind, Topic: topic, To: to}); err != nil {
 			return err
 		}
-		return sendReply(p, name, kind, topic, to, *thread, body)
+		return sendReply(p, name, kind, topic, to, *thread, body, rt)
 	}
 
 	if open, ok := readOpenThread(p); ok {
@@ -1470,7 +1534,7 @@ func cmdReply(p paths, args []string) error {
 		if warn := staleOpenThreadWarning(open, last, hasLast); warn != "" {
 			fmt.Fprint(os.Stderr, warn)
 		}
-		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body)
+		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body, rt)
 	}
 
 	last, ok := readLastMsg(p)
@@ -1480,7 +1544,7 @@ func cmdReply(p paths, args []string) error {
 	if err := writeOpenThread(p, openThreadInfo{ThreadID: last.ID, Kind: last.Kind, Topic: last.Topic, To: last.From}); err != nil {
 		return err
 	}
-	return sendReply(p, name, last.Kind, last.Topic, last.From, last.ID, body)
+	return sendReply(p, name, last.Kind, last.Topic, last.From, last.ID, body, rt)
 }
 
 // resolveThreadRoute figures out how to route a reply to threadID when the
@@ -1533,16 +1597,16 @@ func routeFromThreadMessages(name, threadID string, msgs []Message) (kind, topic
 
 // sendReply posts body as a threaded reply, routing to a topic or a direct
 // peer depending on kind.
-func sendReply(p paths, from, kind, topic, to, threadID, body string) error {
+func sendReply(p paths, from, kind, topic, to, threadID, body string, rt roomTarget) error {
 	switch kind {
 	case KindTopic:
-		resp, err := call(p, Request{Op: "pub", As: from, Topic: topic, Body: body, ThreadID: threadID})
+		resp, err := call(p, rt.apply(Request{Op: "pub", As: from, Topic: topic, Body: body, ThreadID: threadID}))
 		if err != nil {
 			return err
 		}
 		fmt.Printf("replied in #%s (thread %s) — delivered to %d subscriber(s)\n", topic, threadID, resp.Count)
 	case KindDirect:
-		if _, err := call(p, Request{Op: "send", As: from, To: to, Body: body, ThreadID: threadID}); err != nil {
+		if _, err := call(p, rt.apply(Request{Op: "send", As: from, To: to, Body: body, ThreadID: threadID})); err != nil {
 			return err
 		}
 		fmt.Printf("replied to %s (thread %s)\n", to, threadID)

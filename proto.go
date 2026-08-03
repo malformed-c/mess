@@ -100,10 +100,17 @@ type Request struct {
 	// died without cleaning up. See session.go.
 	SessionPID int `json:"sessionPid,omitempty"`
 
-	Room     string `json:"room,omitempty"`     // room to act in ("" = global/default room)
-	Global   bool   `json:"global,omitempty"`   // (send/ask) explicitly target the global room, bypassing withRoom's ambient-room auto-fill (Room=="" is otherwise indistinguishable from "not set")
-	All      bool   `json:"all,omitempty"`      // (ps) ignore Room, show every room
-	FromRoom string `json:"fromRoom,omitempty"` // (room-join) caller's previous room, so the daemon migrates the existing identity (inbox/subscriptions/owner) into the new room instead of leaving a stale duplicate behind
+	Room string `json:"room,omitempty"` // room to act in ("" = global/default room); for a target-addressing op this may be the TARGET's room, not the caller's
+	// SelfRoom is the room the CALLER is actually in, always stamped by the
+	// client. Room alone can't serve both purposes: --room/--global override it
+	// to name a *target's* room, and keying the caller's own identity off that
+	// materialized a ghost "<targetroom>/<caller>" agent in the room addressed.
+	// A pointer so "" (the global room) is distinguishable from "not sent by
+	// this client version".
+	SelfRoom *string `json:"selfRoom,omitempty"`
+	Global   bool    `json:"global,omitempty"`   // (send/ask) explicitly target the global room, bypassing withRoom's ambient-room auto-fill (Room=="" is otherwise indistinguishable from "not set")
+	All      bool    `json:"all,omitempty"`      // (ps) ignore Room, show every room
+	FromRoom string  `json:"fromRoom,omitempty"` // (room-join) caller's previous room, so the daemon migrates the existing identity (inbox/subscriptions/owner) into the new room instead of leaving a stale duplicate behind
 
 	ThreadID string `json:"threadId,omitempty"` // (send/pub) reply within this thread; (recv) filter to this thread
 

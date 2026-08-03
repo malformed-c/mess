@@ -971,3 +971,67 @@ func TestPubResponseReportsHowManyItWoke(t *testing.T) {
 		t.Fatalf("an unmentioned pub must wake every subscriber, got count=%d woke=%d", resp.Count, resp.Woke)
 	}
 }
+
+// Cross-room delivery: an explicitly addressed send reaches the real agent in
+// the named room, and a reply to a name that lives elsewhere is refused rather
+// than delivered to a same-named stranger. (The identity-leak half of this is
+// guarded end-to-end in hooks_test.go — the key is materialized by the
+// ClaimIdentity gate in handle, above the dispatch level tested here.)
+func TestCrossRoomSendDeliversToTheNamedRoom(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	global := ""
+	d.broker.RegisterOwned("alice", "sess-a", 0, false)                    // global room
+	d.broker.RegisterOwned(agentKey("coord", "carol"), "sess-c", 0, false) // room coord
+
+	resp := d.dispatch(Request{Op: "send", As: "alice", To: "carol", Body: "hi", Room: "coord", SelfRoom: &global})
+	if resp.Error != "" {
+		t.Fatalf("cross-room send failed: %s", resp.Error)
+	}
+	if got, _ := d.broker.Stat(agentKey("coord", "carol")); got != 1 {
+		t.Fatalf("the real recipient should have the message, got %d pending", got)
+	}
+	// The consequence that actually cost a message: a reply from inside coord
+	// to the bare name "alice" must not find a ghost to fall into. With no
+	// ghost it is refused, naming the real room — an error the caller can act
+	// on instead of silence.
+	coord := "coord"
+	reply := d.dispatch(Request{Op: "send", As: "carol", To: "alice", Body: "answer", Room: "coord", SelfRoom: &coord})
+	if reply.Error == "" {
+		t.Fatal("a reply to a name that lives in another room should be refused, not delivered to a ghost")
+	}
+	if !strings.Contains(reply.Error, "--global") {
+		t.Fatalf("the refusal should name the flag that reaches the global room, got %q", reply.Error)
+	}
+}
+
+// The fan-out paths grew --room in the same change: they must reach the named
+// room's agents and subscribers.
+func TestCrossRoomBroadcastAndPubReachTheNamedRoom(t *testing.T) {
+	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+	global := ""
+	d.broker.RegisterOwned("alice", "sess-a", 0, false)
+	d.broker.RegisterOwned(agentKey("coord", "carol"), "sess-c", 0, false)
+	d.broker.Sub(agentKey("coord", "carol"), topicKey("coord", "builds"))
+
+	if resp := d.dispatch(Request{Op: "broadcast", As: "alice", Body: "into coord", Room: "coord", SelfRoom: &global}); resp.Count != 1 {
+		t.Fatalf("cross-room broadcast should reach the one agent there, got %d", resp.Count)
+	}
+	if resp := d.dispatch(Request{Op: "pub", As: "alice", Topic: "builds", Body: "into coord", Room: "coord", SelfRoom: &global}); resp.Count != 1 {
+		t.Fatalf("cross-room pub should reach the one subscriber there, got %d", resp.Count)
+	}
+	if got, _ := d.broker.Stat(agentKey("coord", "carol")); got != 2 {
+		t.Fatalf("the real subscriber should have both messages, got %d", got)
+	}
+}
+
+// A client older than SelfRoom (nil) must keep working exactly as before —
+// back then Room really was the caller's own room.
+func TestCallerRoomFallsBackForAClientWithoutSelfRoom(t *testing.T) {
+	if got := callerRoom(Request{Room: "coord"}); got != "coord" {
+		t.Fatalf("with no SelfRoom, Room is the caller's room; got %q", got)
+	}
+	self := ""
+	if got := callerRoom(Request{Room: "coord", SelfRoom: &self}); got != "" {
+		t.Fatalf("SelfRoom must win over Room; got %q", got)
+	}
+}

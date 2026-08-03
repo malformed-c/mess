@@ -69,7 +69,7 @@ func TestBroadcastExcludesSender(t *testing.T) {
 	b.Register("alice")
 	b.Register("bob")
 	b.Register("carol")
-	_, n := b.Broadcast("alice", "hello all", false, false)
+	_, n := b.Broadcast("alice", "", "hello all", false, false)
 	if n != 2 {
 		t.Fatalf("expected 2 recipients, got %d", n)
 	}
@@ -89,13 +89,13 @@ func TestLoudBroadcastBypassesKindFilter(t *testing.T) {
 	b.Register("bob")
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
-	b.Broadcast("alice", "quiet to a --no-broadcast waiter", false, false)
+	b.Broadcast("alice", "", "quiet to a --no-broadcast waiter", false, false)
 	if b.HasPending("bob", noBroadcast) {
 		t.Fatal("a plain broadcast must not satisfy a --no-broadcast wake trigger")
 	}
 	b.Drain("bob", false, 0)
 
-	b.Broadcast("alice", "loud, should wake anyway", true, false)
+	b.Broadcast("alice", "", "loud, should wake anyway", true, false)
 	if !b.HasPending("bob", noBroadcast) {
 		t.Fatal("a --loud broadcast should satisfy the wake trigger even under --no-broadcast")
 	}
@@ -371,7 +371,7 @@ func TestDrainKindsFiltersAndPreserves(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
 	b.Send("alice", "bob", "direct one")
-	b.Broadcast("alice", "shout", false, false) // bob is registered, receives it
+	b.Broadcast("alice", "", "shout", false, false) // bob is registered, receives it
 	b.Send("alice", "bob", "direct two")
 	// bob now has: direct, broadcast, direct (broadcast excludes sender alice)
 
@@ -393,7 +393,7 @@ func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	directOnly := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
 	// A broadcast alone must NOT satisfy a direct/topic wake trigger.
-	b.Broadcast("alice", "fyi", false, false)
+	b.Broadcast("alice", "", "fyi", false, false)
 	if b.HasPending("bob", directOnly) {
 		t.Fatal("a broadcast should not trigger a --no-broadcast waiter")
 	}
@@ -1035,7 +1035,7 @@ func TestBroadcastScopedToRoom(t *testing.T) {
 	b.Register(agentKey("A", "bob"))
 	b.Register(agentKey("B", "carol")) // different room, must not receive
 
-	_, n := b.Broadcast(agentKey("A", "alice"), "hello room A", false, false)
+	_, n := b.Broadcast(agentKey("A", "alice"), "A", "hello room A", false, false)
 	if n != 1 {
 		t.Fatalf("expected 1 same-room recipient, got %d", n)
 	}
@@ -1055,7 +1055,7 @@ func TestLoudHostWideBroadcastCrossesRooms(t *testing.T) {
 
 	// Plain --loud (not --loud-room) sets hostWide: true and must reach every
 	// room, unlike an ordinary or --loud-room broadcast (TestBroadcastScopedToRoom).
-	_, n := b.Broadcast(agentKey("A", "alice"), "restarting the daemon", true, true)
+	_, n := b.Broadcast(agentKey("A", "alice"), "A", "restarting the daemon", true, true)
 	if n != 2 {
 		t.Fatalf("expected 2 host-wide recipients (bob + carol), got %d", n)
 	}
@@ -1071,7 +1071,7 @@ func TestLoudRoomBroadcastStaysRoomScoped(t *testing.T) {
 	b.Register(agentKey("B", "carol"))
 
 	// --loud-room: loud, but hostWide stays false, so it must NOT cross rooms.
-	_, n := b.Broadcast(agentKey("A", "alice"), "loud but room-scoped", true, false)
+	_, n := b.Broadcast(agentKey("A", "alice"), "A", "loud but room-scoped", true, false)
 	if n != 1 {
 		t.Fatalf("expected 1 same-room recipient, got %d", n)
 	}
@@ -2073,7 +2073,7 @@ func TestBroadcastMentionWakesOnlyTheMentioned(t *testing.T) {
 	b.Register("carol")
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // the auto-wake hook's filter
 
-	b.Broadcast("alice", "@bob can you look at the deploy?", false, false)
+	b.Broadcast("alice", "", "@bob can you look at the deploy?", false, false)
 
 	if !b.HasPending("bob", noBroadcast) {
 		t.Fatal("an @mentioned agent must be woken by a broadcast")
@@ -2099,7 +2099,7 @@ func TestBroadcastMentionDoesNotCrossRooms(t *testing.T) {
 	b.Register(agentKey("coord", "bob"))
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true}
 
-	b.Broadcast("alice", "@bob urgent", false, false) // alice is in the global room
+	b.Broadcast("alice", "", "@bob urgent", false, false) // alice is in the global room
 	if b.HasPending(agentKey("coord", "bob"), noBroadcast) {
 		t.Fatal("an @mention must not carry a broadcast across a room boundary")
 	}
@@ -2108,7 +2108,7 @@ func TestBroadcastMentionDoesNotCrossRooms(t *testing.T) {
 	}
 
 	// Host-wide is the explicit opt-in, and the mention still wakes.
-	b.Broadcast("alice", "@bob urgent", false, true)
+	b.Broadcast("alice", "", "@bob urgent", false, true)
 	if !b.HasPending(agentKey("coord", "bob"), noBroadcast) {
 		t.Fatal("a host-wide broadcast's @mention should wake across rooms")
 	}
@@ -2118,7 +2118,7 @@ func TestBroadcastMentionDoesNotCrossRooms(t *testing.T) {
 func TestBroadcastMentionOfAnUnknownNameIsHarmless(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
-	_, n := b.Broadcast("alice", "@nobody-here ping", false, false)
+	_, n := b.Broadcast("alice", "", "@nobody-here ping", false, false)
 	if n != 1 {
 		t.Fatalf("want delivery to the one real agent, got %d", n)
 	}

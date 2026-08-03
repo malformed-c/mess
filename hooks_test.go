@@ -443,3 +443,101 @@ func TestBroadcastMentionWakesTheNamedAgentEndToEnd(t *testing.T) {
 		t.Fatalf("an @mentioning broadcast did not wake the named agent: exit=%d stderr=%q", code, stderr)
 	}
 }
+
+// agents returns the composite "room/name" keys `mess ps --all` reports.
+func (e *hookEnv) agents(as string) string {
+	return e.mess(as, "ps", "--all")
+}
+
+// Addressing another room used to leak your identity into it. Request.Room
+// served two masters — "the room I'm acting in" and "the room my target is in"
+// — and the daemon keyed the CALLER off it, so `send --room coord` claimed and
+// materialized a ghost "coord/alice". That ghost then absorbed the room's
+// broadcasts and, worst of all, swallowed direct replies: a peer inside coord
+// answering plain "alice" resolved to the ghost, and the real alice never saw
+// it — no error, no trace, message gone.
+//
+// This runs through the real CLI because the key is materialized by the
+// ClaimIdentity gate in handle, above the dispatch layer.
+func TestAddressingAnotherRoomDoesNotLeakYourIdentityIntoIt(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice") // global room
+	e.mess("carol", "register", "carol")
+	e.mess("carol", "room", "join", "coord")
+
+	e.mess("alice", "send", "carol", "cross-room hello", "--room", "coord")
+
+	if got := e.agents("alice"); strings.Contains(got, "coord/alice") {
+		t.Fatalf("addressing a room materialized a ghost copy of the sender inside it:\n%s", got)
+	}
+	if got := e.mess("carol", "recv"); !strings.Contains(got, "cross-room hello") {
+		t.Fatalf("the real recipient never got the message: %q", got)
+	}
+
+	// The consequence that actually cost a message: a reply from inside coord
+	// to the bare name "alice" must not find a ghost to fall into.
+	out, err := e.command("carol", "send", "alice", "answer").CombinedOutput()
+	if err == nil {
+		t.Fatalf("a reply to a name living in another room should be refused, not swallowed: %q", out)
+	}
+	if !strings.Contains(string(out), "--global") {
+		t.Fatalf("the refusal should name the flag that reaches the global room, got %q", out)
+	}
+	// ...and once aimed correctly it lands on the real alice.
+	e.mess("carol", "send", "alice", "answer", "--global")
+	if got := e.mess("alice", "recv"); !strings.Contains(got, "answer") {
+		t.Fatalf("the correctly-aimed reply never reached the real sender: %q", got)
+	}
+}
+
+// The fan-out paths grew --room in the same change, so they must not leak
+// either — including host-wide, which touches every room at once.
+func TestBroadcastPubAndShoutDoNotLeakTheSenderIntoOtherRooms(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("carol", "register", "carol")
+	e.mess("carol", "room", "join", "coord")
+	e.mess("dave", "register", "dave")
+	e.mess("dave", "room", "join", "ops")
+	e.mess("carol", "sub", "builds")
+
+	e.mess("alice", "broadcast", "--room", "coord", "into coord")
+	e.mess("alice", "pub", "--room", "coord", "builds", "published into coord")
+	e.mess("alice", "shout", "--room", "coord", "shouted into coord")
+	e.mess("alice", "shout", "--host-wide", "everyone everywhere")
+
+	got := e.agents("alice")
+	for _, ghost := range []string{"coord/alice", "ops/alice"} {
+		if strings.Contains(got, ghost) {
+			t.Fatalf("a cross-room fan-out materialized %q:\n%s", ghost, got)
+		}
+	}
+	// The real agents in those rooms did receive everything aimed at them.
+	if out := e.mess("carol", "recv"); !strings.Contains(out, "into coord") ||
+		!strings.Contains(out, "published into coord") || !strings.Contains(out, "everyone everywhere") {
+		t.Fatalf("cross-room fan-out did not deliver: %q", out)
+	}
+	if out := e.mess("dave", "recv"); !strings.Contains(out, "everyone everywhere") {
+		t.Fatalf("host-wide shout did not reach the other room: %q", out)
+	}
+}
+
+// `mess reply` grew the same pair, so a cross-room conversation can be held up
+// without the replier having to reconstruct the route by hand.
+func TestReplyCanAimAtAnotherRoom(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+	e.mess("carol", "register", "carol")
+	e.mess("carol", "room", "join", "coord")
+
+	e.mess("carol", "send", "alice", "question from coord", "--global")
+	e.mess("alice", "recv") // makes it alice's reply target
+	e.mess("alice", "reply", "--room", "coord", "answer back to coord")
+
+	if got := e.mess("carol", "recv"); !strings.Contains(got, "answer back to coord") {
+		t.Fatalf("cross-room reply never arrived: %q", got)
+	}
+	if got := e.agents("alice"); strings.Contains(got, "coord/alice") {
+		t.Fatalf("replying into a room leaked an identity there:\n%s", got)
+	}
+}

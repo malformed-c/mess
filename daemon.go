@@ -292,7 +292,7 @@ func (d *daemon) handle(conn net.Conn) {
 	// The identity checked/claimed is room-scoped (agentKey(req.Room, req.As)),
 	// so "admin" in one room never collides with "admin" in another.
 	if actsAsSelf(req.Op) {
-		who := agentKey(req.Room, req.As)
+		who := agentKey(callerRoom(req), req.As) // your OWN room — never a target's
 		if ok, msg := d.broker.ClaimIdentity(who, req.Session, req.SessionPID); !ok {
 			elog("%s as %s refused: %s", req.Op, req.As, msg)
 			writeResp(conn, Response{Error: msg})
@@ -432,6 +432,19 @@ func parseBridgeDirection(s string) bridgeDirection {
 	}
 }
 
+// callerRoom is the room the caller is actually in. req.Room may instead name a
+// *target's* room (--room/--global), so it must never key the caller's own
+// identity: doing so materialized a ghost "<targetroom>/<caller>" agent, which
+// then absorbed that room's broadcasts and silently swallowed direct replies
+// addressed back to the caller's bare name from inside that room. A nil
+// SelfRoom means a client older than the field, where Room was the caller's.
+func callerRoom(req Request) string {
+	if req.SelfRoom != nil {
+		return *req.SelfRoom
+	}
+	return req.Room
+}
+
 func (d *daemon) dispatch(req Request) Response {
 	b := d.broker
 	// Strip an accidental leading "#" from a topic argument: topics are always
@@ -446,6 +459,7 @@ func (d *daemon) dispatch(req Request) Response {
 	// per machine, not one per room, so `mess send user`/`@user` must always
 	// reach it no matter who sends it.
 	who := agentKey(req.Room, req.As)
+	self := agentKey(callerRoom(req), req.As) // the caller's real identity; differs from who under --room/--global
 	to := agentKey(req.Room, req.To)
 	if isUserHandle(req.To) {
 		to = req.To
@@ -491,14 +505,14 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("send %s -> %s refused: not a registered agent", req.As, req.To)
 			return Response{Error: fmt.Sprintf("no such agent %q — send requires a previously-registered recipient (it may just not have registered yet, or the name is a typo)", req.To)}
 		}
-		resp, m := d.send(req, who, to)
+		resp, m := d.send(req, self, to)
 		if resp.Error == "" {
 			notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
 			d.journalAppend(req.Room, m)
 		}
 		return resp
 	case "broadcast":
-		m, n := b.Broadcast(who, req.Body, req.Loud, req.HostWide)
+		m, n := b.Broadcast(self, req.Room, req.Body, req.Loud, req.HostWide)
 		if req.Loud {
 			notifyUserLoud(req.As, req.Body)
 			if req.HostWide {
@@ -513,7 +527,7 @@ func (d *daemon) dispatch(req Request) Response {
 		d.journalAppend(req.Room, m)
 		return Response{OK: true, Count: n}
 	case "pub":
-		m, delivered, woke := b.pub(who, topic, req.Body, req.ThreadID, attachFromRequest(req))
+		m, delivered, woke := b.pub(self, topic, req.Body, req.ThreadID, attachFromRequest(req))
 		notifyUser(req.As, "", req.Body)
 		if woke < delivered {
 			elog("pub %s #%s -> %d sub(s), woke %d (@mention/thread)", req.As, req.Topic, delivered, woke)
@@ -939,8 +953,18 @@ func roomLabel(room string) string {
 // real recipient never wakes since nothing was delivered to *its* inbox.
 func crossRoomGhostMsg(bareName, callerRoom, otherRoom string) string {
 	return fmt.Sprintf(
-		"%q is registered in room %s, not your room %s — pass --room %s to reach it there, or have it join your room",
-		bareName, roomLabel(otherRoom), roomLabel(callerRoom), otherRoom)
+		"%q is registered in room %s, not your room %s — pass %s to reach it there, or have it join your room",
+		bareName, roomLabel(otherRoom), roomLabel(callerRoom), roomFlagFor(otherRoom))
+}
+
+// roomFlagFor names the flag that targets room — `--room X`, or `--global` for
+// the global room, whose name is the empty string and so can't be written as a
+// --room argument at all (the suggestion used to render as a bare "--room ").
+func roomFlagFor(room string) string {
+	if room == "" {
+		return "--global"
+	}
+	return "--room " + room
 }
 
 // crossRoomHint appends a room-specific explanation to a "no such agent"
@@ -952,8 +976,8 @@ func crossRoomHint(b *Broker, callerRoom, bareName string) string {
 	if !found {
 		return ""
 	}
-	return fmt.Sprintf(" (it IS registered, but in room %s, not your room %s — pass --room %s to reach it there)",
-		roomLabel(other), roomLabel(callerRoom), other)
+	return fmt.Sprintf(" (it IS registered, but in room %s, not your room %s — pass %s to reach it there)",
+		roomLabel(other), roomLabel(callerRoom), roomFlagFor(other))
 }
 
 // askOrAwait handles both "ask" and "await": an ask is a plain threaded direct

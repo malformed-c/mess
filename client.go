@@ -38,6 +38,11 @@ func withSession(req Request) Request {
 // and there was no way to ask for the former. Set by send/ask's --global
 // flag.
 func withRoom(p paths, req Request) Request {
+	// SelfRoom is ALWAYS the caller's own room, whatever Room ends up meaning.
+	if req.SelfRoom == nil {
+		self := resolveRoom(p, "")
+		req.SelfRoom = &self
+	}
 	if req.Room == "" && !req.Global {
 		req.Room = resolveRoom(p, "")
 	}
