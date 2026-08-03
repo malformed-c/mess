@@ -578,3 +578,64 @@ func TestAskIsAnsweredByAPlainMentionEndToEnd(t *testing.T) {
 		t.Fatal("ask never returned")
 	}
 }
+
+// What a woken agent should do next. The wake hook parks with --peek, but the
+// step that actually delivers is a NON-peek `recv --if-idle` — so by the time
+// the agent is woken its inbox is already empty and the bodies are in the
+// injection. A follow-up `mess recv` finds nothing. This is pinned as a test
+// because the docs claimed the opposite ("the wake only peeks, so run mess recv
+// first"), which had every woken agent burning a tool call on an empty drain.
+func TestAWokenAgentsInboxIsAlreadyEmpty(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("bob", "register", "bob")
+	e.mess("alice", "register", "alice")
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+	e.mess("alice", "send", "bob", "the actual message body")
+
+	code, stderr := h.wait(t, 10*time.Second)
+	if code != 2 {
+		t.Fatalf("want an asyncRewake delivery (exit 2), got %d", code)
+	}
+	if !strings.Contains(stderr, "the actual message body") {
+		t.Fatalf("the wake must carry the body itself, got %q", stderr)
+	}
+	// The whole point: nothing is left to fetch.
+	if got := e.mess("bob", "recv"); strings.TrimSpace(got) != "" {
+		t.Fatalf("a woken agent's inbox should already be drained; `mess recv` returned %q", got)
+	}
+}
+
+// ...with one exception worth being precise about: the delivering drain is
+// --no-broadcast (matching the park's own wake filter), so a plain broadcast
+// queued at wake time is NOT swept up and does still need a `mess recv`.
+func TestAWakeLeavesNonWakingBacklogQueued(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("bob", "register", "bob")
+	e.mess("alice", "register", "alice")
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+	e.mess("alice", "broadcast", "fleet notice nobody is woken for")
+	time.Sleep(500 * time.Millisecond)
+	if !e.listening("bob") {
+		t.Fatal("a plain broadcast must not wake the park")
+	}
+	e.mess("alice", "send", "bob", "the direct message that wakes")
+
+	code, stderr := h.wait(t, 10*time.Second)
+	if code != 2 || !strings.Contains(stderr, "the direct message that wakes") {
+		t.Fatalf("want the direct message delivered on wake, got exit=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stderr, "fleet notice") {
+		t.Fatal("a plain broadcast should not be swept into the wake injection")
+	}
+	if got := e.mess("bob", "recv"); !strings.Contains(got, "fleet notice") {
+		t.Fatalf("the non-waking broadcast should still be queued for a later recv, got %q", got)
+	}
+}
