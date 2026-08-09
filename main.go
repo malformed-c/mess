@@ -415,18 +415,22 @@ func bodyOrEmpty(args []string, filePath string) (string, error) {
 // can: their original command is right there in their own scrollback, so
 // echoing what actually arrived lets them spot the difference immediately,
 // instead of the recipient discovering it and a correction having to be sent.
-// Short bodies echo verbatim; longer ones report their size and first line, so
-// a status update doesn't reprint itself in full.
+// A short single-line body echoes verbatim; anything longer reports only its
+// size. No preview: a first-line excerpt was both noisy and useless — the
+// truncation only bit past the inline limit, so a multi-line body under it
+// reprinted itself in full, flattened onto one line, with a "starting" label
+// in front of the whole thing.
 func bodyEcho(body string) string {
 	const inline = 120
 	if !strings.Contains(body, "\n") && len([]rune(body)) <= inline {
 		return fmt.Sprintf("%q", body)
 	}
-	first := strings.ReplaceAll(body, "\n", " ")
-	if r := []rune(first); len(r) > inline {
-		first = string(r[:inline]) + "…"
+	lines := strings.Count(body, "\n") + 1
+	unit := "lines"
+	if lines == 1 {
+		unit = "line"
 	}
-	return fmt.Sprintf("%d bytes, %d lines, starting %q", len(body), strings.Count(body, "\n")+1, first)
+	return fmt.Sprintf("%d bytes, %d %s", len(body), lines, unit)
 }
 
 // readStdinBody reads the message body from stdin, trimming a single
@@ -934,11 +938,11 @@ func cmdPub(p paths, args []string) error {
 	// highlight them and, as a side effect, silence the notification for
 	// everyone else. "delivered to 2 subscriber(s)" reads as "both were told".
 	if resp.Woke < resp.Count {
-		fmt.Printf("delivered to %d subscriber(s), woke %d — an @mention/threaded reply quiets the rest, who see it on their next recv\n", resp.Count, resp.Woke)
+		fmt.Printf("delivered to %d subscriber(s), woke %d — %s\n", resp.Count, resp.Woke, bodyEcho(body))
+		fmt.Println("  (an @mention/threaded reply quiets the rest; they see it on their next recv)")
 	} else {
-		fmt.Printf("delivered to %d subscriber(s)\n", resp.Count)
+		fmt.Printf("delivered to %d subscriber(s) — %s\n", resp.Count, bodyEcho(body))
 	}
-	fmt.Printf("  sent — %s\n", bodyEcho(body))
 	return nil
 }
 

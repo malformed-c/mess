@@ -30,8 +30,7 @@ What mess *can* do is the two things it was failing to do:
 
 2. **Echo what actually arrived.** `mess send` printed *nothing* on success, so
    partial damage — the common case — was invisible until the recipient noticed.
-   Every sending command now echoes the delivered body (verbatim when short, size
-   plus first line when long). mess cannot compare it against the original, but
+   Every sending command now echoes the delivered body (verbatim when short, size only when longer). mess cannot compare it against the original, but
    the caller can: their own command is in their scrollback, so the difference is
    visible in the same turn instead of costing a correction.
 

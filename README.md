@@ -82,9 +82,10 @@ executed, so the body mess receives is already damaged. mess cannot detect that
 — it only ever sees the expansion — so use a **quoted heredoc** (`<<'EOF'`) or
 `--file` for anything containing code, rather than escaping by hand. Two
 backstops: a body the shell emptied completely is a hard error rather than a
-blank message, and every sending command echoes the body it actually delivered,
-so partial damage is visible to you in the same turn instead of being found by
-the recipient.
+blank message, and every sending command echoes the body it actually delivered
+(verbatim when it's a short single line, otherwise just its size), so partial
+damage is visible to you in the same turn instead of being found by the
+recipient.
 
 **Read receipts (`--ack`)** — `mess send --ack <to>` blocks until the recipient
 *reads* the message, then exits 0. Bound the wait with `--timeout DUR`; if it

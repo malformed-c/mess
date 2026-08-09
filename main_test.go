@@ -630,16 +630,22 @@ func TestAProperlyEscapedBodySurvives(t *testing.T) {
 // The echo is what makes PARTIAL damage visible: the caller has their original
 // command in their own scrollback, so seeing what actually arrived lets them
 // spot the difference in the same turn.
-func TestBodyEchoShowsShortBodiesVerbatimAndSummarisesLongOnes(t *testing.T) {
+func TestBodyEchoShowsShortBodiesVerbatimAndSizesLongOnes(t *testing.T) {
 	if got := bodyEcho("the flag on  is what I meant"); !strings.Contains(got, "the flag on  is what I meant") {
 		t.Fatalf("a short body must echo verbatim so a gap is visible, got %s", got)
 	}
-	long := strings.Repeat("x", 500) + "\nsecond line"
-	got := bodyEcho(long)
-	if strings.Contains(got, strings.Repeat("x", 500)) {
-		t.Fatalf("a long body must not reprint itself in full: %s", got)
+	// Anything multi-line or past the inline limit reports size only. An
+	// excerpt was worse than nothing: the truncation only bit past the limit,
+	// so a short multi-line body reprinted itself in full, flattened.
+	multi := "line one\nline two\nline three"
+	got := bodyEcho(multi)
+	if strings.Contains(got, "line one") {
+		t.Fatalf("a multi-line body must not reprint itself: %s", got)
 	}
-	if !strings.Contains(got, "bytes") || !strings.Contains(got, "lines") {
-		t.Fatalf("a long body should report its size, got %s", got)
+	if got != "28 bytes, 3 lines" {
+		t.Fatalf("want a bare size summary, got %q", got)
+	}
+	if got := bodyEcho(strings.Repeat("x", 300)); got != "300 bytes, 1 line" {
+		t.Fatalf("a single long line should read naturally, got %q", got)
 	}
 }
