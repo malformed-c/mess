@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -346,7 +347,36 @@ func resolveRoom(p paths, flagVal string) string {
 // stdout into the message before mess reads argv at all. mess itself can't
 // detect this after the fact (the original backticks are already gone), so
 // --file sidesteps the shell entirely instead of trying to.
+// errEmptyBody is what a caller gets when the body resolves to nothing. It is
+// worth a hard error rather than a blank message: sending one is strictly worse
+// than failing (the recipient gets an empty line, the sender's command exits 0
+// and looks fine), and an empty body is the unmistakable signature of the
+// shell having eaten the whole thing — which is the single most common way a
+// message gets damaged here, so this is the moment to say so.
+var errEmptyBody = errors.New(`empty message body — nothing was sent.
+If you wrote the message inline in double quotes, your shell probably ate it: bash runs an
+unescaped ` + "`backtick`" + ` or $(...) as a COMMAND SUBSTITUTION before mess ever sees the argument.
+Either escape them (\` + "`" + `), or don't quote at all:
+  mess send bob --file notes.md
+  mess send bob <<'EOF'      # quoted heredoc: backticks pass through untouched
+  ... your text ...
+  EOF`)
+
+// bodyFrom resolves a message body, rejecting an empty result.
 func bodyFrom(args []string, filePath string) (string, error) {
+	body, err := bodyOrEmpty(args, filePath)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(body) == "" {
+		return "", errEmptyBody
+	}
+	return body, nil
+}
+
+// bodyOrEmpty is bodyFrom without the empty check, for the commands where an
+// empty value is meaningful (state/warn clear themselves that way).
+func bodyOrEmpty(args []string, filePath string) (string, error) {
 	// "-" is the standard Unix convention for "read from stdin explicitly" —
 	// real gap hit live: `cat <<'EOF' | mess send bob -` sent the literal
 	// dash as the body instead of the heredoc's content, since a positional
@@ -376,6 +406,27 @@ func bodyFrom(args []string, filePath string) (string, error) {
 		return strings.Join(args, " "), nil
 	}
 	return readStdinBody()
+}
+
+// bodyEcho renders the delivered body for the sender's own confirmation line.
+//
+// mess only ever sees the body AFTER the caller's shell has expanded it, so it
+// cannot tell that a backtick was executed instead of sent — but the caller
+// can: their original command is right there in their own scrollback, so
+// echoing what actually arrived lets them spot the difference immediately,
+// instead of the recipient discovering it and a correction having to be sent.
+// Short bodies echo verbatim; longer ones report their size and first line, so
+// a status update doesn't reprint itself in full.
+func bodyEcho(body string) string {
+	const inline = 120
+	if !strings.Contains(body, "\n") && len([]rune(body)) <= inline {
+		return fmt.Sprintf("%q", body)
+	}
+	first := strings.ReplaceAll(body, "\n", " ")
+	if r := []rune(first); len(r) > inline {
+		first = string(r[:inline]) + "…"
+	}
+	return fmt.Sprintf("%d bytes, %d lines, starting %q", len(body), strings.Count(body, "\n")+1, first)
 }
 
 // readStdinBody reads the message body from stdin, trimming a single
@@ -663,6 +714,7 @@ func cmdSend(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("sent to %s — %s\n", to, bodyEcho(body))
 	if *ack {
 		if !resp.Acked {
 			return fmt.Errorf("not read by %s (ack timeout)", to)
@@ -796,7 +848,7 @@ func cmdBroadcast(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("delivered to %d agent(s)\n", resp.Count)
+	fmt.Printf("delivered to %d agent(s) — %s\n", resp.Count, bodyEcho(body))
 	return nil
 }
 
@@ -840,7 +892,7 @@ func cmdShout(p paths, args []string) error {
 	case rt.global:
 		scope = "the global room"
 	}
-	fmt.Printf("shouted to %d agent(s) in %s — all woken\n", resp.Count, scope)
+	fmt.Printf("shouted to %d agent(s) in %s, all woken — %s\n", resp.Count, scope, bodyEcho(body))
 	return nil
 }
 
@@ -886,6 +938,7 @@ func cmdPub(p paths, args []string) error {
 	} else {
 		fmt.Printf("delivered to %d subscriber(s)\n", resp.Count)
 	}
+	fmt.Printf("  sent — %s\n", bodyEcho(body))
 	return nil
 }
 
@@ -1330,7 +1383,7 @@ func cmdState(p paths, args []string) error {
 	}
 	state := ""
 	if !*clear {
-		if state, err = bodyFrom(fs.Args(), ""); err != nil {
+		if state, err = bodyOrEmpty(fs.Args(), ""); err != nil {
 			return err
 		}
 	}
@@ -1359,7 +1412,7 @@ func cmdWarn(p paths, args []string) error {
 	}
 	text := ""
 	if !*clear {
-		if text, err = bodyFrom(fs.Args(), ""); err != nil {
+		if text, err = bodyOrEmpty(fs.Args(), ""); err != nil {
 			return err
 		}
 	}
@@ -1604,12 +1657,12 @@ func sendReply(p paths, from, kind, topic, to, threadID, body string, rt roomTar
 		if err != nil {
 			return err
 		}
-		fmt.Printf("replied in #%s (thread %s) — delivered to %d subscriber(s)\n", topic, threadID, resp.Count)
+		fmt.Printf("replied in #%s (thread %s) — delivered to %d subscriber(s) — %s\n", topic, threadID, resp.Count, bodyEcho(body))
 	case KindDirect:
 		if _, err := call(p, rt.apply(Request{Op: "send", As: from, To: to, Body: body, ThreadID: threadID})); err != nil {
 			return err
 		}
-		fmt.Printf("replied to %s (thread %s)\n", to, threadID)
+		fmt.Printf("replied to %s (thread %s) — %s\n", to, threadID, bodyEcho(body))
 	default:
 		return fmt.Errorf("unsupported reply target kind %q", kind)
 	}

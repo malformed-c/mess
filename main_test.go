@@ -584,3 +584,62 @@ func TestReplyHelpPrintsUsageInsteadOfMessagingAPeer(t *testing.T) {
 		t.Fatalf("`mess reply --help` was delivered to a peer as a message: %q", got)
 	}
 }
+
+// --- shell-eaten message bodies ---
+//
+// Hit live and repeatedly (a fleet sent 8 correction-shaped messages in one
+// afternoon): an agent writes a status update inline in double quotes, the text
+// contains `backticks`, and bash runs them as a COMMAND SUBSTITUTION before
+// mess ever sees the argument. mess cannot detect that — it only ever receives
+// the post-expansion string — but it can refuse the one case that is
+// unmistakable, and it can show the caller what actually arrived.
+
+func TestEmptyBodyIsRefusedRatherThanSentBlank(t *testing.T) {
+	for _, args := range [][]string{{}, {""}, {"   "}, {"\n"}} {
+		if _, err := bodyFrom(args, ""); err == nil {
+			t.Errorf("bodyFrom(%q) accepted an empty body — a blank message is strictly worse than an error", args)
+		}
+	}
+	// The error has to name the actual cause, since this IS the teaching moment.
+	_, err := bodyFrom([]string{""}, "")
+	if err == nil || !strings.Contains(err.Error(), "COMMAND SUBSTITUTION") {
+		t.Fatalf("the empty-body error should explain the shell-substitution cause, got %v", err)
+	}
+}
+
+// state/warn clear themselves with an empty value, so they keep the permissive
+// path — the guard must not turn `mess state --clear` into an error.
+func TestStateAndWarnStillAcceptAnEmptyValue(t *testing.T) {
+	if _, err := bodyOrEmpty([]string{""}, ""); err != nil {
+		t.Fatalf("bodyOrEmpty must allow empty for state/warn, got %v", err)
+	}
+}
+
+// A real body is untouched, backticks and all — the guard must not punish the
+// callers who quoted correctly.
+func TestAProperlyEscapedBodySurvives(t *testing.T) {
+	got, err := bodyFrom([]string{"use `apsis pawns add` for that"}, "")
+	if err != nil {
+		t.Fatalf("a legitimate body with backticks was rejected: %v", err)
+	}
+	if got != "use `apsis pawns add` for that" {
+		t.Fatalf("body was altered: %q", got)
+	}
+}
+
+// The echo is what makes PARTIAL damage visible: the caller has their original
+// command in their own scrollback, so seeing what actually arrived lets them
+// spot the difference in the same turn.
+func TestBodyEchoShowsShortBodiesVerbatimAndSummarisesLongOnes(t *testing.T) {
+	if got := bodyEcho("the flag on  is what I meant"); !strings.Contains(got, "the flag on  is what I meant") {
+		t.Fatalf("a short body must echo verbatim so a gap is visible, got %s", got)
+	}
+	long := strings.Repeat("x", 500) + "\nsecond line"
+	got := bodyEcho(long)
+	if strings.Contains(got, strings.Repeat("x", 500)) {
+		t.Fatalf("a long body must not reprint itself in full: %s", got)
+	}
+	if !strings.Contains(got, "bytes") || !strings.Contains(got, "lines") {
+		t.Fatalf("a long body should report its size, got %s", got)
+	}
+}
