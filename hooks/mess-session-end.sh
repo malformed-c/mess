@@ -14,13 +14,14 @@
 # probe covers the unclean exits this hook never gets to run for.
 [ -n "$MESS_CHANNEL" ] && exit 0
 
-# Grok Build injects GROK_SESSION_ID into hooks; mess keys identity on session id.
-if [ -z "${MESS_SESSION_ID:-}" ] && [ -n "${GROK_SESSION_ID:-}" ]; then
-  export MESS_SESSION_ID="$GROK_SESSION_ID"
-fi
-
-MESS=${MESS_BIN:-/home/engi/.local/bin/mess}  # MESS_BIN lets the tests drive a throwaway build
-who=$("$MESS" whoami 2>/dev/null)
+# Shared preamble: resolves MESS and `who` (see mess-common.sh). Sourcing it
+# rather than repeating it is what stops the four hooks drifting apart again.
+# Guard with -r rather than `. ... || exit 0`: a failed `.` is FATAL in POSIX
+# sh, so the || never runs and a missing preamble would take the hook down
+# noisily instead of standing it down.
+_common="$(dirname "$0")/mess-common.sh"
+[ -r "$_common" ] || exit 0
+. "$_common"
 [ -z "$who" ] && exit 0
 
 "$MESS" session-end 2>/dev/null

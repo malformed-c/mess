@@ -27,11 +27,6 @@
 [ -n "$MESS_NO_STEER" ] && exit 0
 [ -n "$MESS_CHANNEL" ] && exit 0
 
-# Grok Build: map hook-injected GROK_SESSION_ID so whoami resolves mid-turn.
-if [ -z "$MESS_SESSION_ID" ] && [ -n "$GROK_SESSION_ID" ]; then
-  export MESS_SESSION_ID="$GROK_SESSION_ID"
-fi
-
 # The hook event this fires on (PreToolUse before a tool, or UserPromptSubmit on
 # a user message). additionalContext's hookEventName must match. Default keeps
 # older single-arg installs working.
@@ -42,8 +37,14 @@ case "$EVENT" in
   *) at="now" ;;
 esac
 
-MESS=${MESS_BIN:-/home/engi/.local/bin/mess}  # MESS_BIN lets the tests drive a throwaway build
-who=$("$MESS" whoami 2>/dev/null)
+# Shared preamble: resolves MESS and `who` (see mess-common.sh). Sourcing it
+# rather than repeating it is what stops the four hooks drifting apart again.
+# Guard with -r rather than `. ... || exit 0`: a failed `.` is FATAL in POSIX
+# sh, so the || never runs and a missing preamble would take the hook down
+# noisily instead of standing it down.
+_common="$(dirname "$0")/mess-common.sh"
+[ -r "$_common" ] || exit 0
+. "$_common"
 [ -z "$who" ] && exit 0
 
 RENOTIFY=${MESS_STEER_RENOTIFY:-60}  # seconds; re-announce still-unread mail at most this often

@@ -12,8 +12,14 @@
 # message-to-human notifier (MESS_NO_NOTIFY) so one switch silences both.
 [ -n "$MESS_NO_NOTIFY" ] && exit 0
 
-MESS=/home/engi/.local/bin/mess
-who=$("$MESS" whoami 2>/dev/null)
+# Shared preamble: resolves MESS and `who` (see mess-common.sh). Sourcing it
+# rather than repeating it is what stops the four hooks drifting apart again.
+# Guard with -r rather than `. ... || exit 0`: a failed `.` is FATAL in POSIX
+# sh, so the || never runs and a missing preamble would take the hook down
+# noisily instead of standing it down.
+_common="$(dirname "$0")/mess-common.sh"
+[ -r "$_common" ] || exit 0
+. "$_common"
 [ -z "$who" ] && exit 0
 
 in=$(cat)

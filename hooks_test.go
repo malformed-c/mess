@@ -639,3 +639,83 @@ func TestAWakeLeavesNonWakingBacklogQueued(t *testing.T) {
 		t.Fatalf("the non-waking broadcast should still be queued for a later recv, got %q", got)
 	}
 }
+
+// mess-ask-notify.sh had drifted furthest from its siblings precisely because
+// nothing could drive it: it hardcoded the binary path with no MESS_BIN
+// override, and had lost the Grok session mapping, so on Grok it silently did
+// nothing while the other three worked. Now that the preamble is shared, it is
+// testable — which is the point of sharing it.
+func TestAskNotifyHookResolvesItsIdentityLikeTheOthers(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("alice", "register", "alice")
+
+	run := func(env []string, stdin string) (string, int) {
+		cmd := exec.Command("sh", filepath.Join(e.hook, "mess-ask-notify.sh"))
+		cmd.Env = env
+		cmd.Stdin = strings.NewReader(stdin)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		return string(out), code
+	}
+	const askInput = `{"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"ship it?"}]}}`
+
+	// A session with an identity gets past the guard (notify-send may be absent
+	// here, which is fine — the hook degrades silently and still exits 0).
+	if _, code := run(e.env("alice"), askInput); code != 0 {
+		t.Fatalf("hook should exit 0 for an identified session, got %d", code)
+	}
+
+	// Grok injects GROK_SESSION_ID instead of MESS_SESSION_ID. The shared
+	// preamble maps it across; without that this hook resolved no identity and
+	// silently did nothing, unlike its three siblings.
+	grok := []string{}
+	for _, kv := range e.env("alice") {
+		if !strings.HasPrefix(kv, "MESS_SESSION_ID=") {
+			grok = append(grok, kv)
+		}
+	}
+	grok = append(grok, "GROK_SESSION_ID=sess-alice")
+	cmd := exec.Command("sh", filepath.Join(e.hook, "mess-common.sh"))
+	cmd.Env = grok
+	_ = cmd.Run() // sourcing it standalone is a no-op; the check below is the real one
+
+	probe := exec.Command("sh", "-c", `. "$1/mess-common.sh"; printf '%s' "$who"`, "sh", e.hook)
+	probe.Env = grok
+	out, err := probe.Output()
+	if err != nil {
+		t.Fatalf("probing the shared preamble: %v", err)
+	}
+	if string(out) != "alice" {
+		t.Fatalf("the shared preamble must map GROK_SESSION_ID into an identity, resolved %q", out)
+	}
+}
+
+// A missing shared preamble must make a hook no-op, not misbehave with unset
+// variables — the failure mode of factoring it out at all.
+func TestHooksNoOpIfTheSharedPreambleIsMissing(t *testing.T) {
+	e := newHookEnv(t)
+	bare := t.TempDir()
+	for _, h := range []string{"mess-wake.sh", "mess-steer.sh", "mess-session-end.sh", "mess-ask-notify.sh"} {
+		src, err := os.ReadFile(filepath.Join(e.hook, h))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bare, h), src, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", filepath.Join(bare, h))
+		cmd.Env = e.env("alice")
+		cmd.Stdin = strings.NewReader("{}")
+		out, err := cmd.CombinedOutput()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+		if code != 0 {
+			t.Fatalf("%s should stand down quietly without mess-common.sh, got exit %d: %s", h, code, out)
+		}
+	}
+}

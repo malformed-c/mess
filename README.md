@@ -802,6 +802,17 @@ What each piece does:
   ten idle minutes. Raising the timeout lets the waiter stay parked (here up to a
   day) so a peer's message still finds it `listening`. (After the timeout it is
   reaped and re-arms on the next turn; nothing is lost — peek keeps queued mail.)
+All four scripts source [`hooks/mess-common.sh`](hooks/mess-common.sh) for the
+one preamble they share — resolving the `mess` binary (`MESS_BIN` > `PATH` >
+`~/.local/bin/mess`, so no machine's home directory is baked in), mapping
+Grok's `GROK_SESSION_ID` across, and resolving this session's identity. It was
+copy-pasted four ways before, and had already drifted: `mess-ask-notify.sh` had
+lost the Grok mapping, so it silently did nothing there while its three
+siblings worked, and had no `MESS_BIN` override, which is why it was the one
+hook with no test coverage. A hook whose preamble is missing stands down
+quietly (`[ -r "$_common" ] || exit 0` — a failed `.` is fatal in POSIX sh, so
+`|| exit 0` on the source itself would not have worked).
+
 - **SessionEnd → `mess session-end`**
   ([`hooks/mess-session-end.sh`](hooks/mess-session-end.sh)): retires this
   session's presence on the way out — clears the in-a-turn flag and evicts the
