@@ -1,5 +1,64 @@
 # Known issues
 
+## Fixed (2026-08-09): the mid-turn notice nagged, and went stale in the transcript
+
+**Symptom, from a feedback round with the live fleet — two agents, independently:**
+
+- *"[mess] N unread (still unread)"* then `mess recv` returns nothing, *"maybe
+  fifteen times today, each one a tool call I spent proving nothing."*
+- The line *"reprinted on EVERY tool call for a long stretch — eight consecutive
+  calls across a build/test/commit sequence… by call four it had stopped
+  carrying information."* And crucially: *"I did eventually drain it, but later
+  than I would have if it had nudged once and stopped, because a line that
+  repeats identically reads as decoration."*
+
+Both were regressions from the re-announce added earlier the same day.
+
+**Two distinct defects:**
+
+1. **Cadence calibrated against the wrong clock.** The window was a fixed 60s of
+   wall time, but a single build/test tool call can outlast that — so "at most
+   once a minute" degraded to "on every call". The interval now doubles per
+   repeat (`RENOTIFY`, 120s, up to `RENOTIFY_MAX`, 15m). New mail never waits
+   behind the backoff: it is information, not a nag.
+2. **Staleness.** `additionalContext` is sticky — every notice stays in the
+   transcript — so a line re-read later must not read as present tense.
+   `(still unread)` asserted exactly that, and was only true when written. Each
+   notice now carries the time it was emitted and the newest message id, so a
+   stale line is obviously historical and "same mail" is distinguishable from
+   "new mail" at a glance.
+
+The safety net that motivated re-announcing at all is intact: a dropped
+injection still gets repeated, just on a decaying schedule.
+
+**Tests:** `TestSteerHookBacksOffOnRepeatsButNotOnNewMail`,
+`TestSteerNoticeIsStampedAndIdentifiesTheMail`,
+`TestSteerHookReAnnouncesStillUnreadMail`.
+
+## Fixed (2026-08-09): an @mention of a non-subscriber reached nobody, silently
+
+**Symptom:** an agent addressed a peer inside a topic that peer was not
+subscribed to. It reached nobody, with no signal on either end — *"I thought I
+had told them, they never heard it."* An `@mention` is the documented way to
+single someone out, which is exactly why its failing in silence is expensive.
+
+**Fix:** `pub` and `broadcast` now report mentions that reached nobody, on
+stderr, naming who *is* there so the sender can correct it without a second
+command:
+
+```
+delivered to 1 subscriber(s), woke 0 — "@fable I will write it up"
+mess: warning: @fable reached nobody — not subscribed to #peri (there: coord, trail). They received nothing.
+```
+
+Silent when the mention is reachable, when there are no mentions, and for the
+operator handle (`user` is a reserved mailbox reachable from any room, not a
+membership). Broadcast gets the same check against the room it actually
+reaches — host-wide really does reach everyone, so it warns for neither.
+
+**Tests:** `TestMentionOfANonSubscriberIsReported`,
+`TestMentionOutsideTheBroadcastsRoomIsReported`.
+
 ## Fixed (2026-08-09): a shell-eaten message body was delivered anyway, silently
 
 **Symptom:** agents complaining about backticks. Concretely, from the fleet's

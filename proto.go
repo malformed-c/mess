@@ -193,8 +193,14 @@ type Response struct {
 	Removed  []string     `json:"removed,omitempty"` // (cleanup) agents pruned (or, with dry-run, eligible)
 	Busy     bool         `json:"busy,omitempty"`    // (recv --if-idle) the agent was busy, so nothing was drained
 	Woke     int          `json:"woke,omitempty"`    // (pub) how many of Count were actually woken — an @mention or threaded reply quiets the rest
-	ID       string       `json:"id,omitempty"`      // (ask) the created message's own id — the await token
-	Expired  int          `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
+	// Unreached lists @mentioned names that are not among this message's
+	// recipients at all, so the mention reached nobody. Members is the actual
+	// recipient set, populated only alongside a warning, so the sender can see
+	// who they SHOULD have addressed without a second command.
+	Unreached []string `json:"unreached,omitempty"`
+	Members   []string `json:"members,omitempty"`
+	ID        string   `json:"id,omitempty"`      // (ask) the created message's own id — the await token
+	Expired   int      `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
 	// Reason classifies an empty blocking recv, so a parked caller can tell
 	// "re-park, someone beat me to the inbox" from "stop waiting". Empty
 	// whenever messages were returned. See the Reason* constants.

@@ -894,6 +894,56 @@ func (b *Broker) Broadcast(from, room, body string, loud, hostWide bool) (Messag
 	return m, n
 }
 
+// MentionsNotSubscribed returns the @mentioned names in body that are not
+// subscribed to topic, and so receive nothing at all.
+//
+// An @mention is the documented way to single someone out, so one aimed at a
+// non-subscriber failing in TOTAL silence — on both ends — is how a real
+// message got lost: the sender believed they had told someone, and that someone
+// never heard it. Neither side had any signal.
+func (b *Broker) MentionsNotSubscribed(topic, body string) (unreached, members []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	reach := map[string]bool{}
+	for key := range b.topics[topic] {
+		_, name := splitAgentKey(key)
+		reach[name] = true
+		members = append(members, name)
+	}
+	sort.Strings(members)
+	return missingMentions(body, reach), members
+}
+
+// MentionsNotInRoom is the same check for a broadcast: a mention of someone who
+// isn't among the agents it actually reaches.
+func (b *Broker) MentionsNotInRoom(room, body string, hostWide bool) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	reach := map[string]bool{}
+	for key := range b.agents {
+		r, name := splitAgentKey(key)
+		if hostWide || r == room {
+			reach[name] = true
+		}
+	}
+	return missingMentions(body, reach)
+}
+
+// missingMentions lists the mentions in body that reach nobody. The operator
+// handle is exempt: it is a reserved mailbox reachable from every room, not a
+// tracked membership. Sorted, so the warning is stable.
+func missingMentions(body string, reach map[string]bool) []string {
+	var out []string
+	for name := range mentionsIn(body) {
+		if reach[name] || isUserHandle(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // mentionRe matches an @name mention at a word boundary (so it doesn't fire on
 // things like an email's "user@host"). Names are letters/digits/_/- (matching
 // agent names like "peri-sonnet-5").

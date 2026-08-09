@@ -2259,3 +2259,54 @@ func TestPendingAskTableIsBounded(t *testing.T) {
 		t.Fatalf("asks table grew to %d, past the %d cap", n, maxPendingAsks)
 	}
 }
+
+// An @mention of someone who isn't subscribed reaches nobody, and used to do so
+// in total silence on BOTH ends — the sender believed they had told someone who
+// never heard it. That cost a real message: a peer was addressed inside a topic
+// they were not subscribed to, and neither side had any signal.
+func TestMentionOfANonSubscriberIsReported(t *testing.T) {
+	b := newTestBroker()
+	b.Register("trail")
+	b.Register("coord")
+	b.Register("fable")
+	b.Sub("trail", "peri")
+	b.Sub("coord", "peri")
+
+	unreached, members := b.MentionsNotSubscribed("peri", "@fable I will write it up")
+	if len(unreached) != 1 || unreached[0] != "fable" {
+		t.Fatalf("an unsubscribed mention must be reported, got %v", unreached)
+	}
+	// The subscriber list comes back too, so the sender can fix it without a
+	// second command — the field they said they'd want in front of pub output.
+	if len(members) != 2 || members[0] != "coord" || members[1] != "trail" {
+		t.Fatalf("want the sorted subscriber list, got %v", members)
+	}
+
+	// A mention that IS subscribed must stay silent, or the warning is noise.
+	if got, _ := b.MentionsNotSubscribed("peri", "@coord please review"); len(got) != 0 {
+		t.Fatalf("a reachable mention must not warn, got %v", got)
+	}
+	// ...and so must a message with no mentions at all.
+	if got, _ := b.MentionsNotSubscribed("peri", "no mentions here"); len(got) != 0 {
+		t.Fatalf("unmentioned body must not warn, got %v", got)
+	}
+}
+
+// The same hole exists on broadcast, which only reaches one room.
+func TestMentionOutsideTheBroadcastsRoomIsReported(t *testing.T) {
+	b := newTestBroker()
+	b.Register("alice")
+	b.Register(agentKey("coord", "bob"))
+
+	if got := b.MentionsNotInRoom("", "@bob urgent", false); len(got) != 1 || got[0] != "bob" {
+		t.Fatalf("a mention of someone in another room must be reported, got %v", got)
+	}
+	// Host-wide really does reach them, so there is nothing to warn about.
+	if got := b.MentionsNotInRoom("", "@bob urgent", true); len(got) != 0 {
+		t.Fatalf("host-wide reaches every room; no warning expected, got %v", got)
+	}
+	// The operator handle is reachable from anywhere and is not a membership.
+	if got := b.MentionsNotInRoom("", "@user look at this", false); len(got) != 0 {
+		t.Fatalf("the human mailbox must never be reported unreachable, got %v", got)
+	}
+}

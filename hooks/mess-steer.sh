@@ -12,12 +12,25 @@
 # phrased "as of this tool call" because additionalContext is sticky (saved to
 # the transcript), so a lingering line reads as a point-in-time event.
 #
-# Dedup is also time-bounded (RENOTIFY): while the same mail stays unread we
-# re-announce at most once per window. Watermarking purely on id made this
-# fire-and-forget — the marker advanced the moment the notice was *printed*,
-# with no confirmation the agent saw it, so a single dropped injection meant
-# that message was never mentioned again. Re-announcing bounds a drop to one
-# window instead of losing it outright, without spamming every tool call.
+# Re-announcing exists because watermarking purely on id was fire-and-forget:
+# the marker advanced the moment the notice was *printed*, with no confirmation
+# the agent saw it, so one dropped injection meant that message was never
+# mentioned again. But a FIXED window was calibrated against the wrong clock —
+# during a build/test stretch a single tool call can take longer than the
+# window, so "at most once a minute" degraded to "on every call". Two agents
+# reported the same thing independently; one counted it on eight consecutive
+# calls and said that by call four it had stopped carrying information. A line
+# that repeats identically reads as decoration, so it got drained LATER than a
+# single nudge would have managed. The interval now backs off (doubling to
+# RENOTIFY_MAX), which keeps the dropped-injection safety net while making the
+# repeat cheap.
+#
+# Every notice is stamped with the time it was emitted, and names the newest
+# message id. additionalContext is sticky — each notice stays in the transcript
+# — so a line re-read later must not read as present tense. The stamp makes a
+# stale line obviously historical, and the id makes "same mail" distinguishable
+# from "new mail" at a glance. The old "(still unread)" wording did the exact
+# opposite: it asserted, in the present tense, something only true when written.
 #
 # Scope: fires for any session that has a mess identity. No-op for non-mess
 # sessions. Opt out with MESS_NO_STEER=1. Stands down under MESS_CHANNEL (a
@@ -31,11 +44,6 @@
 # a user message). additionalContext's hookEventName must match. Default keeps
 # older single-arg installs working.
 EVENT="${1:-PreToolUse}"
-case "$EVENT" in
-  PreToolUse) at="this tool call" ;;
-  UserPromptSubmit) at="this prompt" ;;
-  *) at="now" ;;
-esac
 
 # Shared preamble: resolves MESS and `who` (see mess-common.sh). Sourcing it
 # rather than repeating it is what stops the four hooks drifting apart again.
@@ -47,7 +55,8 @@ _common="$(dirname "$0")/mess-common.sh"
 . "$_common"
 [ -z "$who" ] && exit 0
 
-RENOTIFY=${MESS_STEER_RENOTIFY:-60}  # seconds; re-announce still-unread mail at most this often
+RENOTIFY=${MESS_STEER_RENOTIFY:-120}          # seconds before the FIRST re-announce
+RENOTIFY_MAX=${MESS_STEER_RENOTIFY_MAX:-900}  # ...doubling up to this ceiling
 
 statedir="${TMPDIR:-/tmp}"
 errf="$statedir/mess-steer-$who.err"  # marks an outage already reported
@@ -111,25 +120,44 @@ lockf="$statedir/mess-steer-$who.lock"
 exec 9>"$lockf"
 flock 9
 
-# State is "<highest announced id> <when we announced it>". A bare id is the
-# older format; treat its timestamp as 0 so it re-announces once immediately.
+# State is "<highest announced id> <when> <consecutive repeats>". Older formats
+# have fewer fields; the missing ones default to 0, which just means the next
+# notice fires immediately and starts the backoff over.
 statef="$statedir/mess-steer-$who.id"
 prev=0
 prev_at=0
+repeats=0
 if [ -r "$statef" ]; then
-  read -r prev prev_at < "$statef" 2>/dev/null
+  read -r prev prev_at repeats < "$statef" 2>/dev/null
 fi
 case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
 case "$prev_at" in ''|*[!0-9]*) prev_at=0 ;; esac
+case "$repeats" in ''|*[!0-9]*) repeats=0 ;; esac
 now=$(date +%s)
+
+# How long this repeat has to wait: RENOTIFY doubled once per previous repeat,
+# capped. New mail never waits.
+wait=$RENOTIFY
+i=0
+while [ "$i" -lt "$repeats" ]; do
+  wait=$((wait * 2))
+  if [ "$wait" -ge "$RENOTIFY_MAX" ]; then
+    wait=$RENOTIFY_MAX
+    break
+  fi
+  i=$((i + 1))
+done
 
 # (The auto-wake hook consumes on an idle wake, so a woken turn's inbox is empty
 # here — no flag coordination needed. When the agent is working, the wake stands
 # down and this hook is the sole notifier.)
-if [ "$maxid" -gt "$prev" ] || [ "$((now - prev_at))" -ge "$RENOTIFY" ]; then
-  again=""
-  [ "$maxid" -le "$prev" ] && again=" (still unread)"
-  emit "[mess] $n unread peer message(s)$asknote as of $at$again — run \`mess recv\` to read them."
-  printf '%s %s\n' "$maxid" "$now" > "$statef"
+if [ "$maxid" -gt "$prev" ]; then
+  repeats=0
+elif [ "$((now - prev_at))" -ge "$wait" ]; then
+  repeats=$((repeats + 1))
+else
+  exit 0
 fi
+emit "[mess] $(date +%H:%M:%S) — $n unread peer message(s)$asknote, newest m$maxid. Run \`mess recv\` to read them."
+printf '%s %s %s\n' "$maxid" "$now" "$repeats" > "$statef"
 exit 0

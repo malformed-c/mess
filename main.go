@@ -408,6 +408,22 @@ func bodyOrEmpty(args []string, filePath string) (string, error) {
 	return readStdinBody()
 }
 
+// warnUnreached tells the sender that an @mention reached nobody. It goes to
+// stderr, not stdout: it is a warning about a message that WAS sent, and the
+// one report we have of this failing cost a real message precisely because it
+// was silent on both ends. `members` names who is actually there, so the fix
+// doesn't need a second command.
+func warnUnreached(resp Response, where string) {
+	if len(resp.Unreached) == 0 {
+		return
+	}
+	msg := fmt.Sprintf("mess: warning: @%s reached nobody — not %s", strings.Join(resp.Unreached, ", @"), where)
+	if len(resp.Members) > 0 {
+		msg += fmt.Sprintf(" (there: %s)", strings.Join(resp.Members, ", "))
+	}
+	fmt.Fprintln(os.Stderr, msg+". They received nothing.")
+}
+
 // bodyEcho renders the delivered body for the sender's own confirmation line.
 //
 // mess only ever sees the body AFTER the caller's shell has expanded it, so it
@@ -853,6 +869,7 @@ func cmdBroadcast(p paths, args []string) error {
 		return err
 	}
 	fmt.Printf("delivered to %d agent(s) — %s\n", resp.Count, bodyEcho(body))
+	warnUnreached(resp, "in this room")
 	return nil
 }
 
@@ -897,6 +914,7 @@ func cmdShout(p paths, args []string) error {
 		scope = "the global room"
 	}
 	fmt.Printf("shouted to %d agent(s) in %s, all woken — %s\n", resp.Count, scope, bodyEcho(body))
+	warnUnreached(resp, "in that room")
 	return nil
 }
 
@@ -943,6 +961,7 @@ func cmdPub(p paths, args []string) error {
 	} else {
 		fmt.Printf("delivered to %d subscriber(s) — %s\n", resp.Count, bodyEcho(body))
 	}
+	warnUnreached(resp, "subscribed to #"+rest[0])
 	return nil
 }
 

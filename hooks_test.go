@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -317,15 +318,16 @@ func (e *hookEnv) steer(as string, extra ...string) string {
 
 // The mid-turn notice used to watermark on print: it advanced its "already
 // announced" marker the moment it emitted, with no confirmation the agent saw
-// it. One dropped injection meant that message was never mentioned again. It
-// must re-announce while the mail stays unread.
+// it. One dropped injection meant that message was never mentioned again — so
+// it re-announces while the mail stays unread.
 func TestSteerHookReAnnouncesStillUnreadMail(t *testing.T) {
 	e := newHookEnv(t)
 	e.mess("victim", "register", "victim")
 	e.mess("sender", "register", "sender")
 	e.mess("sender", "send", "victim", "hello")
 
-	first := e.steer("victim", "MESS_STEER_RENOTIFY=60")
+	fast := []string{"MESS_STEER_RENOTIFY=1", "MESS_STEER_RENOTIFY_MAX=1"}
+	first := e.steer("victim", fast...)
 	if !strings.Contains(first, "1 unread peer message") {
 		t.Fatalf("no notice for new mail: %q", first)
 	}
@@ -334,18 +336,74 @@ func TestSteerHookReAnnouncesStillUnreadMail(t *testing.T) {
 	if again := e.steer("victim", "MESS_STEER_RENOTIFY=60"); again != "" {
 		t.Fatalf("re-announced within the window: %q", again)
 	}
-	// Once the window passes and the mail is STILL unread, say so again.
+	// Once the window passes and the mail is still unread, say so again.
 	time.Sleep(2100 * time.Millisecond)
-	retry := e.steer("victim", "MESS_STEER_RENOTIFY=1")
-	if !strings.Contains(retry, "still unread") {
+	if retry := e.steer("victim", fast...); !strings.Contains(retry, "1 unread peer message") {
 		t.Fatalf("dropped notice was never retried: %q", retry)
 	}
 
 	// Once read, it goes quiet again.
 	e.mess("victim", "recv")
 	time.Sleep(2100 * time.Millisecond)
-	if after := e.steer("victim", "MESS_STEER_RENOTIFY=1"); after != "" {
+	if after := e.steer("victim", fast...); after != "" {
 		t.Fatalf("kept announcing after the inbox was drained: %q", after)
+	}
+}
+
+// Two agents independently reported the notice reprinting on every tool call
+// during deep work — one counted eight consecutive calls and said that by call
+// four it had stopped carrying information, so the mail got drained LATER than
+// a single nudge would have managed. A fixed window was calibrated against the
+// wrong clock: one build/test call can outlast it. The interval now doubles per
+// repeat, and new mail never waits behind that backoff.
+func TestSteerHookBacksOffOnRepeatsButNotOnNewMail(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "first")
+
+	// base 1s, doubling: announce, +1s, then +2s.
+	slow := []string{"MESS_STEER_RENOTIFY=1", "MESS_STEER_RENOTIFY_MAX=900"}
+	if got := e.steer("victim", slow...); !strings.Contains(got, "unread") {
+		t.Fatalf("new mail should announce at once: %q", got)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if got := e.steer("victim", slow...); !strings.Contains(got, "unread") {
+		t.Fatalf("first repeat should fire after the base window: %q", got)
+	}
+	// The window has now doubled, so the same wait is no longer enough.
+	time.Sleep(1200 * time.Millisecond)
+	if got := e.steer("victim", slow...); got != "" {
+		t.Fatalf("second repeat fired too early — the backoff did not grow: %q", got)
+	}
+
+	// New mail bypasses the backoff entirely: it is information, not a nag.
+	e.mess("sender", "send", "victim", "second")
+	got := e.steer("victim", slow...)
+	if !strings.Contains(got, "2 unread") {
+		t.Fatalf("new mail must announce immediately despite the backoff: %q", got)
+	}
+}
+
+// A notice re-read later out of the transcript must not read as present tense —
+// additionalContext is sticky, so every emission lingers. The stamp makes a
+// stale line obviously historical and the id distinguishes "same mail" from
+// "new mail"; "(still unread)" asserted the opposite and cost real tool calls.
+func TestSteerNoticeIsStampedAndIdentifiesTheMail(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "hello")
+
+	got := e.steer("victim", "MESS_STEER_RENOTIFY=1")
+	if !regexp.MustCompile(`\d\d:\d\d:\d\d`).MatchString(got) {
+		t.Fatalf("notice should carry the time it was emitted: %q", got)
+	}
+	if !regexp.MustCompile(`newest m\d+`).MatchString(got) {
+		t.Fatalf("notice should name the newest message id: %q", got)
+	}
+	if strings.Contains(got, "still unread") {
+		t.Fatalf("the present-tense wording is what made a stale line misleading: %q", got)
 	}
 }
 

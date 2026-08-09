@@ -525,7 +525,12 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("broadcast %s -> %d agent(s)", req.As, n)
 		}
 		d.journalAppend(req.Room, m)
-		return Response{OK: true, Count: n}
+		resp := Response{OK: true, Count: n}
+		if unreached := b.MentionsNotInRoom(callerRoom(req), req.Body, req.HostWide); len(unreached) > 0 {
+			resp.Unreached = unreached
+			elog("broadcast %s: @%s not reachable here", req.As, strings.Join(unreached, ", @"))
+		}
+		return resp
 	case "pub":
 		m, delivered, woke := b.pub(self, topic, req.Body, req.ThreadID, attachFromRequest(req))
 		notifyUser(req.As, "", req.Body)
@@ -535,7 +540,12 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, delivered)
 		}
 		d.journalAppend(req.Room, m)
-		return Response{OK: true, Count: delivered, Woke: woke}
+		resp := Response{OK: true, Count: delivered, Woke: woke}
+		if unreached, members := b.MentionsNotSubscribed(topic, req.Body); len(unreached) > 0 {
+			resp.Unreached, resp.Members = unreached, members
+			elog("pub %s #%s: @%s not subscribed", req.As, req.Topic, strings.Join(unreached, ", @"))
+		}
+		return resp
 	case "sub":
 		b.Sub(who, topic)
 		return Response{OK: true}
