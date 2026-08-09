@@ -649,3 +649,37 @@ func TestBodyEchoShowsShortBodiesVerbatimAndSizesLongOnes(t *testing.T) {
 		t.Fatalf("a single long line should read naturally, got %q", got)
 	}
 }
+
+// --- addressing an agent in another room by its rendered name ---
+//
+// mess PRINTS room-scoped names as "room/name" (ps --all, error messages) and
+// refuses to register a name containing "/", which is exactly what makes that
+// rendering safe to accept back as an address. Automation (breeze) needs to
+// reach an agent in a room without either tracking mess topology itself or
+// mess relaxing its boundary to go searching: an operator writes the rendered
+// form once in a config mapping, and it is passed through verbatim.
+
+func TestParseDisplayNameIsDisplayNamesInverse(t *testing.T) {
+	for _, tc := range []struct{ room, name string }{
+		{"coord", "claude-code"},
+		{"coord-s1", "operator"},
+	} {
+		rendered := displayName(tc.room, tc.name)
+		room, name, ok := parseDisplayName(rendered)
+		if !ok || room != tc.room || name != tc.name {
+			t.Errorf("round trip of %q gave (%q, %q, %v)", rendered, room, name, ok)
+		}
+	}
+	// A bare name keeps its existing meaning — "in my own room" — so nothing
+	// that works today changes.
+	for _, s := range []string{"alice", "", "/alice", "coord/", "a/b/c"} {
+		if _, _, ok := parseDisplayName(s); ok {
+			t.Errorf("parseDisplayName(%q) should not parse as a qualified address", s)
+		}
+	}
+	// displayName renders a global-room agent bare, so it must not round-trip
+	// into a room named "".
+	if _, _, ok := parseDisplayName(displayName("", "alice")); ok {
+		t.Error("a global-room name renders bare and must stay bare")
+	}
+}

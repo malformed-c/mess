@@ -845,3 +845,46 @@ func TestWakeAdvisesOnBackticksOnceAndOnlyWhenRelevant(t *testing.T) {
 		t.Fatalf("advice repeated — it must be said once per agent, not per message: %q", got)
 	}
 }
+
+// End-to-end: the rendered "room/name" form works as an address for exactly the
+// call shape breeze makes, and the room boundary it crosses stays a boundary —
+// no ghost sender is created in the room addressed, and a BARE name is still
+// refused there, which is what stops this becoming a general cross-room reach.
+func TestQualifiedNameAddressesAnAgentInAnotherRoom(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("roomer", "register", "roomer")
+	e.mess("roomer", "room", "join", "coord")
+	e.mess("roomer", "sub", "ci")
+
+	// breeze's shape: an explicit --as, no room flag, from a roomless daemon.
+	bz := func(args ...string) *exec.Cmd {
+		cmd := exec.Command(e.bin, append(args, "--as", "breeze")...)
+		cmd.Env = e.env("") // no MESS_AGENT: a long-lived daemon has no identity
+		return cmd
+	}
+	if out, err := bz("send", "coord/roomer", "stage build succeeded").CombinedOutput(); err != nil {
+		t.Fatalf("qualified send failed: %v\n%s", err, out)
+	}
+	if out, err := bz("pub", "coord/ci", "stage build succeeded").CombinedOutput(); err != nil {
+		t.Fatalf("qualified pub failed: %v\n%s", err, out)
+	}
+	got := e.mess("roomer", "recv")
+	if !strings.Contains(got, "stage build succeeded") {
+		t.Fatalf("the room-joined agent never got the notification: %q", got)
+	}
+
+	// The boundary holds: a BARE name from outside the room is still refused,
+	// and the error now points at the form that works.
+	out, err := bz("send", "roomer", "bare name").CombinedOutput()
+	if err == nil {
+		t.Fatalf("a bare cross-room name must still be refused: %q", out)
+	}
+	if !strings.Contains(string(out), `"coord/roomer"`) {
+		t.Fatalf("the refusal should name the address that works: %q", out)
+	}
+
+	// And addressing into a room must not leave a sender behind in it.
+	if all := e.mess("roomer", "ps", "--all"); strings.Contains(all, "coord/breeze") {
+		t.Fatalf("addressing a room created a ghost sender inside it:\n%s", all)
+	}
+}

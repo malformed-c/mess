@@ -283,6 +283,19 @@ global room once you'd joined one; leaving `--room` unset always falls back
 to *your own* current room, never a forced global. `--room` and `--global`
 are mutually exclusive.
 
+**Addressing by rendered name** — `mess ps --all` and every cross-room error
+print a room-scoped agent as `room/name` (and a topic as `#room/topic`).
+`send`/`ask`/`pub` accept that exact string back as an address:
+`mess send coord/claude-code "..."`. Agent and topic names may not contain `/`
+(`rejectSlashName`/`rejectSlashTopic`), which is what makes the form
+unambiguous. It addresses **one** agent in **one** named room — there is
+deliberately no searching and nothing resolved at send time, so it is `--room`
+with the room written inline rather than a general cross-room reach. That
+matters for automation: a long-lived daemon (breeze) can be handed the rendered
+string in a config mapping and pass it through verbatim, instead of tracking
+mess's room topology itself or mess relaxing its boundary to guess. A bare name
+still means "in my own room" and is still refused across a boundary.
+
 **Addressing a room does not put you in it.** The request carries the caller's
 own room (`SelfRoom`) separately from the room being *targeted*, because
 conflating the two used to key the sender off the target: `send --room coord`

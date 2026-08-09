@@ -50,6 +50,23 @@ func displayName(room, name string) string {
 	return room + "/" + name
 }
 
+// parseDisplayName is displayName's inverse: it splits the rendered "room/name"
+// form back into its parts, so the exact string mess PRINTS (ps --all, error
+// messages) can be typed back in as an address. rejectSlashName keeps a real
+// name from containing "/", which is what makes the split unambiguous.
+//
+// This addresses one agent in one named room. There is deliberately no
+// searching and nothing to resolve at send time: a caller states topology it
+// already knows, instead of mess relaxing its room boundary to go looking. A
+// bare name returns ok=false and keeps its existing "in my own room" meaning.
+func parseDisplayName(s string) (room, name string, ok bool) {
+	room, name, found := strings.Cut(s, "/")
+	if !found || room == "" || name == "" || strings.Contains(name, "/") {
+		return "", "", false
+	}
+	return room, name, true
+}
+
 // roomThenNameLess orders two (room, name) pairs — room first, name breaking
 // ties — for stable, grouped-by-room output (ps's agents/topics, and their
 // snapshot equivalents).

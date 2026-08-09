@@ -460,11 +460,20 @@ func (d *daemon) dispatch(req Request) Response {
 	// reach it no matter who sends it.
 	who := agentKey(req.Room, req.As)
 	self := agentKey(callerRoom(req), req.As) // the caller's real identity; differs from who under --room/--global
+	// A TARGET may be written in the rendered "room/name" form. Only the target:
+	// the caller's own identity is never re-keyed by what it addresses, which is
+	// the ghost bug SelfRoom exists to prevent.
 	to := agentKey(req.Room, req.To)
+	if r, n, ok := parseDisplayName(req.To); ok {
+		to = agentKey(r, n)
+	}
 	if isUserHandle(req.To) {
 		to = req.To
 	}
 	topic := topicKey(req.Room, req.Topic)
+	if r, n, ok := parseDisplayName(req.Topic); ok {
+		topic = topicKey(r, n)
+	}
 
 	switch req.Op {
 	case "ping":
@@ -547,6 +556,12 @@ func (d *daemon) dispatch(req Request) Response {
 		}
 		return resp
 	case "sub":
+		// Same reservation as rejectSlashName does for agents: a topic whose
+		// literal name contained "/" would be indistinguishable from the
+		// rendered room/topic form that `pub` now accepts as an address.
+		if err := rejectSlashTopic(req.Topic); err != nil {
+			return Response{Error: err.Error()}
+		}
 		b.Sub(who, topic)
 		return Response{OK: true}
 	case "unsub":
@@ -939,6 +954,17 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 // room-scoped agent by name alone. Gates identity-creating ops (register,
 // room-join, rename) — a slash-containing send/ask To already fails
 // cleanly on its own via the ghost guard (no such agent).
+// rejectSlashTopic is rejectSlashName for topics — same reason, same reserved
+// character. `mess ps` already renders a room-scoped topic as "#room/topic", so
+// a literal slash in a topic name was always confusing; now that pub accepts
+// that rendered form as an address, it would be genuinely ambiguous.
+func rejectSlashTopic(topic string) error {
+	if strings.Contains(topic, "/") {
+		return fmt.Errorf("topic names can't contain '/' (reserved for displaying room/topic pairs) — got %q; `mess pub <room>/<topic>` addresses a topic in another room", topic)
+	}
+	return nil
+}
+
 func rejectSlashName(name string) error {
 	if strings.Contains(name, "/") {
 		return fmt.Errorf("agent names can't contain '/' (reserved for displaying room/name pairs) — got %q; use `mess room join <room>` to scope an identity to a room instead", name)
@@ -963,8 +989,8 @@ func roomLabel(room string) string {
 // real recipient never wakes since nothing was delivered to *its* inbox.
 func crossRoomGhostMsg(bareName, callerRoom, otherRoom string) string {
 	return fmt.Sprintf(
-		"%q is registered in room %s, not your room %s — pass %s to reach it there, or have it join your room",
-		bareName, roomLabel(otherRoom), roomLabel(callerRoom), roomFlagFor(otherRoom))
+		"%q is registered in room %s, not your room %s — address it as %q, pass %s, or have it join your room",
+		bareName, roomLabel(otherRoom), roomLabel(callerRoom), displayName(otherRoom, bareName), roomFlagFor(otherRoom))
 }
 
 // roomFlagFor names the flag that targets room — `--room X`, or `--global` for
