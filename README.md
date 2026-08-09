@@ -773,7 +773,12 @@ What each piece does:
   the hook can re-check that its session is still alive between parks and retire
   itself if it has been orphaned, rather than holding the lock and a phantom
   `listening` forever. A mess outage is reported as a wake rather than swallowed,
-  since a swallowed error is indistinguishable from an empty inbox. A `--loud` broadcast bypasses `--no-broadcast` on both ends of this hook —
+  since a swallowed error is indistinguishable from an empty inbox. Bodies are
+  passed through verbatim — a message full of `backticks`/`$()` is injected
+  as-is and nothing is executed (there is a test for that) — and the first time
+  an agent is handed a body containing them, the wake adds a one-off note that
+  quoting it *back* inline is what gets eaten. Once per agent, not per message:
+  agents quote code constantly, so a per-message warning would be wallpaper. A `--loud` broadcast bypasses `--no-broadcast` on both ends of this hook —
   it can unblock the park (the daemon's wake check checks `Loud` before the kind
   filter) *and* survives the follow-up consume step, which otherwise re-applies
   `--no-broadcast` and would silently re-queue the very message that woke it. On an

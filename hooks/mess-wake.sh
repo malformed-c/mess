@@ -29,6 +29,7 @@ STATE="${TMPDIR:-/tmp}/mess-wake-$who"
 LOCK="$STATE.lock"
 ERRF="$STATE.err"     # marks an outage already reported, so it reports once
 ERRTMP="$STATE.stderr"
+TICKF="$STATE.ticks"  # marks the backtick advice as already given, once per agent
 
 # How long a single park lasts before we re-check that the session is still
 # alive and park again. Bounded only for that liveness check — a live agent
@@ -148,6 +149,21 @@ while true; do
       printf '[mess] %s new peer message(s) (delivered on wake - no recv needed):\n' "$n"
       printf '%s\n' "$drained" | jq -r \
         '"  " + (if .ask then "[QUESTION \(.id) - answer with mess reply, or @mention the asker] " else "" end) + .from + (if .topic then " #\(.topic)" else "" end) + ": " + .body'
+
+      # Receiving code is the moment before quoting code back, which is exactly
+      # when bash eats it (it runs `backticks`/$() in a double-quoted argument
+      # before mess is executed). The hooks themselves pass bodies through
+      # safely - this is about the REPLY the agent is now about to write.
+      # Said once per agent, not per message: agents quote code constantly, so
+      # a per-message note would be wallpaper and get ignored like any other.
+      if [ ! -f "$TICKF" ] && printf '%s\n' "$drained" | jq -r '.body // ""' | grep -q '[`$]'; then
+        : > "$TICKF"
+        printf '[mess] (once) that message contains backticks or $. If you quote any of it back,\n'
+        printf '[mess] send with a quoted heredoc or --file, never an inline "double-quoted" body:\n'
+        printf '[mess]   mess reply --file /tmp/answer.md\n'
+        printf '[mess] bash runs backticks/$() BEFORE mess sees the argument, so an inline reply\n'
+        printf '[mess] arrives with those spans executed or deleted. mess cannot detect that.\n'
+      fi
     } >&2
     exit 2
   done

@@ -719,3 +719,71 @@ func TestHooksNoOpIfTheSharedPreambleIsMissing(t *testing.T) {
 		}
 	}
 }
+
+// The hooks pass message bodies through safely — a body full of shell
+// metacharacters is injected verbatim and nothing is executed. This pins that,
+// because the whole delivery path is shell and it would be easy to regress into
+// an unquoted expansion.
+func TestHooksDoNotExecuteShellMetacharactersInABody(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("bob", "register", "bob")
+	e.mess("alice", "register", "alice")
+
+	canary := filepath.Join(t.TempDir(), "PWNED")
+	hostile := "run `touch " + canary + "` then $(touch " + canary + "2) and ${HOME} plus %s %d"
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+	// Sent via stdin so the test's own shell can't be the thing that mangles it.
+	send := e.command("alice", "send", "bob")
+	send.Stdin = strings.NewReader(hostile)
+	if out, err := send.CombinedOutput(); err != nil {
+		t.Fatalf("send: %v\n%s", err, out)
+	}
+
+	_, stderr := h.wait(t, 10*time.Second)
+	if !strings.Contains(stderr, "`touch "+canary+"`") {
+		t.Fatalf("the body should reach the agent verbatim, backticks and all: %q", stderr)
+	}
+	for _, f := range []string{canary, canary + "2"} {
+		if _, err := os.Stat(f); err == nil {
+			t.Fatalf("a message body was EXECUTED by the hook: %s exists", f)
+		}
+	}
+}
+
+// Receiving code is the moment before quoting code back, which is when bash
+// eats it — so the wake says so, once per agent. Once, because agents quote
+// code constantly and a per-message note would be ignored like any wallpaper.
+func TestWakeAdvisesOnBackticksOnceAndOnlyWhenRelevant(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("bob", "register", "bob")
+	e.mess("alice", "register", "alice")
+
+	deliver := func(body string) string {
+		h := e.wakeHook("bob")
+		if !e.waitListening("bob", true, 5*time.Second) {
+			t.Fatal("wake hook never parked")
+		}
+		send := e.command("alice", "send", "bob")
+		send.Stdin = strings.NewReader(body)
+		if out, err := send.CombinedOutput(); err != nil {
+			t.Fatalf("send: %v\n%s", err, out)
+		}
+		_, stderr := h.wait(t, 10*time.Second)
+		return stderr
+	}
+
+	const advice = "(once) that message contains backticks"
+	if got := deliver("plain prose, no metacharacters"); strings.Contains(got, advice) {
+		t.Fatalf("advice fired for a body with nothing to warn about: %q", got)
+	}
+	if got := deliver("see `go build ./...` in the log"); !strings.Contains(got, advice) {
+		t.Fatalf("advice did not fire for a body containing backticks: %q", got)
+	}
+	if got := deliver("and `make test` too"); strings.Contains(got, advice) {
+		t.Fatalf("advice repeated — it must be said once per agent, not per message: %q", got)
+	}
+}
