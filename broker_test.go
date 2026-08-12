@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 )
@@ -2175,6 +2177,92 @@ func TestThreadedReplyStillAnswersAnAsk(t *testing.T) {
 		t.Fatal("a threaded reply must still answer")
 	}
 	if got := b.DrainAnswers("alice", token, false, 0); len(got) != 1 {
+		t.Fatalf("want the threaded reply, got %+v", got)
+	}
+}
+
+// TWO questions outstanding between the same pair, and ONE mention. The mention
+// carries nothing that says WHICH question it answers — the matching rule (from
+// the askee, postdates the ask, mentions the asker) is satisfied by both tokens
+// equally. So it must answer NEITHER: handing the same body to both waiters
+// resolves one of them with an answer to a question nobody asked, and the asker
+// cannot tell, because a wrong answer and a right one render identically.
+//
+// A threaded reply stays unambiguous by construction, which is why the fallback
+// is "require the thread" rather than "pick one".
+func TestAnAmbiguousMentionAnswersNeitherAsk(t *testing.T) {
+	b := newTestBroker()
+	first := askSetup(t, b, "alice", "bob", "deploy now?")
+	second := askSetup(t, b, "alice", "bob", "roll back?")
+
+	b.Send("bob", "alice", "@alice yes")
+
+	if b.HasPendingAnswer("alice", first) || b.HasPendingAnswer("alice", second) {
+		t.Fatal("a mention that could answer either pending ask must answer neither — " +
+			"otherwise one waiter resolves on an answer to the other's question")
+	}
+}
+
+// Suppressing the ambiguous mention is only half a fix: on its own it recreates
+// the failure the mention rule was added for (asker blocks to timeout, answer
+// sits unread). The sender has to be TOLD, so the refusal is a message and not a
+// silence.
+func TestAnAmbiguousMentionIsReportedToItsSender(t *testing.T) {
+	b := newTestBroker()
+	first := askSetup(t, b, "alice", "bob", "deploy now?")
+	second := askSetup(t, b, "alice", "bob", "roll back?")
+
+	m, err := b.Send("bob", "alice", "@alice yes")
+	if err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	asker, tokens := b.AmbiguousMentionTokens(m)
+	if asker != "alice" {
+		t.Errorf("the warning must name the asker, got %q", asker)
+	}
+	want := []string{first, second}
+	sort.Strings(want)
+	if !slices.Equal(tokens, want) {
+		t.Fatalf("both open asks should be reported, sorted: got %v want %v", tokens, want)
+	}
+}
+
+// The common case stays quiet: one open question is not ambiguous, and a warning
+// on every ordinary answered ask would train people to ignore the warning.
+func TestASingleOpenAskIsNotReportedAsAmbiguous(t *testing.T) {
+	b := newTestBroker()
+	token := askSetup(t, b, "alice", "bob", "deploy now?")
+
+	m, err := b.Send("bob", "alice", "@alice yes")
+	if err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	if _, tokens := b.AmbiguousMentionTokens(m); len(tokens) != 0 {
+		t.Fatalf("one open ask is unambiguous, got %v", tokens)
+	}
+	if !b.HasPendingAnswer("alice", token) {
+		t.Fatal("and it must still answer, which is the whole point of the mention rule")
+	}
+}
+
+// The disambiguation that still works with two outstanding: the thread. This is
+// the half that must NOT regress when ambiguous mentions stop counting.
+func TestAThreadedReplyStillAnswersWithTwoAsksOutstanding(t *testing.T) {
+	b := newTestBroker()
+	first := askSetup(t, b, "alice", "bob", "deploy now?")
+	second := askSetup(t, b, "alice", "bob", "roll back?")
+
+	b.SendThreaded("bob", "alice", "yes to the second", second)
+
+	if b.HasPendingAnswer("alice", first) {
+		t.Error("a reply threaded under the second ask must not answer the first")
+	}
+	if !b.HasPendingAnswer("alice", second) {
+		t.Fatal("a threaded reply must answer its own ask even with another outstanding")
+	}
+	if got := b.DrainAnswers("alice", second, false, 0); len(got) != 1 || got[0].Body != "yes to the second" {
 		t.Fatalf("want the threaded reply, got %+v", got)
 	}
 }

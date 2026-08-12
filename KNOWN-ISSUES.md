@@ -97,6 +97,39 @@ What mess *can* do is the two things it was failing to do:
 `TestStateAndWarnStillAcceptAnEmptyValue`, `TestAProperlyEscapedBodySurvives`,
 `TestBodyEchoShowsShortBodiesVerbatimAndSummarisesLongOnes`.
 
+## Fixed (2026-08-12): with two questions open, one @mention answered both
+
+**Symptom:** the mention rule above matches on *who* a message is from and *who*
+it mentions — never on *which question it answers*, because a mention carries
+nothing that says so. With two asks outstanding between the same pair,
+`answersAskLocked` was evaluated per token and returned true for **both**, so one
+waiter resolved on an answer to the other's question. Neither side could tell: a
+wrong answer and a right one render identically, and the asker sees only that its
+`mess ask` returned something plausible.
+
+**Fix:** an @mention now satisfies an ask only when it is the *only* open ask it
+could answer. If a second one matches, the mention answers neither and the thread
+— unambiguous by construction — is required. `mentionCouldAnswer` is the shared
+predicate for both the match and the ambiguity sweep, so the two cannot drift.
+
+Deliberately counts every tracked ask, not just live ones: `ask --async` +
+`await` means an ask legitimately outlives its blocking wait, so the broker
+genuinely cannot distinguish "still wanted" from "timed out and abandoned".
+Suppressing is the safe direction of that uncertainty.
+
+**And it is not silent**, which matters more than the suppression: on its own,
+refusing the mention recreates exactly the failure the mention rule was added to
+fix. `mess send` now warns the *answerer* — the only party who knows which
+question they meant — naming the open tokens and how to pick one. Same shape as
+the "@mention reached nobody" warning: the message was delivered, so it is a
+warning on stderr, not an error.
+
+**Tests:** `TestAnAmbiguousMentionAnswersNeitherAsk`,
+`TestAThreadedReplyStillAnswersWithTwoAsksOutstanding`,
+`TestAnAmbiguousMentionIsReportedToItsSender`,
+`TestASingleOpenAskIsNotReportedAsAmbiguous` (the common case must stay quiet, or
+the warning trains people to ignore it).
+
 ## Fixed (2026-08-03): answering an ask the natural way didn't count as answering it
 
 **Symptom:** `mess ask` blocks until a message threaded under its token

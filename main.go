@@ -424,6 +424,20 @@ func warnUnreached(resp Response, where string) {
 	fmt.Fprintln(os.Stderr, msg+". They received nothing.")
 }
 
+// warnAmbiguousAnswer tells the sender that their @mention was too ambiguous to
+// answer anything. Same reasoning as warnUnreached: the message WAS delivered, so
+// this is a warning rather than an error, and it goes to the only party who knows
+// which question they meant. Without it the suppression is silent on both ends —
+// the asker blocks to timeout, and the answerer believes they replied.
+func warnAmbiguousAnswer(resp Response) {
+	if len(resp.AmbiguousTokens) < 2 {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"mess: warning: @%s has %d open questions for you, so the mention could not say which it answered — it answered NONE of them. Pick one: mess reply --thread %s\n",
+		resp.AmbiguousAsker, len(resp.AmbiguousTokens), strings.Join(resp.AmbiguousTokens, " | "))
+}
+
 // bodyEcho renders the delivered body for the sender's own confirmation line.
 //
 // mess only ever sees the body AFTER the caller's shell has expanded it, so it
@@ -735,6 +749,7 @@ func cmdSend(p paths, args []string) error {
 		return err
 	}
 	fmt.Printf("sent to %s — %s\n", to, bodyEcho(body))
+	warnAmbiguousAnswer(resp)
 	if *ack {
 		if !resp.Acked {
 			return fmt.Errorf("not read by %s (ack timeout)", to)

@@ -199,8 +199,14 @@ type Response struct {
 	// who they SHOULD have addressed without a second command.
 	Unreached []string `json:"unreached,omitempty"`
 	Members   []string `json:"members,omitempty"`
-	ID        string   `json:"id,omitempty"`      // (ask) the created message's own id — the await token
-	Expired   int      `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
+	// AmbiguousAsker/AmbiguousTokens report that this message @mentioned someone
+	// with MORE THAN ONE open question outstanding, so the mention could not say
+	// which it answered and answered none of them. Populated only for the sender,
+	// who is the only party that knows which one they meant.
+	AmbiguousAsker  string   `json:"ambiguousAsker,omitempty"`
+	AmbiguousTokens []string `json:"ambiguousTokens,omitempty"`
+	ID              string   `json:"id,omitempty"`      // (ask) the created message's own id — the await token
+	Expired         int      `json:"expired,omitempty"` // (expire) unread messages dropped (or, with dry-run, eligible)
 	// Reason classifies an empty blocking recv, so a parked caller can tell
 	// "re-park, someone beat me to the inbox" from "stop waiting". Empty
 	// whenever messages were returned. See the Reason* constants.

@@ -518,6 +518,12 @@ func (d *daemon) dispatch(req Request) Response {
 		if resp.Error == "" {
 			notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
 			d.journalAppend(req.Room, m)
+			// The mention answered nothing because it could have answered several
+			// things. Say so now, to the one person who can fix it in one command.
+			if asker, tokens := b.AmbiguousMentionTokens(m); len(tokens) > 0 {
+				resp.AmbiguousAsker, resp.AmbiguousTokens = asker, tokens
+				elog("send %s -> %s: mention is ambiguous across %d open asks from %s", req.As, req.To, len(tokens), asker)
+			}
 		}
 		return resp
 	case "broadcast":

@@ -725,6 +725,62 @@ func (b *Broker) answersAskLocked(m Message, token string) bool {
 	if !ok {
 		return false
 	}
+	if !mentionCouldAnswer(m, info) {
+		return false
+	}
+	// A mention says WHO it is for, never WHICH question it answers. With two asks
+	// outstanding between the same pair it satisfies both equally, so honouring it
+	// would resolve one waiter with an answer to the other's question — and neither
+	// side can tell, because a right answer and a wrong one render identically. Fall
+	// back to the thread, which is unambiguous by construction.
+	//
+	// Deliberately counts every OTHER tracked ask this message could answer, not
+	// just live ones: `ask --async` + `await` means an ask legitimately outlives the
+	// blocking wait, so the broker cannot distinguish "still wanted" from "timed out
+	// and abandoned". Suppressing here is the safe direction, and warnAmbiguousMention
+	// makes it visible at send time so it is a message rather than a silence.
+	for other, oi := range b.asks {
+		if other != token && mentionCouldAnswer(m, oi) {
+			return false
+		}
+	}
+	return true
+}
+
+// AmbiguousMentionTokens reports the open asks m could answer by mention, when
+// there is more than one and the mention therefore answers NONE of them.
+//
+// This exists so the refusal is a message rather than a silence. Suppressing an
+// ambiguous mention is the safe call, but on its own it recreates precisely the
+// failure the mention rule was added to fix: the asker blocks to timeout while a
+// perfectly good answer sits unread. Telling the ANSWERER at send time — the only
+// party who knows which question they meant — costs one line and makes the fix
+// actionable instead of mysterious.
+//
+// Returns nothing when fewer than two match, so the common case stays quiet.
+func (b *Broker) AmbiguousMentionTokens(m Message) (asker string, tokens []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for token, info := range b.asks {
+		if mentionCouldAnswer(m, info) {
+			_, asker = splitAgentKey(info.asker)
+			tokens = append(tokens, token)
+		}
+	}
+	if len(tokens) < 2 {
+		return "", nil
+	}
+	// Sorted because map iteration is randomized, and a warning that lists the same
+	// two tokens in a different order each time reads as two different warnings.
+	sort.Strings(tokens)
+	return asker, tokens
+}
+
+// mentionCouldAnswer reports whether m satisfies the mention rule for one ask:
+// from the agent asked, postdating the question, and mentioning the asker. All
+// three are load-bearing (see KNOWN-ISSUES); this is the shared predicate so the
+// match and the ambiguity check cannot drift apart.
+func mentionCouldAnswer(m Message, info askInfo) bool {
 	seq, ok := msgSeq(m.ID)
 	if !ok || seq <= info.seq {
 		return false // predates the question, so it cannot be its answer
