@@ -119,6 +119,14 @@ type askInfo struct {
 	asker string // composite key of the agent waiting for the reply
 	askee string // composite key of the agent it asked
 	seq   int    // the ask's own sequence number: only a LATER message can answer it
+	// ambiguousUpTo is the highest sequence number already judged too ambiguous
+	// to answer this ask. Ambiguity is a fact about the moment a message was
+	// SENT — how many questions were open then — so the verdict is recorded and
+	// never revisited. Without it the suppression silently expired: a mention
+	// refused across two open asks became the answer to whichever one outlived
+	// the other, so a message that deliberately answered NOTHING turned into an
+	// answer later, which is the exact failure the suppression exists to stop.
+	ambiguousUpTo int
 }
 
 // maxPendingAsks bounds the asks map. An ask that is never answered and never
@@ -765,6 +773,9 @@ func (b *Broker) answersAskLocked(m Message, token string) bool {
 // party who knows which question they meant — costs one line and makes the fix
 // actionable instead of mysterious.
 //
+// It also RECORDS the verdict on each ask it was ambiguous for, so the message
+// can never be reconsidered once the other asks resolve — see askInfo.ambiguousUpTo.
+//
 // Returns nothing when fewer than two match, so the common case stays quiet.
 func (b *Broker) AmbiguousMentionTokens(m Message) (asker string, tokens []string) {
 	b.mu.Lock()
@@ -777,6 +788,19 @@ func (b *Broker) AmbiguousMentionTokens(m Message) (asker string, tokens []strin
 	}
 	if len(tokens) < 2 {
 		return "", nil
+	}
+	// Record the verdict on every ask it was ambiguous for. Judged once, here,
+	// where the full set of open questions is visible — and never revisited, so
+	// resolving one of them cannot promote this message into the answer to
+	// another.
+	if seq, ok := msgSeq(m.ID); ok {
+		for _, token := range tokens {
+			info := b.asks[token]
+			if seq > info.ambiguousUpTo {
+				info.ambiguousUpTo = seq
+				b.asks[token] = info
+			}
+		}
 	}
 	// Sorted because map iteration is randomized, and a warning that lists the same
 	// two tokens in a different order each time reads as two different warnings.
@@ -792,6 +816,9 @@ func mentionCouldAnswer(m Message, info askInfo) bool {
 	seq, ok := msgSeq(m.ID)
 	if !ok || seq <= info.seq {
 		return false // predates the question, so it cannot be its answer
+	}
+	if seq <= info.ambiguousUpTo {
+		return false // already judged ambiguous, when the full picture was visible
 	}
 	if _, askee := splitAgentKey(info.askee); m.From != askee {
 		return false

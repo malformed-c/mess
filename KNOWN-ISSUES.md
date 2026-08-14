@@ -1,5 +1,48 @@
 # Known issues
 
+## Fixed (2026-08-14): ambiguity was resolved silently rather than refused
+
+Four places where mess picked one of several readings and presented it as fact.
+
+1. **`mess reply` with a stale open thread.** If a previous reply left a thread
+   open and a *newer, unrelated* message arrived since, reply answered the open
+   thread and printed a warning. That is the documented incident: a stale open
+   thread swallowed the answer to a fresh `mess ask`, so the asker timed out
+   while a good response sat in the wrong conversation. A warning was the wrong
+   instrument — nothing downstream reads it, and this fleet's own feedback is
+   that a notice which doesn't block gets tuned out. There is no safe default:
+   both candidates are real conversations. It now refuses, naming both and all
+   three ways out.
+
+2. **`FindOtherRoom` returned the first match from a randomized map iteration.**
+   With one bare name registered in two rooms, "it is registered in room X"
+   named a different room on each run — verified flapping across five identical
+   invocations — and a caller following that advice reached whichever agent the
+   map happened to offer. It now returns every match, sorted, and the refusal
+   lists each `room/name` rather than choosing.
+
+3. **A `room/name` target contradicting `--room`/`--global`** was settled by
+   precedence: `mess send coord/bob x --room other` silently went to coord. Two
+   answers to one question is not a preference to resolve — it means the caller
+   believes something untrue, and honouring one quietly is how they stay wrong.
+   Agreement stays fine; only contradiction fails.
+
+4. **An ambiguous mention's suppression expired.** A mention that could answer
+   either of two open asks is correctly refused for both. But the check counted
+   *currently* open asks, so once one was answered the other became the sole
+   candidate and the refused message retroactively became its answer — the exact
+   failure the suppression exists to prevent, delayed until nobody is watching.
+   Ambiguity is a fact about the moment a message was sent, so the verdict is
+   now recorded on each ask (`askInfo.ambiguousUpTo`) and never revisited. A
+   genuinely new mention, sent when only one question is open, still answers it.
+
+Deliberately left alone: `routeFromThreadMessages`' `msgs[0]` fallback is not a
+guess — a direct thread is 1:1 and a topic thread shares its topic.
+
+**Tests:** `TestAmbiguousReplyTarget*`, `TestReplyRefusesAnAmbiguousTarget`,
+`TestFindOtherRoomReportsEveryRoomDeterministically`,
+`TestAnAmbiguousMentionStaysRefusedAfterTheOtherAskResolves`.
+
 ## Fixed (2026-08-09): the mid-turn notice nagged, and went stale in the transcript
 
 **Symptom, from a feedback round with the live fleet — two agents, independently:**

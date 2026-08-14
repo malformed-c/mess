@@ -2415,3 +2415,48 @@ func TestMentionOutsideTheBroadcastsRoomIsReported(t *testing.T) {
 		t.Fatalf("the human mailbox must never be reported unreachable, got %v", got)
 	}
 }
+
+// A mention refused as ambiguous must STAY refused. Ambiguity is a fact about
+// the moment the message was sent — how many questions were open then — so the
+// verdict is recorded and never revisited. Without that the suppression
+// silently expired: answering one of the two asks left the other as the only
+// candidate, and the message that deliberately answered NOTHING became its
+// answer. That is precisely the failure the suppression exists to prevent, just
+// delayed until nobody is watching.
+func TestAnAmbiguousMentionStaysRefusedAfterTheOtherAskResolves(t *testing.T) {
+	b := newTestBroker()
+	b.Register("alice")
+	b.Register("bob")
+	one, err := b.SendAsk("alice", "bob", "question one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := b.SendAsk("alice", "bob", "question two")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ := b.Send("bob", "alice", "@alice yes")
+	if _, tokens := b.AmbiguousMentionTokens(m); len(tokens) != 2 {
+		t.Fatalf("a mention with two open asks should be ambiguous across both, got %v", tokens)
+	}
+	if b.HasPendingAnswer("alice", one.ID) || b.HasPendingAnswer("alice", two.ID) {
+		t.Fatal("an ambiguous mention must answer neither ask")
+	}
+
+	// Resolve one the unambiguous way, which removes it from the open set.
+	b.SendThreaded("bob", "alice", "answer to one", one.ID)
+	if got := b.DrainAnswers("alice", one.ID, false, 0); len(got) != 1 {
+		t.Fatalf("the threaded reply should answer its own ask, got %+v", got)
+	}
+
+	// The survivor must not inherit the suppressed mention.
+	if b.HasPendingAnswer("alice", two.ID) {
+		t.Fatal("resolving one ask promoted a previously-refused mention into the other's answer")
+	}
+	// ...but a genuinely new mention, now unambiguous, still answers it.
+	b.Send("bob", "alice", "@alice yes to the remaining one")
+	if !b.HasPendingAnswer("alice", two.ID) {
+		t.Fatal("a fresh mention with only one ask open should answer it")
+	}
+}
