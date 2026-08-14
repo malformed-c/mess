@@ -1226,9 +1226,26 @@ func TestFindOtherRoomFindsRegisteredElsewhere(t *testing.T) {
 	b := newTestBroker()
 	b.RegisterOwned(agentKey("frontend", "bob"), "sess1", 0, false)
 
-	room, found := b.FindOtherRoom("", "bob")
-	if !found || room != "frontend" {
-		t.Fatalf("expected to find bob in room \"frontend\", got room=%q found=%v", room, found)
+	rooms, found := b.FindOtherRoom("", "bob")
+	if !found || len(rooms) != 1 || rooms[0] != "frontend" {
+		t.Fatalf("expected to find bob in room \"frontend\", got rooms=%q found=%v", rooms, found)
+	}
+}
+
+// The same bare name registered in several rooms must report ALL of them. It
+// used to return the first hit from a randomized map iteration, so the
+// "it lives in room X" error named a different room on each run — a guess
+// presented as a fact, which a caller then acted on.
+func TestFindOtherRoomReportsEveryRoomDeterministically(t *testing.T) {
+	b := newTestBroker()
+	b.RegisterOwned(agentKey("roomB", "dup"), "s1", 0, false)
+	b.RegisterOwned(agentKey("roomA", "dup"), "s2", 0, false)
+
+	for range 8 { // would have flapped across runs before
+		rooms, found := b.FindOtherRoom("", "dup")
+		if !found || len(rooms) != 2 || rooms[0] != "roomA" || rooms[1] != "roomB" {
+			t.Fatalf("want both rooms, sorted, every time; got %q", rooms)
+		}
 	}
 }
 

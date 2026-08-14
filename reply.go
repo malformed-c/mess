@@ -124,21 +124,43 @@ func clearOpenThread(p paths) error {
 
 // staleOpenThreadWarning flags the case that silently misrouted a real reply:
 // an old open thread left open (no `mess thread close`) while a newer,
-// unrelated direct/topic message has since arrived. A bare `mess reply` would
-// keep answering the stale thread with no indication anything's off — this
-// surfaces it instead of leaving the mismatch invisible. Returns "" when
-// there's nothing to warn about (no last-seen message, or it's the same
-// thread the open one already tracks).
-func staleOpenThreadWarning(open openThreadInfo, last lastMsgInfo, hasLast bool) string {
+// ambiguousReplyTarget reports that `mess reply` has two plausible targets: the
+// thread a previous reply opened, and a NEWER, unrelated message received since.
+//
+// It used to warn and answer the open thread anyway, and that cost a real
+// answer: a stale open thread swallowed the reply to a fresh `mess ask`, so the
+// asker timed out while a perfectly good response sat in the wrong thread. A
+// warning was the wrong instrument — nothing downstream reads it, and this
+// fleet's own feedback is that a notice which doesn't block gets tuned out.
+//
+// There is no safe default to pick. Both candidates are real conversations, and
+// choosing either silently is exactly how a message reaches the wrong one.
+// Returns "" when there is genuinely only one answer.
+func ambiguousReplyTarget(open openThreadInfo, last lastMsgInfo, hasLast bool) string {
 	if !hasLast || last.ID == open.ThreadID {
 		return ""
 	}
-	where := fmt.Sprintf("a direct message from %s", last.From)
-	if last.Kind == KindTopic {
-		where = fmt.Sprintf("a message in #%s", last.Topic)
-	}
 	return fmt.Sprintf(
-		"warning: replying in open thread %s, but the most recent message you received was %s (%s) — "+
-			"if you meant to answer that, use `mess reply --thread %s` or run `mess thread close` first\n",
-		open.ThreadID, last.ID, where, last.ID)
+		"ambiguous reply target — mess will not guess which you meant.\n"+
+			"  open thread %s: %s (continued by your last `mess reply`)\n"+
+			"  newest received %s: %s\n"+
+			"Answer the newest with `mess reply --thread %s`, stay in the open thread with "+
+			"`mess reply --thread %s`, or run `mess thread close` first to drop it.",
+		open.ThreadID, describeOpenThread(open), last.ID, describeLastMsg(last), last.ID, open.ThreadID)
+}
+
+// describeOpenThread / describeLastMsg render a reply candidate for the error
+// above — where it goes, in the terms the caller thinks in.
+func describeOpenThread(open openThreadInfo) string {
+	if open.Kind == KindTopic {
+		return "#" + open.Topic
+	}
+	return "to " + open.To
+}
+
+func describeLastMsg(last lastMsgInfo) string {
+	if last.Kind == KindTopic {
+		return fmt.Sprintf("a message in #%s", last.Topic)
+	}
+	return fmt.Sprintf("a direct message from %s", last.From)
 }

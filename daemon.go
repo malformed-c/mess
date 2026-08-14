@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -507,9 +508,9 @@ func (d *daemon) dispatch(req Request) Response {
 		return Response{OK: true, Count: 0} // idempotent
 	case "send":
 		if !isUserHandle(req.To) && !b.IsRegistered(to) {
-			if other, found := b.FindOtherRoom(req.Room, req.To); found {
-				elog("send %s -> %s refused: registered in room %q, not %q", req.As, req.To, other, req.Room)
-				return Response{Error: crossRoomGhostMsg(req.To, req.Room, other)}
+			if others, found := b.FindOtherRoom(req.Room, req.To); found {
+				elog("send %s -> %s refused: registered in room(s) %q, not %q", req.As, req.To, strings.Join(others, ","), req.Room)
+				return Response{Error: crossRoomGhostMsg(req.To, req.Room, others)}
 			}
 			elog("send %s -> %s refused: not a registered agent", req.As, req.To)
 			return Response{Error: fmt.Sprintf("no such agent %q — send requires a previously-registered recipient (it may just not have registered yet, or the name is a typo)", req.To)}
@@ -993,10 +994,22 @@ func roomLabel(room string) string {
 // this check the message would silently create a same-named-but-
 // disconnected ghost agent instead of ever reaching the real one, and the
 // real recipient never wakes since nothing was delivered to *its* inbox.
-func crossRoomGhostMsg(bareName, callerRoom, otherRoom string) string {
+func crossRoomGhostMsg(bareName, callerRoom string, otherRooms []string) string {
+	if len(otherRooms) > 1 {
+		// Naming one of several would be a guess presented as a fact, and the
+		// caller would act on it. Name them all and make them choose.
+		var addrs []string
+		for _, r := range otherRooms {
+			addrs = append(addrs, strconv.Quote(displayName(r, bareName)))
+		}
+		return fmt.Sprintf(
+			"%q is registered in %d different rooms (%s) and not in your room %s — mess will not guess which you meant; address one explicitly: %s",
+			bareName, len(otherRooms), strings.Join(otherRooms, ", "), roomLabel(callerRoom), strings.Join(addrs, " or "))
+	}
+	other := otherRooms[0]
 	return fmt.Sprintf(
 		"%q is registered in room %s, not your room %s — address it as %q, pass %s, or have it join your room",
-		bareName, roomLabel(otherRoom), roomLabel(callerRoom), displayName(otherRoom, bareName), roomFlagFor(otherRoom))
+		bareName, roomLabel(other), roomLabel(callerRoom), displayName(other, bareName), roomFlagFor(other))
 }
 
 // roomFlagFor names the flag that targets room — `--room X`, or `--global` for
@@ -1014,12 +1027,16 @@ func roomFlagFor(room string) string {
 // so the caller learns WHY it didn't resolve here (a room mismatch) instead
 // of just being told the name doesn't exist at all.
 func crossRoomHint(b *Broker, callerRoom, bareName string) string {
-	other, found := b.FindOtherRoom(callerRoom, bareName)
+	others, found := b.FindOtherRoom(callerRoom, bareName)
 	if !found {
 		return ""
 	}
+	if len(others) > 1 {
+		return fmt.Sprintf(" (it IS registered, but in %d different rooms (%s), none of them your room %s — address one explicitly, e.g. %q)",
+			len(others), strings.Join(others, ", "), roomLabel(callerRoom), displayName(others[0], bareName))
+	}
 	return fmt.Sprintf(" (it IS registered, but in room %s, not your room %s — pass %s to reach it there)",
-		roomLabel(other), roomLabel(callerRoom), roomFlagFor(other))
+		roomLabel(others[0]), roomLabel(callerRoom), roomFlagFor(others[0]))
 }
 
 // askOrAwait handles both "ask" and "await": an ask is a plain threaded direct

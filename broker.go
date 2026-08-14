@@ -412,16 +412,24 @@ func (b *Broker) IsRegistered(name string) bool {
 // wakes because nothing was ever delivered to *its* inbox. Not a uniqueness
 // guarantee (the same bare name can legitimately exist in several rooms at
 // once) — just a best-effort signal for the one-match common case.
-func (b *Broker) FindOtherRoom(callerRoom, bareName string) (string, bool) {
+// It returns EVERY such room, not the first one found. It used to return one,
+// picked by Go's randomized map iteration — so with the same bare name
+// registered in two rooms, the "it lives in room X" error named a different
+// room on each run, and a caller who followed the advice reached whichever
+// agent the map happened to offer. An ambiguous answer given confidently is
+// worse than no answer.
+func (b *Broker) FindOtherRoom(callerRoom, bareName string) ([]string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	var rooms []string
 	for key := range b.owners {
 		room, name := splitAgentKey(key)
 		if name == bareName && room != callerRoom {
-			return room, true
+			rooms = append(rooms, room)
 		}
 	}
-	return "", false
+	sort.Strings(rooms)
+	return rooms, len(rooms) > 0
 }
 
 // IsOnline reports whether name currently looks alive — listening, working,

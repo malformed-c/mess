@@ -488,6 +488,24 @@ type roomTarget struct {
 	global bool
 }
 
+// checkTarget refuses a target that names its own room while --room/--global
+// also names one. Two answers to the same question is not a preference to
+// settle by precedence: it means the caller believes something untrue, and
+// silently honouring one of them is how they stay wrong.
+func (rt roomTarget) checkTarget(target string) error {
+	room, _, ok := parseDisplayName(target)
+	if !ok {
+		return nil
+	}
+	switch {
+	case rt.global:
+		return fmt.Errorf("%q names room %q, but --global says the global room — drop one", target, room)
+	case rt.room != "" && rt.room != room:
+		return fmt.Errorf("%q names room %q, but --room says %q — drop one", target, room, rt.room)
+	}
+	return nil
+}
+
 // apply stamps the target room onto a request. The caller's own room is
 // stamped separately by withRoom (as SelfRoom), so overriding this one can
 // never re-key who the sender is.
@@ -734,6 +752,9 @@ func cmdSend(p paths, args []string) error {
 		return err
 	}
 	to := rest[0]
+	if err := rt.checkTarget(to); err != nil {
+		return err
+	}
 	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
@@ -783,6 +804,9 @@ func cmdAsk(p paths, args []string) error {
 		return err
 	}
 	to := rest[0]
+	if err := rt.checkTarget(to); err != nil {
+		return err
+	}
 	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
@@ -950,6 +974,9 @@ func cmdPub(p paths, args []string) error {
 	}
 	from, err := agentName(p, *as)
 	if err != nil {
+		return err
+	}
+	if err := rt.checkTarget(rest[0]); err != nil {
 		return err
 	}
 	body, err := bodyFrom(rest[1:], *file)
@@ -1622,8 +1649,8 @@ func cmdReply(p paths, args []string) error {
 
 	if open, ok := readOpenThread(p); ok {
 		last, hasLast := readLastMsg(p)
-		if warn := staleOpenThreadWarning(open, last, hasLast); warn != "" {
-			fmt.Fprint(os.Stderr, warn)
+		if amb := ambiguousReplyTarget(open, last, hasLast); amb != "" {
+			return errors.New(amb)
 		}
 		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body, rt)
 	}

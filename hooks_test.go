@@ -888,3 +888,37 @@ func TestQualifiedNameAddressesAnAgentInAnotherRoom(t *testing.T) {
 		t.Fatalf("addressing a room created a ghost sender inside it:\n%s", all)
 	}
 }
+
+// End-to-end reproduction of the incident: an open thread with one peer, then a
+// newer unrelated message from another. `mess reply` used to answer the stale
+// thread with only a warning, which is how a good answer to a `mess ask` went
+// to the wrong conversation and the asker timed out.
+func TestReplyRefusesAnAmbiguousTarget(t *testing.T) {
+	e := newHookEnv(t)
+	for _, n := range []string{"me", "alice", "bob"} {
+		e.mess(n, "register", n)
+	}
+	e.mess("alice", "send", "me", "first question")
+	e.mess("me", "recv")
+	e.mess("me", "reply", "answering alice") // opens a thread with alice
+	e.mess("bob", "send", "me", "unrelated new question")
+	e.mess("me", "recv")
+
+	out, err := e.command("me", "reply", "my answer").CombinedOutput()
+	if err == nil {
+		t.Fatalf("an ambiguous reply must be refused, not guessed: %q", out)
+	}
+	for _, want := range []string{"ambiguous", "alice", "bob", "--thread", "thread close"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("refusal should mention %q so the caller can resolve it: %q", want, out)
+		}
+	}
+
+	// Both escapes work, and neither is ambiguous.
+	if out, err := e.command("me", "thread", "close").CombinedOutput(); err != nil {
+		t.Fatalf("thread close: %v\n%s", err, out)
+	}
+	if got := e.mess("me", "reply", "now unambiguous"); !strings.Contains(got, "bob") {
+		t.Fatalf("after closing the stale thread, reply should answer the newest: %q", got)
+	}
+}

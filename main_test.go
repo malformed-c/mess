@@ -415,38 +415,46 @@ func TestRouteFromThreadMessagesFallbackUsesOtherParty(t *testing.T) {
 	}
 }
 
-// --- stale open thread warning ---
+// --- ambiguous reply target ---
 //
 // Root cause of a real incident: an agent had an old open thread (never
 // `mess thread close`d) and received a brand new, unrelated ask. A bare
-// `mess reply` kept posting into the STALE thread with zero indication
-// anything was wrong, so the asker's `mess ask` timed out despite a good
-// answer existing — just on the wrong thread.
+// `mess reply` kept posting into the STALE thread, so the asker's `mess ask`
+// timed out despite a good answer existing — just on the wrong thread.
+//
+// This warned, and answered the open thread anyway. A warning was the wrong
+// instrument: nothing downstream reads it, and this fleet's own feedback is
+// that a notice which doesn't block gets tuned out. There is no safe default —
+// both candidates are real conversations — so it is now a refusal.
 
-func TestStaleOpenThreadWarningFiresWhenLastMsgIsADifferentThread(t *testing.T) {
+func TestAmbiguousReplyTargetFiresWhenLastMsgIsADifferentThread(t *testing.T) {
 	open := openThreadInfo{ThreadID: "m4320", Kind: KindDirect, To: "alice"}
 	last := lastMsgInfo{ID: "m4384", Kind: KindDirect, From: "bob"}
-	warn := staleOpenThreadWarning(open, last, true)
-	if warn == "" {
-		t.Fatal("expected a warning when the open thread differs from the most recently received message")
+	amb := ambiguousReplyTarget(open, last, true)
+	if amb == "" {
+		t.Fatal("expected a refusal when the open thread differs from the most recently received message")
 	}
-	if !strings.Contains(warn, "m4320") || !strings.Contains(warn, "m4384") || !strings.Contains(warn, "--thread m4384") {
-		t.Fatalf("expected the warning to name both threads and the fix, got %q", warn)
+	// Both candidates and both ways out have to be named: the whole point is
+	// that the caller, not mess, resolves it.
+	for _, want := range []string{"m4320", "m4384", "--thread m4384", "--thread m4320", "thread close", "alice", "bob"} {
+		if !strings.Contains(amb, want) {
+			t.Fatalf("refusal should mention %q, got %q", want, amb)
+		}
 	}
 }
 
-func TestStaleOpenThreadWarningSilentWhenSameThread(t *testing.T) {
+func TestAmbiguousReplyTargetSilentWhenSameThread(t *testing.T) {
 	open := openThreadInfo{ThreadID: "m1", Kind: KindDirect, To: "alice"}
 	last := lastMsgInfo{ID: "m1", Kind: KindDirect, From: "alice"}
-	if warn := staleOpenThreadWarning(open, last, true); warn != "" {
-		t.Fatalf("expected no warning when continuing the same thread, got %q", warn)
+	if amb := ambiguousReplyTarget(open, last, true); amb != "" {
+		t.Fatalf("continuing the same thread is not ambiguous, got %q", amb)
 	}
 }
 
-func TestStaleOpenThreadWarningSilentWithNoLastMsg(t *testing.T) {
+func TestAmbiguousReplyTargetSilentWithNoLastMsg(t *testing.T) {
 	open := openThreadInfo{ThreadID: "m1", Kind: KindDirect, To: "alice"}
-	if warn := staleOpenThreadWarning(open, lastMsgInfo{}, false); warn != "" {
-		t.Fatalf("expected no warning with no last-seen message, got %q", warn)
+	if amb := ambiguousReplyTarget(open, lastMsgInfo{}, false); amb != "" {
+		t.Fatalf("no last-seen message means no ambiguity, got %q", amb)
 	}
 }
 
