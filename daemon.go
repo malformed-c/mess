@@ -413,7 +413,7 @@ func writeResp(conn net.Conn, r Response) {
 func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
-		"busy", "unbusy", "session-end", "recv", "listen", "replay", "unregister", "room-leave",
+		"busy", "unbusy", "session-end", "recv", "listen", "replay", "unregister", "room-leave", "invite", "accept",
 		"bridge", "unbridge", "export", "thread-list", "ask", "await":
 		return true
 	}
@@ -431,6 +431,17 @@ func parseBridgeDirection(s string) bridgeDirection {
 	default:
 		return bridgeBoth
 	}
+}
+
+// parseInviteTarget splits an invite target into a topic or a room. A leading
+// "#" means a topic — mess renders topics that way everywhere, and requiring
+// the sigil is what keeps "invite bob builds" from being a coin-flip between a
+// topic and a room. A bare name is a room.
+func parseInviteTarget(target, callerRoom string) (topic, room string) {
+	if strings.HasPrefix(target, "#") {
+		return strings.TrimPrefix(target, "#"), callerRoom
+	}
+	return "", target
 }
 
 // callerRoom is the room the caller is actually in. req.Room may instead name a
@@ -562,6 +573,47 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("pub %s #%s: @%s not subscribed", req.As, req.Topic, strings.Join(unreached, ", @"))
 		}
 		return resp
+	case "invite":
+		if !isUserHandle(req.To) && !b.IsRegistered(to) {
+			if others, found := b.FindOtherRoom(req.Room, req.To); found {
+				return Response{Error: crossRoomGhostMsg(req.To, req.Room, others)}
+			}
+			return Response{Error: fmt.Sprintf("no such agent %q — invite requires a previously-registered recipient", req.To)}
+		}
+		topicName, roomName := parseInviteTarget(req.Invite, callerRoom(req))
+		m, err := b.Invite(self, to, topicName, roomName, req.Body)
+		if err != nil {
+			elog("invite %s -> %s refused: %v", req.As, req.To, err)
+			return Response{Error: err.Error()}
+		}
+		elog("invite %s -> %s to %s (token %s)", req.As, req.To, req.Invite, m.ID)
+		d.journalAppend(req.Room, m)
+		return Response{OK: true, ID: m.ID, Invite: req.Invite}
+	case "accept":
+		inv, err := b.LookupInvite(self, req.ThreadID)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		if inv.topic != "" {
+			b.Sub(self, topicKey(inv.room, inv.topic))
+			b.ClearInvite(req.ThreadID)
+			elog("accept %s -> #%s", req.As, inv.topic)
+			return Response{OK: true, Invite: inv.what()}
+		}
+		// A room join MOVES an identity: it migrates the inbox and every
+		// subscription out of wherever it is now. Refuse to do that silently to
+		// someone already in a room — accepting is consent to join, not consent
+		// to leave.
+		if cur := callerRoom(req); cur != "" && cur != inv.room && !req.Force {
+			return Response{Error: fmt.Sprintf("accepting moves you from room %s to %s, taking your inbox and subscriptions with you — re-run with --force if that is what you want", roomLabel(cur), roomLabel(inv.room))}
+		}
+		from := agentKey(callerRoom(req), req.As)
+		if ok, msg := b.JoinRoom(from, agentKey(inv.room, req.As), req.Session, req.SessionPID, req.Force); !ok {
+			return Response{Error: msg}
+		}
+		b.ClearInvite(req.ThreadID)
+		elog("accept %s -> room %q", req.As, inv.room)
+		return Response{OK: true, Invite: inv.what()}
 	case "sub":
 		// Same reservation as rejectSlashName does for agents: a topic whose
 		// literal name contained "/" would be indistinguishable from the
@@ -784,7 +836,7 @@ func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	b := d.broker
 	attach := attachFromRequest(req)
 	if !req.Ack {
-		m, _, err := b.send(who, to, req.Body, req.ThreadID, false, attach, false)
+		m, _, err := b.send(who, to, req.Body, req.ThreadID, false, attach, false, "")
 		if err != nil {
 			return Response{Error: err.Error()}, Message{}
 		}
@@ -794,7 +846,7 @@ func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	}
 
 	// Blocking send: wait for a read receipt, honoring an optional timeout.
-	m, ackCh, err := b.send(who, to, req.Body, req.ThreadID, true, attach, false)
+	m, ackCh, err := b.send(who, to, req.Body, req.ThreadID, true, attach, false, "")
 	if err != nil {
 		return Response{Error: err.Error()}, Message{}
 	}

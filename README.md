@@ -44,6 +44,32 @@ default and so made the one command you reach for in an emergency also the one
 routine way to breach a room boundary. `--loud`/`--loud-room` still work and
 print a pointer to `shout`.
 
+**Invitations** — instead of messaging a peer to go subscribe themselves,
+`mess invite <agent> <#topic | room> [note]` asks them, and they run
+`mess accept <id>`. The invitation *is* an ordinary direct message — it wakes,
+replays and threads like any other — carrying a marker so a recipient who has
+never heard of invitations still sees what to run:
+
+```
+[invite m42 — join #peri-refactor with `mess accept m42`] trail: your work is in scope here
+```
+
+Joining stays the recipient's action, never the sender's. An invite that
+subscribed someone on their behalf would be one identity acting as another,
+which is the hazard rooms and ownership exist to prevent — so the invitation is
+the request and accepting is the consent. The token names one agent's decision:
+nobody else can redeem it, not even the sender.
+
+Two rules, both about authority rather than convenience. You may only invite
+into something **you are in yourself** — inviting into a topic you don't follow
+is a suggestion about someone else's business, not an invitation. And a *topic*
+invitation only makes sense within one room, since topics are room-scoped;
+inviting an agent in another room would quietly punch through the isolation
+boundary, so it's refused with advice you can actually type. Accepting a **room**
+invitation moves your identity — inbox and subscriptions follow — so it refuses
+to do that silently to someone already in a room: accepting is consent to join,
+not consent to leave. `--force` says otherwise.
+
 **Messaging the human (`user` mailbox)** — the operator has a reserved mailbox
 under the handle `user` (and your login name, e.g. `engi`). `mess send user "…"`
 delivers *only* there — no agent is touched — and fires a desktop notification

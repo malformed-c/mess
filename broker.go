@@ -44,6 +44,12 @@ type Broker struct {
 	// a name already in use.
 	owners map[string]ownerInfo
 
+	// invites maps a pending invitation's token (the inviting message's own id)
+	// to what it invites into. Transient, like asks: an invitation that outlives
+	// a daemon restart would be a promise mess can no longer honour, and saying
+	// "that invite is gone, ask again" is better than half-remembering it.
+	invites map[string]inviteInfo
+
 	// asks maps a pending ask's token (the ask message's own id) to what it
 	// takes to answer it. `mess ask` blocks until a message threaded under that
 	// token arrives — but the single most common way to lose an answer is to
@@ -128,6 +134,27 @@ type askInfo struct {
 	// answer later, which is the exact failure the suppression exists to stop.
 	ambiguousUpTo int
 }
+
+// inviteInfo is an outstanding invitation, keyed by the inviting message's own
+// id. Only `invitee` may redeem it: an invite is a request for consent, so the
+// authority to act lives with the person being invited, never the sender.
+type inviteInfo struct {
+	invitee string // composite key of the agent invited
+	room    string // the room the invitation is INTO (topic invites included)
+	topic   string // bare topic name, or "" for a room invitation
+}
+
+// what renders an invitation for humans: "#topic" or a room name.
+func (i inviteInfo) what() string {
+	if i.topic != "" {
+		return "#" + i.topic
+	}
+	return roomLabel(i.room)
+}
+
+// maxPendingInvites bounds the invites map, same reasoning as maxPendingAsks:
+// an invitation nobody ever accepts or declines would otherwise leak an entry.
+const maxPendingInvites = 1024
 
 // maxPendingAsks bounds the asks map. An ask that is never answered and never
 // awaited would otherwise leak an entry forever; oldest-first eviction keeps
@@ -224,6 +251,7 @@ func NewBroker() *Broker {
 		threadParticipants: map[string]map[string]bool{},
 		topicHistory:       map[string][]Message{},
 		asks:               map[string]askInfo{},
+		invites:            map[string]inviteInfo{},
 		now:                time.Now,
 		probeComm:          processComm,
 	}
@@ -639,7 +667,7 @@ func (b *Broker) workingLocked(name string) bool {
 
 // Send delivers a direct message to a single recipient.
 func (b *Broker) Send(from, to, body string) (Message, error) {
-	m, _, err := b.send(from, to, body, "", false, nil, false)
+	m, _, err := b.send(from, to, body, "", false, nil, false, "")
 	return m, err
 }
 
@@ -647,7 +675,7 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 // recipient reads (consumes) it. The caller can block on the channel, with its
 // own timeout, to implement a read receipt.
 func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, "", true, nil, false)
+	return b.send(from, to, body, "", true, nil, false, "")
 }
 
 // SendThreaded is Send, tagging the message as a reply within threadID (the
@@ -656,18 +684,18 @@ func (b *Broker) SendAck(from, to, body string) (Message, <-chan struct{}, error
 // here, only participant bookkeeping (so the same person showing up in a
 // topic thread later is already recognized as a participant).
 func (b *Broker) SendThreaded(from, to, body, threadID string) (Message, error) {
-	m, _, err := b.send(from, to, body, threadID, false, nil, false)
+	m, _, err := b.send(from, to, body, threadID, false, nil, false, "")
 	return m, err
 }
 
 // SendAckThreaded is SendAck with a thread tag (see SendThreaded).
 func (b *Broker) SendAckThreaded(from, to, body, threadID string) (Message, <-chan struct{}, error) {
-	return b.send(from, to, body, threadID, true, nil, false)
+	return b.send(from, to, body, threadID, true, nil, false, "")
 }
 
 // SendThreadedAttach is SendThreaded with a file attachment (mess send --attach).
 func (b *Broker) SendThreadedAttach(from, to, body, threadID string, attach *Attachment) (Message, error) {
-	m, _, err := b.send(from, to, body, threadID, false, attach, false)
+	m, _, err := b.send(from, to, body, threadID, false, attach, false, "")
 	return m, err
 }
 
@@ -677,7 +705,7 @@ func (b *Broker) SendThreadedAttach(from, to, body, threadID string, attach *Att
 // plain send back — the asker's `mess ask`/`mess await` wait only detects an
 // answer threaded to this message's own ID.
 func (b *Broker) SendAsk(from, to, body string) (Message, error) {
-	m, _, err := b.send(from, to, body, "", false, nil, true)
+	m, _, err := b.send(from, to, body, "", false, nil, true, "")
 	if err == nil {
 		b.rememberAsk(m.ID, from, to)
 	}
@@ -892,7 +920,7 @@ type Attachment struct {
 // send's from/to are composite keys (agentKey(room, name)) except when to is
 // the bare human mailbox handle (never room-scoped — see dispatch). The
 // delivered Message always carries bare names.
-func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachment, isAsk bool) (Message, <-chan struct{}, error) {
+func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachment, isAsk bool, invite string) (Message, <-chan struct{}, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if to == "" {
@@ -900,7 +928,7 @@ func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachm
 	}
 	_, fromName := splitAgentKey(from)
 	_, toName := splitAgentKey(to)
-	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID, Ask: isAsk}
+	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID, Ask: isAsk, Invite: invite}
 	if attach != nil {
 		m.AttachPath, m.AttachHash, m.AttachSize, m.AttachMTime = attach.Path, attach.Hash, attach.Size, attach.MTime
 	}
@@ -1033,6 +1061,110 @@ func missingMentions(body string, reach map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Invite records an invitation from `from` to `to`, to join either a topic in
+// the inviter's own room or the room itself. It returns the carrier message —
+// an ordinary direct message flagged Invite — so it wakes, replays and threads
+// exactly like any other, and the recipient sees it whether or not they know
+// invitations exist.
+//
+// Two rules, both about authority rather than convenience:
+//   - you may only invite into something you are in yourself. Inviting someone
+//     into a topic you do not follow, or a room you are not in, is not an
+//     invitation, it is a suggestion about someone else's business.
+//   - a TOPIC invitation only makes sense within one room. Topics are
+//     room-scoped, so subscribing an agent in room A to a topic in room B would
+//     quietly punch through the isolation boundary; the answer there is to
+//     invite them to the room first, and this says so.
+func (b *Broker) Invite(from, to, topic, room string, body string) (Message, error) {
+	fromRoom, fromName := splitAgentKey(from)
+	toRoom, _ := splitAgentKey(to)
+
+	if topic != "" {
+		if !b.IsSubscribed(from, topicKey(fromRoom, topic)) {
+			return Message{}, fmt.Errorf("you are not subscribed to #%s — you can only invite someone into a topic you follow yourself (`mess sub %s` first)", topic, topic)
+		}
+		if toRoom != fromRoom {
+			return Message{}, fmt.Errorf("#%s is a topic in room %s, but %q is in room %s — topics are room-scoped, so they cannot follow it from there. %s",
+				topic, roomLabel(fromRoom), displayName(toRoom, mustBare(to)), roomLabel(toRoom), joinFirstHint(fromRoom, displayName(toRoom, mustBare(to))))
+		}
+	} else if room != fromRoom {
+		return Message{}, fmt.Errorf("you are in room %s, not %s — you can only invite someone into a room you are in yourself", roomLabel(fromRoom), roomLabel(room))
+	}
+
+	if body == "" {
+		body = fmt.Sprintf("%s invites you to join %s", fromName, inviteInfo{room: room, topic: topic}.what())
+	}
+	m, _, err := b.send(from, to, body, "", false, nil, false, inviteInfo{room: room, topic: topic}.what())
+	if err != nil {
+		return Message{}, err
+	}
+	b.rememberInvite(m.ID, to, room, topic)
+	return m, nil
+}
+
+// joinFirstHint says how the invitee could get into the inviter's room, in a
+// form that can actually be typed. The global room has no name, so it cannot be
+// an invite target at all — the same trap as suggesting a bare "--room " for it
+// — and the honest advice there is the command that does work.
+func joinFirstHint(fromRoom, invitee string) string {
+	if fromRoom == "" {
+		return fmt.Sprintf("The global room has no name to invite into; they would run `mess room leave` to come back to it, then you can invite them to the topic.")
+	}
+	return fmt.Sprintf("Invite them to the room first: `mess invite %s %s`", invitee, fromRoom)
+}
+
+// mustBare is splitAgentKey's name half, for error text.
+func mustBare(key string) string { _, name := splitAgentKey(key); return name }
+
+func (b *Broker) rememberInvite(token, invitee, room, topic string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for len(b.invites) >= maxPendingInvites {
+		oldest, oldestSeq := "", 0
+		for t := range b.invites {
+			if seq, ok := msgSeq(t); ok && (oldest == "" || seq < oldestSeq) {
+				oldest, oldestSeq = t, seq
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(b.invites, oldest)
+	}
+	b.invites[token] = inviteInfo{invitee: invitee, room: room, topic: topic}
+}
+
+// LookupInvite returns the invitation `who` may redeem with this token. It is
+// an error for anyone else, including the sender: the token is not a capability
+// that travels, it names one agent's decision to make.
+func (b *Broker) LookupInvite(who, token string) (inviteInfo, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	inv, ok := b.invites[token]
+	if !ok {
+		return inviteInfo{}, fmt.Errorf("no open invitation %q — it may have been accepted already, or lost in a daemon restart (invitations are not persisted); ask for another", token)
+	}
+	if inv.invitee != who {
+		_, name := splitAgentKey(inv.invitee)
+		return inviteInfo{}, fmt.Errorf("invitation %q was extended to %q, not to you", token, name)
+	}
+	return inv, nil
+}
+
+// ClearInvite drops a redeemed invitation.
+func (b *Broker) ClearInvite(token string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.invites, token)
+}
+
+// IsSubscribed reports whether name follows the given composite topic key.
+func (b *Broker) IsSubscribed(name, topic string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.topics[topic][name]
 }
 
 // mentionRe matches an @name mention at a word boundary (so it doesn't fire on

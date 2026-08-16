@@ -92,6 +92,13 @@ Sending:
                                   (--thread ID replies within a thread — quiet
                                   unless @mentioned or already a participant)
                                   (--attach PATH / --file PATH as above)
+  mess invite <agent> <#topic|room> [note]
+                                  ask a peer to join a topic or your room,
+                                  instead of messaging them to go do it — they
+                                  run "mess accept <id>"; joining stays their
+                                  choice, never yours
+  mess accept <invite-id>         join what you were invited to (--force if a
+                                  room invitation would move you out of yours)
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
   mess ask <agent> [q...]         send a question, wait for the reply (a plain
@@ -247,6 +254,10 @@ func main() {
 		err = cmdShout(p, args)
 	case "pub":
 		err = cmdPub(p, args)
+	case "invite":
+		err = cmdInvite(p, args)
+	case "accept":
+		err = cmdAccept(p, args)
 	case "sub", "unsub":
 		err = cmdSubUnsub(p, cmd, args)
 
@@ -1004,6 +1015,67 @@ func cmdPub(p paths, args []string) error {
 		fmt.Printf("delivered to %d subscriber(s) — %s\n", resp.Count, bodyEcho(body))
 	}
 	warnUnreached(resp, "subscribed to #"+rest[0])
+	return nil
+}
+
+// cmdInvite asks a peer to join a topic or a room, instead of DMing them to go
+// do it themselves. The invitation IS an ordinary message — it wakes, replays
+// and threads like any other — so a recipient who has never heard of invitations
+// still sees a sentence telling them what to run.
+func cmdInvite(p paths, args []string) error {
+	fs, as := newFlags("invite")
+	file := fs.String("file", "", "read the invitation note from this file instead of args/stdin")
+	target := roomFlags(fs, "agent")
+	parseAnywhere(fs, args)
+	rt, err := target()
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		return fmt.Errorf("usage: mess invite [--room NAME | --global] <agent> <#topic | room> [note...]")
+	}
+	to, what := rest[0], rest[1]
+	if err := rt.checkTarget(to); err != nil {
+		return err
+	}
+	from, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	note := ""
+	if len(rest) > 2 || *file != "" {
+		if note, err = bodyFrom(rest[2:], *file); err != nil {
+			return err
+		}
+	}
+	resp, err := call(p, rt.apply(Request{Op: "invite", As: from, To: to, Invite: what, Body: note}))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("invited %s to %s — they accept with `mess accept %s`\n", to, what, resp.ID)
+	return nil
+}
+
+// cmdAccept redeems an invitation. Only the agent it was extended to can: the
+// token names one agent's decision, it is not a capability that travels.
+func cmdAccept(p paths, args []string) error {
+	fs, as := newFlags("accept")
+	force := fs.Bool("force", false, "accept a room invitation even though it moves you out of the room you are in now")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess accept <invite-id> [--force]")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "accept", As: name, ThreadID: rest[0], Force: *force})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("joined %s\n", resp.Invite)
 	return nil
 }
 
@@ -2294,6 +2366,9 @@ func formatMessageLine(ts string, m Message) string {
 	}
 	if m.Ask {
 		line = fmt.Sprintf("[question %s — answer with `mess reply`, or @mention the asker] %s", m.ID, line)
+	}
+	if m.Invite != "" {
+		line = fmt.Sprintf("[invite %s — join %s with `mess accept %s`] %s", m.ID, m.Invite, m.ID, line)
 	}
 	return line
 }

@@ -53,6 +53,18 @@ type Message struct {
 	// looks any different from an ordinary direct send.
 	Ask bool `json:"ask,omitempty"`
 
+	// Invite marks a message as an invitation to join a topic or a room, and
+	// carries what it is an invitation TO ("#topic" or a room name). The message
+	// id is the token: `mess accept <id>` redeems it. Same shape as Ask — a
+	// plain direct message plus a flag, so it wakes, replays and threads like
+	// any other, and nothing new has to be delivered or persisted to carry it.
+	//
+	// Joining is deliberately the RECIPIENT's action, never the sender's: an
+	// invite that subscribed someone on their behalf would be one identity
+	// acting as another, which is the hazard rooms and ownership exist to
+	// prevent. The invite is the ask; accepting is the consent.
+	Invite string `json:"invite,omitempty"`
+
 	// Bridge provenance, set only on a message that arrived via a topic bridge
 	// (see Bridge/Unbridge). BridgeID is the specific hop that delivered *this*
 	// copy; OriginRoom/OriginTopic are the room/topic of the original publish,
@@ -113,6 +125,7 @@ type Request struct {
 	FromRoom string  `json:"fromRoom,omitempty"` // (room-join) caller's previous room, so the daemon migrates the existing identity (inbox/subscriptions/owner) into the new room instead of leaving a stale duplicate behind
 
 	ThreadID string `json:"threadId,omitempty"` // (send/pub) reply within this thread; (recv) filter to this thread
+	Invite   string `json:"invite,omitempty"`   // (invite) what to join: "#topic" or a room name; (accept) unused — the token is ThreadID
 
 	Direction   string `json:"direction,omitempty"`   // (room bridge) "both" | "out" | "in"
 	RemoteRoom  string `json:"remoteRoom,omitempty"`  // (room bridge) far side's room
@@ -199,6 +212,8 @@ type Response struct {
 	// who they SHOULD have addressed without a second command.
 	Unreached []string `json:"unreached,omitempty"`
 	Members   []string `json:"members,omitempty"`
+	// Invite (accept) reports what was joined, so the CLI can say so precisely.
+	Invite string `json:"invite,omitempty"`
 	// AmbiguousAsker/AmbiguousTokens report that this message @mentioned someone
 	// with MORE THAN ONE open question outstanding, so the mention could not say
 	// which it answered and answered none of them. Populated only for the sender,

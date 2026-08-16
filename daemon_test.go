@@ -702,7 +702,7 @@ func TestDispatchRenameRejectsSlashName(t *testing.T) {
 func TestDispatchRoomJoinMigratesFromPreviousRoom(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.RegisterOwned("bob", "", 0, false)
-	d.broker.send("peer", "bob", "queued before joining", "", false, nil, false)
+	d.broker.send("peer", "bob", "queued before joining", "", false, nil, false, "")
 
 	resp := d.dispatch(Request{Op: "room-join", As: "bob", Room: "frontend", FromRoom: ""})
 	if !resp.OK {

@@ -922,3 +922,65 @@ func TestReplyRefusesAnAmbiguousTarget(t *testing.T) {
 		t.Fatalf("after closing the stale thread, reply should answer the newest: %q", got)
 	}
 }
+
+// End-to-end, through the real CLI: the whole point is that a peer who has
+// never heard of invitations still learns what to run, from the message itself.
+func TestInviteEndToEnd(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("trail", "register", "trail")
+	e.mess("fable", "register", "fable")
+	e.mess("trail", "sub", "peri-refactor")
+
+	out := e.mess("trail", "invite", "fable", "#peri-refactor", "your work is in scope here")
+	if !strings.Contains(out, "mess accept") {
+		t.Fatalf("the sender should be told how the invitee accepts: %q", out)
+	}
+	token := regexp.MustCompile(`accept (m\d+)`).FindStringSubmatch(out)
+	if token == nil {
+		t.Fatalf("no invite token in %q", out)
+	}
+
+	// The recipient's own view has to carry the instruction, not just a body.
+	got := e.mess("fable", "recv")
+	if !strings.Contains(got, "[invite "+token[1]) || !strings.Contains(got, "#peri-refactor") {
+		t.Fatalf("the invitation must announce itself in the inbox: %q", got)
+	}
+
+	if out := e.mess("fable", "accept", token[1]); !strings.Contains(out, "#peri-refactor") {
+		t.Fatalf("accept should say what was joined: %q", out)
+	}
+	if ps := e.mess("fable", "ps"); !strings.Contains(ps, "peri-refactor") {
+		t.Fatalf("accepting should have subscribed fable: %q", ps)
+	}
+	// Spent.
+	if _, err := e.command("fable", "accept", token[1]).CombinedOutput(); err == nil {
+		t.Fatal("a redeemed invitation must not be reusable")
+	}
+}
+
+// A room invitation MOVES an identity — inbox and subscriptions follow. Accept
+// is consent to join, not consent to leave, so it refuses to do that silently.
+func TestRoomInviteRefusesToMoveYouSilently(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("host", "register", "host")
+	e.mess("host", "room", "join", "coord")
+	e.mess("busy", "register", "busy")
+	e.mess("busy", "room", "join", "other")
+
+	out := e.mess("host", "invite", "--room", "other", "busy", "coord", "come over")
+	token := regexp.MustCompile(`accept (m\d+)`).FindStringSubmatch(out)
+	if token == nil {
+		t.Fatalf("no invite token in %q", out)
+	}
+
+	res, err := e.command("busy", "accept", token[1]).CombinedOutput()
+	if err == nil {
+		t.Fatalf("accepting must not silently move an agent out of its room: %q", res)
+	}
+	if !strings.Contains(string(res), "--force") || !strings.Contains(string(res), "other") {
+		t.Fatalf("the refusal should name the move and the way to consent: %q", res)
+	}
+	if out := e.mess("busy", "accept", token[1], "--force"); !strings.Contains(out, "coord") {
+		t.Fatalf("--force should complete the move: %q", out)
+	}
+}

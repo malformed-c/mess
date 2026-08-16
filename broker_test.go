@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -2458,5 +2459,136 @@ func TestAnAmbiguousMentionStaysRefusedAfterTheOtherAskResolves(t *testing.T) {
 	b.Send("bob", "alice", "@alice yes to the remaining one")
 	if !b.HasPendingAnswer("alice", two.ID) {
 		t.Fatal("a fresh mention with only one ask open should answer it")
+	}
+}
+
+// --- invitations ---
+//
+// Instead of DMing a peer to go subscribe themselves, you invite them and they
+// accept. The invitation IS an ordinary message, so it wakes/replays/threads
+// like any other and a recipient who has never heard of invitations still gets
+// a sentence telling them what to run. Joining stays THEIR action throughout:
+// an invite that subscribed someone on their behalf would be one identity
+// acting as another, which is the hazard rooms and ownership exist to prevent.
+
+func TestInviteIsAMessageAndAcceptJoins(t *testing.T) {
+	b := newTestBroker()
+	b.Register("trail")
+	b.Register("fable")
+	b.Sub("trail", topicKey("", "peri"))
+
+	m, err := b.Invite("trail", "fable", "peri", "", "come look")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The recipient must be able to tell it apart from any other message.
+	if m.Invite != "#peri" {
+		t.Fatalf("the delivered message must carry what it invites to, got %q", m.Invite)
+	}
+	if got := b.Drain("fable", true, 0); len(got) != 1 || got[0].Invite != "#peri" {
+		t.Fatalf("the invitation should arrive as an ordinary inbox message, got %+v", got)
+	}
+
+	inv, err := b.LookupInvite("fable", m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Sub("fable", topicKey(inv.room, inv.topic))
+	if !b.IsSubscribed("fable", topicKey("", "peri")) {
+		t.Fatal("accepting should subscribe the invitee")
+	}
+}
+
+// The token names one agent's decision. It is not a capability that travels.
+func TestOnlyTheInviteeCanAccept(t *testing.T) {
+	b := newTestBroker()
+	for _, n := range []string{"trail", "fable", "nosy"} {
+		b.Register(n)
+	}
+	b.Sub("trail", topicKey("", "peri"))
+	m, err := b.Invite("trail", "fable", "peri", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.LookupInvite("nosy", m.ID); err == nil {
+		t.Fatal("a third party must not be able to redeem someone else's invitation")
+	}
+	if _, err := b.LookupInvite("trail", m.ID); err == nil {
+		t.Fatal("not even the sender may accept on the invitee's behalf")
+	}
+	if _, err := b.LookupInvite("fable", m.ID); err != nil {
+		t.Fatalf("the invitee must be able to redeem it: %v", err)
+	}
+	// Spent once redeemed.
+	b.ClearInvite(m.ID)
+	if _, err := b.LookupInvite("fable", m.ID); err == nil {
+		t.Fatal("a redeemed invitation must not be reusable")
+	}
+}
+
+// You may only invite into something you are in yourself — otherwise it is not
+// an invitation, it is a suggestion about someone else's business.
+func TestCannotInviteIntoSomethingYouAreNotIn(t *testing.T) {
+	b := newTestBroker()
+	b.Register("nosy")
+	b.Register("fable")
+
+	if _, err := b.Invite("nosy", "fable", "builds", "", ""); err == nil {
+		t.Fatal("inviting into an unfollowed topic should be refused")
+	}
+	if _, err := b.Invite("nosy", "fable", "", "someroom", ""); err == nil {
+		t.Fatal("inviting into a room you are not in should be refused")
+	}
+}
+
+// Topics are room-scoped, so a topic invitation across a room boundary would
+// quietly punch through the isolation. It is refused, with advice that can
+// actually be typed — the global room has no name, so it cannot be an invite
+// target and saying "invite them to (global)" would be the same untypeable
+// suggestion the cross-room error used to make.
+func TestTopicInviteAcrossRoomsIsRefusedWithTypeableAdvice(t *testing.T) {
+	b := newTestBroker()
+	b.Register("trail")
+	b.Register(agentKey("coord", "away"))
+	b.Sub("trail", topicKey("", "builds"))
+
+	_, err := b.Invite("trail", agentKey("coord", "away"), "builds", "", "")
+	if err == nil {
+		t.Fatal("a topic invitation across rooms should be refused")
+	}
+	if strings.Contains(err.Error(), "invite coord/away (global)") {
+		t.Fatalf("advice must be typeable, not a display label: %v", err)
+	}
+	if !strings.Contains(err.Error(), "room leave") {
+		t.Fatalf("from the global room the honest advice is the command that works: %v", err)
+	}
+
+	// From a NAMED room there is a real command to offer.
+	b.Register(agentKey("team", "host"))
+	b.Register(agentKey("coord", "other"))
+	b.Sub(agentKey("team", "host"), topicKey("team", "work"))
+	_, err = b.Invite(agentKey("team", "host"), agentKey("coord", "other"), "work", "", "")
+	if err == nil || !strings.Contains(err.Error(), "mess invite coord/other team") {
+		t.Fatalf("want a runnable room invitation to offer, got %v", err)
+	}
+}
+
+// The pending-invitation table must not grow without bound.
+func TestPendingInviteTableIsBounded(t *testing.T) {
+	b := newTestBroker()
+	b.Register("trail")
+	b.Register("fable")
+	b.Sub("trail", topicKey("", "peri"))
+	for range maxPendingInvites + 25 {
+		if _, err := b.Invite("trail", "fable", "peri", "", "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.mu.Lock()
+	n := len(b.invites)
+	b.mu.Unlock()
+	if n > maxPendingInvites {
+		t.Fatalf("invites table grew to %d, past the %d cap", n, maxPendingInvites)
 	}
 }
