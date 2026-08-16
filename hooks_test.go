@@ -362,17 +362,20 @@ func TestSteerHookBacksOffOnRepeatsButNotOnNewMail(t *testing.T) {
 	e.mess("sender", "register", "sender")
 	e.mess("sender", "send", "victim", "first")
 
-	// base 1s, doubling: announce, +1s, then +2s.
-	slow := []string{"MESS_STEER_RENOTIFY=1", "MESS_STEER_RENOTIFY_MAX=900"}
+	// The hook's clock is `date +%s`, so elapsed time is measured to the second
+	// and can read up to a second high. Windows and sleeps are chosen with more
+	// than a second of margin on BOTH comparisons — a 1s base with 1.2s sleeps
+	// flaked exactly here, because 1.2s of wall time can measure as 2.
+	slow := []string{"MESS_STEER_RENOTIFY=3", "MESS_STEER_RENOTIFY_MAX=900"}
 	if got := e.steer("victim", slow...); !strings.Contains(got, "unread") {
 		t.Fatalf("new mail should announce at once: %q", got)
 	}
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(4 * time.Second) // measures 4-5, comfortably past the 3s base
 	if got := e.steer("victim", slow...); !strings.Contains(got, "unread") {
 		t.Fatalf("first repeat should fire after the base window: %q", got)
 	}
-	// The window has now doubled, so the same wait is no longer enough.
-	time.Sleep(1200 * time.Millisecond)
+	// The window has now doubled to 6s, so a much shorter wait is not enough.
+	time.Sleep(2 * time.Second) // measures 2-3, comfortably short of 6s
 	if got := e.steer("victim", slow...); got != "" {
 		t.Fatalf("second repeat fired too early — the backoff did not grow: %q", got)
 	}
