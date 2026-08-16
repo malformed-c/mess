@@ -413,7 +413,7 @@ func writeResp(conn net.Conn, r Response) {
 func actsAsSelf(op string) bool {
 	switch op {
 	case "send", "broadcast", "pub", "sub", "unsub", "state", "warn",
-		"busy", "unbusy", "session-end", "recv", "listen", "replay", "unregister", "room-leave", "invite", "accept",
+		"busy", "unbusy", "session-end", "recv", "listen", "replay", "unregister", "room-leave", "invite", "accept", "decline", "invites",
 		"bridge", "unbridge", "export", "thread-list", "ask", "await":
 		return true
 	}
@@ -614,6 +614,18 @@ func (d *daemon) dispatch(req Request) Response {
 		b.ClearInvite(req.ThreadID)
 		elog("accept %s -> room %q", req.As, inv.room)
 		return Response{OK: true, Invite: inv.what()}
+	case "decline":
+		inv, m, err := b.Decline(self, req.ThreadID, req.Body)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		elog("decline %s -> %s (%s)", req.As, inv.what(), req.ThreadID)
+		d.journalAppend(req.Room, m)
+		_, inviter := splitAgentKey(inv.inviter)
+		return Response{OK: true, Invite: inv.what(), Notified: inviter}
+	case "invites":
+		received, sent := b.PendingInvites(self)
+		return Response{OK: true, Received: received, Sent: sent, Count: len(received)}
 	case "sub":
 		// Same reservation as rejectSlashName does for agents: a topic whose
 		// literal name contained "/" would be indistinguishable from the

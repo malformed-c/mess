@@ -139,9 +139,11 @@ type askInfo struct {
 // id. Only `invitee` may redeem it: an invite is a request for consent, so the
 // authority to act lives with the person being invited, never the sender.
 type inviteInfo struct {
-	invitee string // composite key of the agent invited
-	room    string // the room the invitation is INTO (topic invites included)
-	topic   string // bare topic name, or "" for a room invitation
+	inviter string    // composite key of the agent who extended it
+	invitee string    // composite key of the agent invited
+	room    string    // the room the invitation is INTO (topic invites included)
+	topic   string    // bare topic name, or "" for a room invitation
+	at      time.Time // when it was extended, for `mess invites`
 }
 
 // what renders an invitation for humans: "#topic" or a room name.
@@ -1100,7 +1102,7 @@ func (b *Broker) Invite(from, to, topic, room string, body string) (Message, err
 	if err != nil {
 		return Message{}, err
 	}
-	b.rememberInvite(m.ID, to, room, topic)
+	b.rememberInvite(m.ID, from, to, room, topic)
 	return m, nil
 }
 
@@ -1118,7 +1120,7 @@ func joinFirstHint(fromRoom, invitee string) string {
 // mustBare is splitAgentKey's name half, for error text.
 func mustBare(key string) string { _, name := splitAgentKey(key); return name }
 
-func (b *Broker) rememberInvite(token, invitee, room, topic string) {
+func (b *Broker) rememberInvite(token, inviter, invitee, room, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for len(b.invites) >= maxPendingInvites {
@@ -1133,7 +1135,58 @@ func (b *Broker) rememberInvite(token, invitee, room, topic string) {
 		}
 		delete(b.invites, oldest)
 	}
-	b.invites[token] = inviteInfo{invitee: invitee, room: room, topic: topic}
+	b.invites[token] = inviteInfo{inviter: inviter, invitee: invitee, room: room, topic: topic, at: b.now()}
+}
+
+// PendingInvites lists what `who` has been offered and what they have offered,
+// oldest first. Sorted by the token's sequence rather than map order, so the
+// same state always renders the same way.
+func (b *Broker) PendingInvites(who string) (received, sent []InviteSummary) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for token, inv := range b.invites {
+		_, from := splitAgentKey(inv.inviter)
+		_, to := splitAgentKey(inv.invitee)
+		s := InviteSummary{Token: token, What: inv.what(), From: from, To: to, Time: inv.at}
+		switch who {
+		case inv.invitee:
+			received = append(received, s)
+		case inv.inviter:
+			sent = append(sent, s)
+		}
+	}
+	bySeq := func(l []InviteSummary) {
+		sort.Slice(l, func(i, j int) bool {
+			a, _ := msgSeq(l[i].Token)
+			b, _ := msgSeq(l[j].Token)
+			return a < b
+		})
+	}
+	bySeq(received)
+	bySeq(sent)
+	return received, sent
+}
+
+// Decline turns an invitation down and tells the inviter, because silence is
+// the thing that makes an invitation expensive: an offer nobody answered is
+// indistinguishable from one still being considered, and the sender waits on a
+// decision that has already been made. Returns the note delivered to them.
+func (b *Broker) Decline(who, token, reason string) (inviteInfo, Message, error) {
+	inv, err := b.LookupInvite(who, token)
+	if err != nil {
+		return inviteInfo{}, Message{}, err
+	}
+	_, name := splitAgentKey(who)
+	body := fmt.Sprintf("%s declined your invitation to %s", name, inv.what())
+	if reason != "" {
+		body += ": " + reason
+	}
+	m, _, err := b.send(who, inv.inviter, body, "", false, nil, false, "")
+	if err != nil {
+		return inviteInfo{}, Message{}, err
+	}
+	b.ClearInvite(token)
+	return inv, m, nil
 }
 
 // LookupInvite returns the invitation `who` may redeem with this token. It is

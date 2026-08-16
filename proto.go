@@ -85,6 +85,17 @@ type Message struct {
 	AttachMTime time.Time `json:"attachMtime,omitzero"`
 }
 
+// InviteSummary is one outstanding invitation, for `mess invites`. Listing them
+// is what makes declining meaningful: an invitation you have forgotten about is
+// indistinguishable from one you decided against, and neither side can tell.
+type InviteSummary struct {
+	Token string    `json:"token"`
+	What  string    `json:"what"` // "#topic" or a room name
+	From  string    `json:"from"`
+	To    string    `json:"to"`
+	Time  time.Time `json:"time"`
+}
+
 // Request is one command sent from a client to the daemon.
 type Request struct {
 	Op       string   `json:"op"`
@@ -212,8 +223,12 @@ type Response struct {
 	// who they SHOULD have addressed without a second command.
 	Unreached []string `json:"unreached,omitempty"`
 	Members   []string `json:"members,omitempty"`
-	// Invite (accept) reports what was joined, so the CLI can say so precisely.
-	Invite string `json:"invite,omitempty"`
+	// Invite (accept/decline) reports what was joined or turned down, so the CLI
+	// can say so precisely. Received/Sent answer `mess invites`.
+	Invite   string          `json:"invite,omitempty"`
+	Notified string          `json:"notified,omitempty"` // (decline) who was told, so the CLI can name them
+	Received []InviteSummary `json:"received,omitempty"`
+	Sent     []InviteSummary `json:"sent,omitempty"`
 	// AmbiguousAsker/AmbiguousTokens report that this message @mentioned someone
 	// with MORE THAN ONE open question outstanding, so the mention could not say
 	// which it answered and answered none of them. Populated only for the sender,

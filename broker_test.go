@@ -2592,3 +2592,87 @@ func TestPendingInviteTableIsBounded(t *testing.T) {
 		t.Fatalf("invites table grew to %d, past the %d cap", n, maxPendingInvites)
 	}
 }
+
+// Declining exists so that "no" is something you can actually say. An
+// invitation left alone is indistinguishable from one still being weighed, so
+// the sender waits on a decision that was made days ago — the same silence
+// problem as a swallowed error, one layer up.
+func TestDeclineTellsTheInviter(t *testing.T) {
+	b := newTestBroker()
+	b.Register("trail")
+	b.Register("fable")
+	b.Sub("trail", topicKey("", "peri"))
+	m, err := b.Invite("trail", "fable", "peri", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Drain("trail", false, 0) // clear the inviter's inbox first
+
+	inv, note, err := b.Decline("fable", m.ID, "already tracking it elsewhere")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.what() != "#peri" {
+		t.Fatalf("decline should report what was turned down, got %q", inv.what())
+	}
+	if note.To != "trail" || !strings.Contains(note.Body, "declined") ||
+		!strings.Contains(note.Body, "#peri") || !strings.Contains(note.Body, "already tracking it") {
+		t.Fatalf("the inviter must be told, with the reason: %+v", note)
+	}
+	// Spent: neither accept nor decline works twice.
+	if _, err := b.LookupInvite("fable", m.ID); err == nil {
+		t.Fatal("a declined invitation must not remain redeemable")
+	}
+}
+
+// Declining is the invitee's decision, same as accepting.
+func TestOnlyTheInviteeCanDecline(t *testing.T) {
+	b := newTestBroker()
+	for _, n := range []string{"trail", "fable", "nosy"} {
+		b.Register(n)
+	}
+	b.Sub("trail", topicKey("", "peri"))
+	m, _ := b.Invite("trail", "fable", "peri", "", "")
+
+	if _, _, err := b.Decline("nosy", m.ID, ""); err == nil {
+		t.Fatal("a third party must not be able to decline someone else's invitation")
+	}
+	if _, _, err := b.Decline("trail", m.ID, ""); err == nil {
+		t.Fatal("the sender may not decline on the invitee's behalf either")
+	}
+}
+
+// `mess invites` has to show both directions — what you owe an answer to, and
+// what you are owed one for — and render the same state the same way every time.
+func TestPendingInvitesListsBothDirectionsInOrder(t *testing.T) {
+	b := newTestBroker()
+	for _, n := range []string{"trail", "fable"} {
+		b.Register(n)
+	}
+	b.Sub("trail", topicKey("", "peri"))
+	b.Sub("trail", topicKey("", "builds"))
+	b.Sub("fable", topicKey("", "docs"))
+	one, _ := b.Invite("trail", "fable", "peri", "", "")
+	two, _ := b.Invite("trail", "fable", "builds", "", "")
+	back, _ := b.Invite("fable", "trail", "docs", "", "")
+
+	for range 5 { // deterministic despite map iteration
+		received, sent := b.PendingInvites("fable")
+		if len(received) != 2 || received[0].Token != one.ID || received[1].Token != two.ID {
+			t.Fatalf("received should be oldest-first, got %+v", received)
+		}
+		if len(sent) != 1 || sent[0].Token != back.ID || sent[0].To != "trail" {
+			t.Fatalf("sent should list what fable is waiting on, got %+v", sent)
+		}
+	}
+	// The other side sees the mirror image.
+	received, sent := b.PendingInvites("trail")
+	if len(received) != 1 || len(sent) != 2 {
+		t.Fatalf("trail should see 1 received and 2 sent, got %d/%d", len(received), len(sent))
+	}
+	// Answering one drops it from both views.
+	b.ClearInvite(one.ID)
+	if r, _ := b.PendingInvites("fable"); len(r) != 1 {
+		t.Fatalf("an answered invitation must leave the list, got %+v", r)
+	}
+}

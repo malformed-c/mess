@@ -99,6 +99,10 @@ Sending:
                                   choice, never yours
   mess accept <invite-id>         join what you were invited to (--force if a
                                   room invitation would move you out of yours)
+  mess decline <invite-id> [why]  turn it down and tell them, so "no" is
+                                  something you can actually say
+  mess invites                    invitations outstanding both ways: what you
+                                  were offered, and what you await an answer to
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
   mess ask <agent> [q...]         send a question, wait for the reply (a plain
@@ -258,6 +262,10 @@ func main() {
 		err = cmdInvite(p, args)
 	case "accept":
 		err = cmdAccept(p, args)
+	case "decline":
+		err = cmdDecline(p, args)
+	case "invites":
+		err = cmdInvites(p, args)
 	case "sub", "unsub":
 		err = cmdSubUnsub(p, cmd, args)
 
@@ -1076,6 +1084,71 @@ func cmdAccept(p paths, args []string) error {
 		return err
 	}
 	fmt.Printf("joined %s\n", resp.Invite)
+	return nil
+}
+
+// cmdDecline turns an invitation down and tells the inviter. Declining exists
+// so that "no" is a thing you can actually say: an invitation left alone is
+// indistinguishable from one still being weighed, and the sender waits on a
+// decision that was made days ago.
+func cmdDecline(p paths, args []string) error {
+	fs, as := newFlags("decline")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: mess decline <invite-id> [reason...]")
+	}
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	reason := ""
+	if len(rest) > 1 {
+		reason = strings.Join(rest[1:], " ")
+	}
+	resp, err := call(p, Request{Op: "decline", As: name, ThreadID: rest[0], Body: reason})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("declined %s — %s has been told\n", resp.Invite, resp.Notified)
+	return nil
+}
+
+// cmdInvites lists invitations outstanding in both directions: what you have
+// been offered, and what you are still waiting on an answer to.
+func cmdInvites(p paths, args []string) error {
+	fs, as := newFlags("invites")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	parseAnywhere(fs, args)
+	name, err := agentName(p, *as)
+	if err != nil {
+		return err
+	}
+	resp, err := call(p, Request{Op: "invites", As: name})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"received": resp.Received, "sent": resp.Sent})
+	}
+	if len(resp.Received) == 0 && len(resp.Sent) == 0 {
+		fmt.Println("no open invitations")
+		return nil
+	}
+	if len(resp.Received) > 0 {
+		fmt.Println("invited to:")
+		for _, i := range resp.Received {
+			fmt.Printf("  %-8s %-20s from %-14s %s ago — `mess accept %s` / `mess decline %s`\n",
+				i.Token, i.What, i.From, compactDur(time.Since(i.Time)), i.Token, i.Token)
+		}
+	}
+	if len(resp.Sent) > 0 {
+		fmt.Println("waiting on:")
+		for _, i := range resp.Sent {
+			fmt.Printf("  %-8s %-20s to   %-14s %s ago — not answered yet\n",
+				i.Token, i.What, i.To, compactDur(time.Since(i.Time)))
+		}
+	}
 	return nil
 }
 
