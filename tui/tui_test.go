@@ -16,7 +16,7 @@ import (
 
 func newTestTUI(t *testing.T, w, h int) *tuiModel {
 	t.Helper()
-	m := newTUIModel(t.TempDir(), "engi", "")
+	m := newTUIModel(t.TempDir(), "engi", "", true, time.Hour)
 	tm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return tm.(*tuiModel)
 }
@@ -60,7 +60,7 @@ func TestTUIRoutesMessagesIntoConversations(t *testing.T) {
 	for _, c := range m.convos {
 		keys = append(keys, c.key)
 	}
-	want := []string{"#peri", "@fable"}
+	want := []string{"#peri", "@fable", "a ⇄ b"}
 	if strings.Join(keys, ",") != strings.Join(want, ",") {
 		t.Fatalf("want conversations %v, got %v", want, keys)
 	}
@@ -68,8 +68,10 @@ func TestTUIRoutesMessagesIntoConversations(t *testing.T) {
 	if got := len(m.byKey["@fable"].msgs); got != 2 {
 		t.Fatalf("a DM conversation should hold both sides, got %d", got)
 	}
-	if _, leaked := m.byKey["@a"]; leaked {
-		t.Fatal("another pair's DM must not become a conversation")
+	// Two other agents talking is shown too — watching that is the point of an
+	// operator view, and hiding it was the bug that made the UI look empty.
+	if _, ok := m.byKey["a ⇄ b"]; !ok {
+		t.Fatalf("fleet traffic should be visible, got %v", keys)
 	}
 }
 

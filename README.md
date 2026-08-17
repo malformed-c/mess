@@ -1234,6 +1234,14 @@ if it is missing.
 cd tui && go build -o ~/.local/bin/mess-tui .
 ```
 
+**It shows the whole machine by default** — every room, every topic, and
+conversations between two other agents as well as your own, over the last 7
+days (`--since`, `--room` to narrow). The first version was modelled too
+literally on a chat client: it showed only conversations you were an end of,
+which on a quiet day left exactly one correspondent on screen. Watching agents
+talk to *each other* is the job. Those fleet conversations are read-only —
+replying would put words in one of their mouths.
+
 **It reads the journal, not an inbox.** Every inbox read is destructive —
 `recv` consumes, `listen` would too — so a UI built on one would eat the
 operator's mail on every glance and compete with the auto-wake hook for the

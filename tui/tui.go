@@ -31,9 +31,9 @@ import (
 // job this is for.
 
 const (
-	tuiPollInterval = 2 * time.Second // journal + presence refresh
-	tuiHistory      = 24 * time.Hour  // how far back to load
-	tuiMaxMessages  = 4000            // ...and a ceiling on it
+	tuiPollInterval = 2 * time.Second    // journal + presence refresh
+	tuiHistory      = 7 * 24 * time.Hour // how far back to load, by default
+	tuiMaxMessages  = 20000              // ...and a ceiling on it
 
 	// The sidebar is a fraction of the width, not a fixed column count, and
 	// below tuiCompactCols it collapses entirely so the messages still get a
@@ -50,6 +50,11 @@ const (
 // scrolled and the channel list could not be walked — you cannot type and
 // navigate with the same keys, which is why tuilegram carries an explicit focus
 // too. Tab moves the focus; the composer only sees keys while it holds it.
+// tuiKindFleet is a conversation between two OTHER agents: visible, but not
+// something this operator can type into — replying would put words in one of
+// their mouths.
+const tuiKindFleet = "fleet"
+
 type focusPane int
 
 const (
@@ -81,10 +86,12 @@ type convo struct {
 
 // tuiModel is the whole UI state.
 type tuiModel struct {
-	sock string
-	jrnl string
-	me   string
-	room string
+	sock     string
+	jrnl     string
+	me       string
+	room     string
+	allRooms bool          // watch every room, not just one
+	since    time.Duration // how far back to load
 
 	convos []*convo
 	byKey  map[string]*convo
@@ -121,10 +128,10 @@ func tuiTick() tea.Cmd {
 // poll reads the journal and presence. Both are cheap local reads, and neither
 // consumes anything, so it is safe to do on a timer forever.
 func (m *tuiModel) poll() tea.Cmd {
-	jrnl, sock, room := m.jrnl, m.sock, m.room
+	jrnl, sock, room, all, since := m.jrnl, m.sock, m.room, m.allRooms, m.since
 	return func() tea.Msg {
 		msgs, err := wire.SearchJournal(jrnl, wire.Filter{
-			Room: room, Since: tuiHistory, Max: tuiMaxMessages, Now: time.Now(),
+			Room: room, All: all, Since: since, Max: tuiMaxMessages, Now: time.Now(),
 		})
 		if err != nil {
 			return tuiDataMsg{err: err}
@@ -161,9 +168,16 @@ func (m *tuiModel) place(msg wire.Message, initial bool) bool {
 	return true
 }
 
-// route decides which conversation a message belongs to. Topics and broadcasts
-// are shared channels and always shown; direct messages are shown only when
-// this operator is one of the two ends, since the rest are other people's mail.
+// route decides which conversation a message belongs to.
+//
+// Everything is shown, including traffic between two other agents. This is the
+// operator's window on their own machine, and the first thing it got wrong was
+// hiding most of the fleet: modelled on a chat client, it showed only
+// conversations you were an end of, which on a quiet day left exactly one
+// correspondent visible. Watching agents talk to EACH OTHER is the job.
+//
+// Agent-to-agent pairs are keyed canonically so both directions land in one
+// conversation rather than two half-conversations.
 func (m *tuiModel) route(msg wire.Message) (key, kind, name string) {
 	switch msg.Kind {
 	case wire.KindTopic:
@@ -176,6 +190,12 @@ func (m *tuiModel) route(msg wire.Message) (key, kind, name string) {
 			return "@" + msg.From, wire.KindDirect, msg.From
 		case msg.From == m.me:
 			return "@" + msg.To, wire.KindDirect, msg.To
+		case msg.To != "" && msg.From != "":
+			a, b := msg.From, msg.To
+			if a > b {
+				a, b = b, a
+			}
+			return a + " ⇄ " + b, tuiKindFleet, ""
 		}
 	}
 	return "", "", ""
@@ -310,6 +330,10 @@ func (m *tuiModel) send() tea.Cmd {
 		m.status = "#broadcast is read-only here — use `mess broadcast` or `mess shout` deliberately"
 		return nil
 	}
+	if c.kind == tuiKindFleet {
+		m.status = "that is a conversation between two other agents — you can watch it, not speak in it"
+		return nil
+	}
 	m.input.SetValue("")
 	sock, me := m.sock, m.me
 	req := wire.Request{Op: "send", As: me, To: c.name, Body: body}
@@ -341,8 +365,8 @@ func (m *tuiModel) sortConvos() {
 	cur := m.current()
 	sort.SliceStable(m.convos, func(i, j int) bool {
 		a, b := m.convos[i], m.convos[j]
-		if (a.kind == wire.KindDirect) != (b.kind == wire.KindDirect) {
-			return b.kind == wire.KindDirect
+		if ra, rb := sectionRank(a.kind), sectionRank(b.kind); ra != rb {
+			return ra < rb
 		}
 		return a.key < b.key
 	})
@@ -361,6 +385,28 @@ func (m *tuiModel) sidebarWidth() int {
 	}
 	w := int(float64(m.w) * tuiSidebarRatio)
 	return max(tuiSidebarMin, min(tuiSidebarMax, w))
+}
+
+// sectionOf/sectionRank group the sidebar: channels you can post in, your own
+// correspondents, then everyone else's traffic.
+func sectionOf(kind string) string {
+	switch kind {
+	case wire.KindDirect:
+		return "direct"
+	case tuiKindFleet:
+		return "fleet"
+	}
+	return "channels"
+}
+
+func sectionRank(kind string) int {
+	switch kind {
+	case wire.KindDirect:
+		return 1
+	case tuiKindFleet:
+		return 2
+	}
+	return 0
 }
 
 func (m *tuiModel) layout() {
@@ -447,12 +493,24 @@ func (m *tuiModel) View() string {
 		labelW = m.w
 	}
 	var side strings.Builder
-	side.WriteString(tuiAccent.Render("channels") + "\n")
-	inDMs := false
+
+	// Reserve a row per section header that will actually be drawn.
+	headers := map[string]bool{}
+	for _, c := range m.convos {
+		headers[sectionOf(c.kind)] = true
+	}
+	from, to := m.visibleRows(len(m.convos), max(1, m.vp.Height-2*len(headers)))
+	section := ""
 	for i, c := range m.convos {
-		if c.kind == wire.KindDirect && !inDMs {
-			side.WriteString("\n" + tuiAccent.Render("direct") + "\n")
-			inDMs = true
+		if i < from || i >= to {
+			continue
+		}
+		if h := sectionOf(c.kind); h != section {
+			if section != "" {
+				side.WriteString("\n")
+			}
+			side.WriteString(tuiAccent.Render(h) + "\n")
+			section = h
 		}
 		label := c.key
 		if c.kind == wire.KindDirect {
@@ -505,6 +563,9 @@ func roomSuffix(room string) string {
 	return " in " + room
 }
 
+// trimTo cuts to width, marking the cut. The mark is not decoration: the fleet
+// list is full of pairs sharing a prefix, and two rows silently clipped to
+// "coordinator ⇄ periapsis-" are indistinguishable from each other.
 func trimTo(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -513,42 +574,62 @@ func trimTo(s string, n int) string {
 		return s
 	}
 	r := []rune(s)
-	if len(r) > n {
-		r = r[:n]
+	if n <= 1 {
+		return "…"
 	}
-	return string(r)
+	return string(r[:n-1]) + "…"
+}
+
+// visibleRows picks the slice of the sidebar that fits, keeping the selection
+// in view. Without it the list simply ran off the bottom of the terminal once
+// the fleet section filled up, taking the composer and status bar with it.
+func (m *tuiModel) visibleRows(rows, height int) (from, to int) {
+	if rows <= height || height <= 0 {
+		return 0, rows
+	}
+	from = m.sel - height/2
+	from = max(0, min(from, rows-height))
+	return from, from + height
 }
 
 // newTUIModel builds the model. Split out from main so the whole thing can be
 // driven by tests without a terminal — a bubbletea model is a pure function of
 // its messages, and "it compiles" is not evidence that it renders.
-func newTUIModel(dir, me, room string) *tuiModel {
+func newTUIModel(dir, me, room string, allRooms bool, since time.Duration) *tuiModel {
 	in := textinput.New()
 	in.Placeholder = "message…"
 	in.Prompt = "› "
 
 	return &tuiModel{
-		sock:  wire.Socket(dir),
-		jrnl:  wire.Journal(dir),
-		me:    me,
-		room:  room,
-		byKey: map[string]*convo{},
-		seen:  map[string]bool{},
-		input: in,
-		vp:    viewport.New(40, 10),
+		sock:     wire.Socket(dir),
+		jrnl:     wire.Journal(dir),
+		me:       me,
+		room:     room,
+		allRooms: allRooms,
+		since:    since,
+		byKey:    map[string]*convo{},
+		seen:     map[string]bool{},
+		input:    in,
+		vp:       viewport.New(40, 10),
 	}
 }
 
 func main() {
 	var as, room string
+	var since time.Duration
+	var oneRoom bool
 	// `user` is the default because this is the operator's window, and `user`
 	// is the handle mess already reserves for the human. An agent watching its
 	// own conversations passes --as.
 	flag.StringVar(&as, "as", envOr("MESS_AGENT", "user"), "identity to act as")
-	flag.StringVar(&room, "room", os.Getenv("MESS_ROOM"), "room to watch (default: global)")
+	flag.StringVar(&room, "room", os.Getenv("MESS_ROOM"), "watch only this room (default: every room)")
+	flag.DurationVar(&since, "since", tuiHistory, "how far back to load")
 	flag.Parse()
+	// Every room by default: this is the operator's view of a machine, and
+	// scoping it to one room is the narrower, deliberate ask.
+	oneRoom = room != ""
 
-	m := newTUIModel(wire.Dir(), as, room)
+	m := newTUIModel(wire.Dir(), as, room, !oneRoom, since)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "mess-tui:", err)
 		os.Exit(1)
