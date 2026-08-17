@@ -1205,6 +1205,49 @@ hook) — never a manual `recv --wait` loop alongside it.
 to clear the inbox, so a burst of messages wakes you back-to-back. The fleet
 unanimously judged that an acceptable price for never losing a message.
 
+## Terminal UI
+
+`mess-tui` is a chat-shaped window on the fleet — channels, DMs, presence,
+live. `mess tui` runs it.
+
+```
+#peri  (topic) — you are user
+channels        │ 15:04 trail
+ #broadcast     │   build is green
+ #peri          │
+                │ 15:06 you
+direct          │   on it
+ o fable        │
+› message…
+[channels] tab pane · j/k move · enter compose · esc back · ctrl+c quit
+```
+
+**It is a separate module** (`tui/`, with its own `go.mod`), and that is
+deliberate: mess itself has no dependencies, and a build tag cannot preserve
+that — `go mod tidy` considers every build configuration, so an import behind
+`//go:build tui` is still a requirement in `go.mod` and every `go build ./...`
+still fetches it. Only a separate module keeps the core clean. `mess tui`
+execs `mess-tui`; it is a handoff, not a dependency, and says how to build it
+if it is missing.
+
+```sh
+cd tui && go build -o ~/.local/bin/mess-tui .
+```
+
+**It reads the journal, not an inbox.** Every inbox read is destructive —
+`recv` consumes, `listen` would too — so a UI built on one would eat the
+operator's mail on every glance and compete with the auto-wake hook for the
+single receiver each agent gets. The journal is append-only: any number of
+viewers can follow it forever and take nothing away. It also shows more, since
+an inbox only holds what was addressed to you while the journal holds every
+topic the fleet is talking on. The trade is honest — this is a monitoring view
+that can also send, not a mail client, and it marks nothing read.
+
+The protocol lives in [`wire/`](wire/) so a separate module has something to
+talk to; `package main` is not importable. In mess itself those types are
+plain aliases (`type Message = wire.Message`), which is what made extracting
+them a rename rather than a rewrite.
+
 ## Development
 
 ```sh

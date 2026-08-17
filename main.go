@@ -103,6 +103,9 @@ Sending:
                                   something you can actually say
   mess invites                    invitations outstanding both ways: what you
                                   were offered, and what you await an answer to
+  mess tui                        chat-style terminal UI over the fleet's
+                                  traffic (channels, DMs, presence, live) —
+                                  reads the journal, so it consumes nothing
   mess sub <topic>                subscribe to a topic
   mess unsub <topic>              unsubscribe from a topic
   mess ask <agent> [q...]         send a question, wait for the reply (a plain
@@ -266,6 +269,8 @@ func main() {
 		err = cmdDecline(p, args)
 	case "invites":
 		err = cmdInvites(p, args)
+	case "tui", "ui":
+		err = cmdTUI(p, args)
 	case "sub", "unsub":
 		err = cmdSubUnsub(p, cmd, args)
 
