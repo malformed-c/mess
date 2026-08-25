@@ -691,3 +691,20 @@ func TestParseDisplayNameIsDisplayNamesInverse(t *testing.T) {
 		t.Error("a global-room name renders bare and must stay bare")
 	}
 }
+
+// `mess session-pid <anyone>` used to ignore its argument and confidently
+// return YOUR pid — answering a different question than the one asked, which is
+// the failure mode this whole tool has been burned by. Reported from the fleet:
+// an agent tried to attribute a peer with it and got itself back.
+func TestSessionPIDRefusesArgumentsInsteadOfIgnoringThem(t *testing.T) {
+	err := cmdSessionPID([]string{"trail-main"})
+	if err == nil {
+		t.Fatal("session-pid must refuse an argument rather than answer a different question")
+	}
+	if !strings.Contains(err.Error(), "whois") {
+		t.Fatalf("the refusal should name the command that DOES answer it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "trail-main") {
+		t.Fatalf("the refusal should quote what was ignored: %v", err)
+	}
+}

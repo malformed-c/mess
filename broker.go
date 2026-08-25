@@ -470,6 +470,38 @@ func (b *Broker) FindOtherRoom(callerRoom, bareName string) ([]string, bool) {
 	return rooms, len(rooms) > 0
 }
 
+// WhoIs answers "which agent owns this process". sessionPID must already be a
+// host-session pid (see hostSessionPIDFrom); this is the pure lookup half.
+//
+// It exists because a shared working tree cannot otherwise be attributed: every
+// agent commits under one name and `git status` renders them identically, so an
+// uncommitted change, a lock file, or a scratch file named after its writer has
+// no owner anyone can name. The two halves for answering that were already
+// here and simply not joined — ownership records the session's pid (for the
+// liveness probe), and a pid resolves to its session by walking /proc.
+//
+// alive reports whether that pid is STILL that session. A match on a dead
+// session is not wrong — the agent really did own it — but a recycled pid would
+// look identical, so the caller is told rather than left to assume.
+func (b *Broker) WhoIs(sessionPID int) (names []string, alive bool) {
+	if sessionPID == 0 {
+		return nil, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for key, o := range b.owners {
+		if o.pid != sessionPID {
+			continue
+		}
+		names = append(names, key)
+		if o.comm != "" && b.probeComm(o.pid) == o.comm {
+			alive = true
+		}
+	}
+	sort.Strings(names)
+	return names, alive
+}
+
 // IsOnline reports whether name currently looks alive — listening, working,
 // or recently active — the same signal `mess ps`'s Online column already
 // uses (aliveLocked). Exported so a caller like ask can fail fast against an

@@ -231,6 +231,10 @@ type Response struct {
 	// who they SHOULD have addressed without a second command.
 	Unreached []string `json:"unreached,omitempty"`
 	Members   []string `json:"members,omitempty"`
+	// SessionPID (whois) is the host session the queried pid resolved to, so the
+	// answer shows its own working rather than just a name.
+	SessionPID int `json:"sessionPid,omitempty"`
+
 	// Invite (accept/decline) reports what was joined or turned down, so the CLI
 	// can say so precisely. Received/Sent answer `mess invites`.
 	Invite   string          `json:"invite,omitempty"`

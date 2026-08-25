@@ -117,6 +117,25 @@ without typing `--as user` every time — a Claude Code session's own identity
 (set via `mess register`/its launch env) still takes priority, so this is safe
 to set globally.
 
+**Attributing a process** — `mess whois <pid>` names the agent whose session
+owns that process. Ownership already recorded each session's pid so liveness
+could be probed; this renders the map in the direction nothing exposed, which
+is `pid → name`.
+
+It resolves any descendant of a session, and the session process itself — that
+second case matters, because the obvious alternative route (read
+`CLAUDE_CODE_SESSION_ID` out of `/proc/<pid>/environ`, look it up under
+`~/.mess/ident/`) works for a tool subprocess but **not** for the agent
+process, whose own environ has that variable empty. Anything an in-process
+tool wrote is only reachable this way.
+
+**What it does not do**, because the fleet that asked for it said so first: it
+answers *"who is writing this right now"*, not *"who wrote this"*. A temporary
+file lives well under a second and leaves nothing behind, and a plain ` M` in
+`git status` an hour after the fact has no pid to resolve at all. It does not
+close attribution in a shared tree, and a `whois` that reports nothing is far
+more often "the moment passed" than "nobody did it".
+
 **Shell-eaten bodies** — bash runs an unescaped `` `backtick` `` or `$(...)`
 inside a double-quoted argument as a command substitution *before* `mess` is
 executed, so the body mess receives is already damaged. mess cannot detect that

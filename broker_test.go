@@ -2676,3 +2676,42 @@ func TestPendingInvitesListsBothDirectionsInOrder(t *testing.T) {
 		t.Fatalf("an answered invitation must leave the list, got %+v", r)
 	}
 }
+
+// WhoIs answers "which agent owns this process", which is the half of
+// attribution the daemon already held and never rendered: ownership records a
+// session's pid so liveness can be probed, and nothing exposed it in the
+// pid -> name direction.
+func TestWhoIsNamesTheAgentBehindASessionPID(t *testing.T) {
+	b := newTestBroker()
+	live := map[int]string{4242: "claude", 77: "claude"}
+	b.probeComm = func(pid int) string { return live[pid] }
+	b.RegisterOwned("trail-main", "sessT", 4242, false)
+	b.RegisterOwned(agentKey("coord", "helper"), "sessH", 77, false)
+
+	names, alive := b.WhoIs(4242)
+	if len(names) != 1 || names[0] != "trail-main" || !alive {
+		t.Fatalf("want trail-main, live; got %v alive=%v", names, alive)
+	}
+	// A room-scoped owner comes back under its composite key, so the caller can
+	// render room/name rather than a bare name that means nothing on its own.
+	if names, _ := b.WhoIs(77); len(names) != 1 || names[0] != agentKey("coord", "helper") {
+		t.Fatalf("want the composite key for a room-scoped agent, got %v", names)
+	}
+
+	// A session that has since exited still attributes — the agent really did
+	// own it — but says so, because a recycled pid looks identical.
+	delete(live, 4242)
+	if names, alive := b.WhoIs(4242); len(names) != 1 || alive {
+		t.Fatalf("a dead session should still name the owner, flagged not-live; got %v alive=%v", names, alive)
+	}
+
+	// Absence of evidence: an agent registered without a session id has no pid
+	// on record and must not be attributed to pid 0.
+	b.RegisterOwned("nopid", "sessN", 0, false)
+	if names, _ := b.WhoIs(0); len(names) != 0 {
+		t.Fatalf("pid 0 means 'not recorded' and must match nobody, got %v", names)
+	}
+	if names, _ := b.WhoIs(9999); len(names) != 0 {
+		t.Fatalf("an unknown pid must match nobody, got %v", names)
+	}
+}

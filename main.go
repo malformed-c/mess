@@ -36,6 +36,9 @@ Identity:
   mess islistening                exit 0 if you have an active listener, else 1
   mess session-pid                print the pid of the host agent process this
                                   session belongs to (exit 1 if undeterminable)
+  mess whois <pid>                name the agent whose session owns that
+                                  process — attributes an uncommitted change,
+                                  lock or scratch file in a shared tree
 
 Rooms (namespace isolation):
   mess room [join <room> | leave] print your current room, or join/leave one —
@@ -242,7 +245,9 @@ func main() {
 	case "islistening":
 		err = cmdIsListening(p, args)
 	case "session-pid":
-		err = cmdSessionPID()
+		err = cmdSessionPID(args)
+	case "whois":
+		err = cmdWhoIs(p, args)
 
 	// Rooms
 	case "room":
@@ -2083,12 +2088,51 @@ func cmdWhoami(p paths) error {
 // uses to decide whether a session is still alive, exposed so the shell hooks
 // can ask instead of re-implementing "which ancestor is the session" — two
 // copies of that rule would be free to drift apart.
-func cmdSessionPID() error {
+func cmdSessionPID(args []string) error {
+	// It took no arguments and IGNORED whatever it was given, so
+	// `mess session-pid trail-main` confidently returned YOUR pid — a different
+	// question, answered as if it were the one asked. It also swallowed --help,
+	// being the one command that never went through parseAnywhere.
+	fs := flag.NewFlagSet("session-pid", flag.ExitOnError)
+	parseAnywhere(fs, args)
+	if rest := fs.Args(); len(rest) > 0 {
+		return fmt.Errorf("session-pid takes no arguments and reports YOUR OWN session's pid — %q was ignored, which answered a different question than the one asked. To attribute someone else's process, use `mess whois <pid>`", strings.Join(rest, " "))
+	}
 	pid := hostSessionPID()
 	if pid == 0 {
 		os.Exit(1)
 	}
 	fmt.Println(pid)
+	return nil
+}
+
+// cmdWhoIs names the agent behind a process id.
+func cmdWhoIs(p paths, args []string) error {
+	fs := flag.NewFlagSet("whois", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	parseAnywhere(fs, args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: mess whois <pid>  — names the agent whose session owns that process")
+	}
+	pid, err := strconv.Atoi(rest[0])
+	if err != nil || pid <= 0 {
+		return fmt.Errorf("%q is not a pid", rest[0])
+	}
+	resp, err := call(p, Request{Op: "whois", SessionPID: pid})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"pid": pid, "sessionPid": resp.SessionPID, "agents": resp.Agents})
+	}
+	for _, a := range resp.Agents {
+		state := "session has since exited — a pid can be reused, so treat this as historical"
+		if a.Online {
+			state = "still that session"
+		}
+		fmt.Printf("%s (session pid %d, %s)\n", displayName(a.Room, a.Name), resp.SessionPID, state)
+	}
 	return nil
 }
 

@@ -626,6 +626,25 @@ func (d *daemon) dispatch(req Request) Response {
 	case "invites":
 		received, sent := b.PendingInvites(self)
 		return Response{OK: true, Received: received, Sent: sent, Count: len(received)}
+	case "whois":
+		// The walk happens in the daemon, not the client: /proc is only
+		// readable from this machine, and the daemon is the one holding the
+		// pid -> name half of the answer.
+		session := hostSessionPIDFrom(req.SessionPID)
+		if session == 0 {
+			return Response{Error: fmt.Sprintf("pid %d resolves to no live agent session — it may have exited, or it may never have been one (only a process descended from a claude/node/grok session can be attributed)", req.SessionPID)}
+		}
+		names, alive := b.WhoIs(session)
+		if len(names) == 0 {
+			return Response{Error: fmt.Sprintf("pid %d belongs to session pid %d, but no registered agent claims it — an agent that never registered with a session id has no pid on record", req.SessionPID, session)}
+		}
+		var agents []AgentInfo
+		for _, key := range names {
+			room, bare := splitAgentKey(key)
+			agents = append(agents, AgentInfo{Name: bare, Room: room, Online: alive})
+		}
+		elog("whois %d -> %s", req.SessionPID, strings.Join(names, ", "))
+		return Response{OK: true, Agents: agents, SessionPID: session}
 	case "sub":
 		// Same reservation as rejectSlashName does for agents: a topic whose
 		// literal name contained "/" would be indistinguishable from the

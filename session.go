@@ -30,8 +30,13 @@ const maxAncestorWalk = 32
 // hostSessionPID walks up from this process to the nearest host-agent ancestor
 // and returns its pid, or 0 if there is none — an unrecognized harness, or no
 // procfs. Callers must read 0 as "can't tell", never as "dead".
-func hostSessionPID() int {
-	pid := os.Getppid()
+func hostSessionPID() int { return hostSessionPIDFrom(os.Getppid()) }
+
+// hostSessionPIDFrom is the same walk starting anywhere, so a pid found in the
+// wild — a lock file, a scratch file named after its writer — can be resolved
+// to the session that owns it. Inclusive: the pid handed in may already BE the
+// host agent, which is the case for anything a tool wrote in-process.
+func hostSessionPIDFrom(pid int) int {
 	for range maxAncestorWalk {
 		if pid <= 1 {
 			return 0
