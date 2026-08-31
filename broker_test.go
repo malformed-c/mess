@@ -419,6 +419,30 @@ func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	}
 }
 
+// Ps must carry the owning session's pid: it is the only key a client can join
+// against other per-session registries (Claude Code's own cross-session records
+// are keyed by pid and know nothing about mess names). Without it `mess ps`
+// silently reports every session as having no mess identity.
+func TestPsReportsTheOwningSessionPID(t *testing.T) {
+	b := newTestBroker()
+	if ok, _ := b.RegisterOwned("bob", "sess-1", 4242, false); !ok {
+		t.Fatal("registration was refused")
+	}
+	b.Register("anon") // no owner recorded
+
+	agents, _ := b.Ps("", false)
+	seen := map[string]int{}
+	for _, a := range agents {
+		seen[a.Name] = a.SessionPID
+	}
+	if seen["bob"] != 4242 {
+		t.Fatalf("owner pid should reach the client, got %d", seen["bob"])
+	}
+	if seen["anon"] != 0 {
+		t.Fatalf("an unowned agent must report 0, not a stale pid, got %d", seen["anon"])
+	}
+}
+
 func TestPsReportsOldestPending(t *testing.T) {
 	b := newTestBroker() // clock fixed at time.Unix(0,0)
 	b.Register("bob")

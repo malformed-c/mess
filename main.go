@@ -2362,6 +2362,7 @@ func cmdPs(p paths, args []string) error {
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	room := fs.String("room", "", "show this room instead of your own")
 	all := fs.Bool("all", false, "show every room")
+	noCC := fs.Bool("no-cc", false, "omit Claude Code session info")
 	parseAnywhere(fs, args)
 	resp, err := call(p, Request{Op: "ps", Room: *room, All: *all})
 	if err != nil {
@@ -2380,6 +2381,17 @@ func cmdPs(p paths, args []string) error {
 		displayAgent = func(a AgentInfo) string { return displayName(a.Room, a.Name) }
 		displayTopic = func(t TopicInfo) string { return displayName(t.Room, t.Name) }
 	}
+	// Join against Claude Code's own session registry so one machine reads as one
+	// roster. Empty when it isn't installed or --no-cc is set, in which case
+	// every annotation below simply doesn't render.
+	var cc map[int]ccSession
+	var ccAll []ccSession
+	if !*noCC {
+		ccAll = ccSessions()
+		cc = ccByPID(ccAll)
+	}
+	claimed := make(map[int]bool, len(cc))
+
 	if len(resp.Agents) == 0 {
 		fmt.Println("no agents")
 	} else {
@@ -2408,11 +2420,49 @@ func cmdPs(p paths, args []string) error {
 			if len(a.Topics) > 0 {
 				line += "  [" + strings.Join(a.Topics, ", ") + "]"
 			}
+			// Annotate with the Claude Code session behind this identity. The
+			// name is shown only when it differs, so the common case (both
+			// systems agreeing, e.g. after setting CLAUDE_CODE_SESSION_NAME)
+			// stays quiet instead of printing the same word twice.
+			if s, ok := cc[a.SessionPID]; ok && a.SessionPID != 0 {
+				claimed[a.SessionPID] = true
+				line += ccAnnotation(a.Name, s)
+			}
 			if a.State != "" {
 				line += "  — " + a.State
 			}
 			if a.Warning != "" {
 				line += "  ⚠ " + a.Warning
+			}
+			fmt.Println(line)
+		}
+	}
+	printOrphanCC := func() {
+		// Claude Code sessions with no mess identity: reachable by SendMessage
+		// but invisible to every mess command, which is precisely the gap worth
+		// showing.
+		var orphans []ccSession
+		for _, s := range ccAll {
+			if !claimed[s.PID] {
+				orphans = append(orphans, s)
+			}
+		}
+		if len(orphans) == 0 {
+			return
+		}
+		width := 0
+		for _, s := range orphans {
+			width = max(width, len(s.Name))
+		}
+		fmt.Println("claude code sessions (no mess identity):")
+		for _, s := range orphans {
+			reach := "unreachable"
+			if s.Addressable() {
+				reach = "addressable"
+			}
+			line := fmt.Sprintf("  %-*s %-11s %-6s pid %d", width, s.Name, reach, s.Status, s.PID)
+			if s.CWD != "" {
+				line += "  " + compactHome(s.CWD)
 			}
 			fmt.Println(line)
 		}
@@ -2438,6 +2488,7 @@ func cmdPs(p paths, args []string) error {
 				br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
 		}
 	}
+	printOrphanCC()
 	return nil
 }
 

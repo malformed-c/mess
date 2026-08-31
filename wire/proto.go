@@ -175,6 +175,11 @@ type AgentInfo struct {
 	State     string    `json:"state,omitempty"`     // self-reported working state
 	Warning   string    `json:"warning,omitempty"`   // transient status warning (auto-clears)
 	Oldest    time.Time `json:"oldest,omitzero"`     // arrival time of the oldest pending message
+	// SessionPID is the host session process this identity belongs to, or 0 when
+	// it can't be determined. Exposed so a client can join the roster against
+	// other per-session registries — notably Claude Code's own cross-session
+	// records, which are keyed by pid and know nothing about mess names.
+	SessionPID int `json:"sessionPid,omitempty"`
 }
 
 // TopicInfo is reported by the `ps` op.

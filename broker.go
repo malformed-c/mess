@@ -2160,7 +2160,7 @@ func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 		if w, ok := b.warnings[key]; ok && w.until.After(b.now()) {
 			warning = w.text // expired warnings are simply not reported
 		}
-		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.workingLocked(key), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest})
+		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.workingLocked(key), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest, SessionPID: b.owners[key].pid})
 	}
 	sort.Slice(agents, func(i, j int) bool {
 		return roomThenNameLess(agents[i].Room, agents[i].Name, agents[j].Room, agents[j].Name)
