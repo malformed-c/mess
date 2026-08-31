@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -407,6 +409,92 @@ func TestSteerNoticeIsStampedAndIdentifiesTheMail(t *testing.T) {
 	}
 	if strings.Contains(got, "still unread") {
 		t.Fatalf("the present-tense wording is what made a stale line misleading: %q", got)
+	}
+}
+
+// A bare count made the agent spend a `mess recv` just to learn whether the mail
+// was worth interrupting for — one wasted tool call on the busiest path. The
+// notice now previews short bodies, while leaving them queued.
+func TestSteerNoticeInlinesShortBodies(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "the build is green")
+
+	got := e.steer("victim", "MESS_STEER_RENOTIFY=1")
+	if !strings.Contains(got, "the build is green") {
+		t.Fatalf("body was not inlined, agent must still round-trip to read it: %q", got)
+	}
+	if !strings.Contains(got, "sender") {
+		t.Fatalf("preview should attribute the sender: %q", got)
+	}
+	// The whole point of peeking: a preview must not consume the mail.
+	if out := e.mess("victim", "recv"); !strings.Contains(out, "the build is green") {
+		t.Fatalf("previewing ate the message; recv returned %q", out)
+	}
+}
+
+// Inlining must not let a long or multi-line body wreck the notice's shape, and
+// a big batch must not dump everything into the turn.
+func TestSteerInlineTruncatesAndCapsTheBatch(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "first line\nsecond line\nthird line")
+	for i := range 5 {
+		e.mess("sender", "send", "victim", fmt.Sprintf("filler %d", i))
+	}
+
+	got := e.steer("victim", "MESS_STEER_RENOTIFY=1", "MESS_STEER_INLINE_N=2", "MESS_STEER_INLINE_MAX=12")
+	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+		if len(line) > 400 {
+			t.Fatalf("a body escaped truncation and blew up a line: %q", line)
+		}
+	}
+	if strings.Contains(got, "second line") {
+		t.Fatalf("multi-line body was not squashed/truncated: %q", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Fatalf("over-long body should be elided with an ellipsis: %q", got)
+	}
+	if !strings.Contains(got, "(+4 more)") {
+		t.Fatalf("messages beyond the inline cap should still be counted: %q", got)
+	}
+}
+
+// A body full of shell metacharacters must not corrupt the notice — jq renders
+// it, nothing is re-evaluated by the shell.
+func TestSteerInlineSurvivesShellMetacharacters(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "run `rm -rf /` and $(echo pwned) \"quoted\"")
+
+	got := e.steer("victim", "MESS_STEER_RENOTIFY=1")
+	if strings.Contains(got, "pwned\n") || !strings.Contains(got, "$(echo pwned)") {
+		t.Fatalf("body was not carried through literally: %q", got)
+	}
+	var probe map[string]any
+	line := strings.SplitN(strings.TrimSpace(got), "\n", 2)[0]
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &probe); err != nil {
+		t.Fatalf("notice is not valid JSON (%v); first line %q", err, line)
+	}
+}
+
+// The count-only notice stays available: MESS_STEER_INLINE=0 restores it for
+// anyone who wants the terser line.
+func TestSteerInlineCanBeDisabled(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "the build is green")
+
+	got := e.steer("victim", "MESS_STEER_RENOTIFY=1", "MESS_STEER_INLINE=0")
+	if strings.Contains(got, "the build is green") {
+		t.Fatalf("MESS_STEER_INLINE=0 should suppress bodies: %q", got)
+	}
+	if !strings.Contains(got, "1 unread peer message") {
+		t.Fatalf("count notice should still fire: %q", got)
 	}
 }
 

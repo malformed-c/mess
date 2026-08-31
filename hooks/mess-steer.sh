@@ -4,7 +4,16 @@
 # Injects a small "N unread peer message(s)" NOTICE into the RUNNING turn (as
 # additionalContext) so the agent learns mid-turn — at its next tool call — that
 # peers have messaged it, instead of finding out only at the next idle auto-wake.
-# It does NOT dump message bodies; the agent reads them with `mess recv`.
+#
+# Short bodies are inlined. A count alone ("N unread") forced a `mess recv` round
+# trip before the agent knew whether the mail was worth interrupting for — one
+# extra tool call on the busiest path, spent just to find out. Claude Code's own
+# cross-session steer inlines the full envelope at the same boundary and costs
+# nothing, which is what made the asymmetry obvious. So: first line of each of
+# the first MESS_STEER_INLINE_N messages, truncated to MESS_STEER_INLINE_MAX
+# chars, with the remainder left as a count. Set MESS_STEER_INLINE=0 for the old
+# count-only notice. Bodies are still PEEKED, never consumed — `mess recv`
+# returns them in full, so inlining a preview cannot lose mail.
 #
 # Dedup is by newest message id (monotonic), not count: a genuinely new message
 # always has a higher id, so this fires once per new arrival and never misses one
@@ -57,6 +66,9 @@ _common="$(dirname "$0")/mess-common.sh"
 
 RENOTIFY=${MESS_STEER_RENOTIFY:-120}          # seconds before the FIRST re-announce
 RENOTIFY_MAX=${MESS_STEER_RENOTIFY_MAX:-900}  # ...doubling up to this ceiling
+INLINE=${MESS_STEER_INLINE:-1}                # 0 = count only, no bodies
+INLINE_N=${MESS_STEER_INLINE_N:-3}            # how many bodies to preview
+INLINE_MAX=${MESS_STEER_INLINE_MAX:-160}      # chars per previewed body
 
 statedir="${TMPDIR:-/tmp}"
 errf="$statedir/mess-steer-$who.err"  # marks an outage already reported
@@ -158,6 +170,35 @@ elif [ "$((now - prev_at))" -ge "$wait" ]; then
 else
   exit 0
 fi
-emit "[mess] $(date +%H:%M:%S) — $n unread peer message(s)$asknote, newest m$maxid. Run \`mess recv\` to read them."
+# Preview bodies. Each is squashed to a single line — a multi-line body would
+# break the notice's shape — and truncated. jq does the rendering so a body
+# containing quotes or backticks cannot corrupt the notice (the same class of
+# bug that made agents complain about backticks in the first place).
+preview=""
+if [ "$INLINE" != "0" ]; then
+  preview=$(printf '%s\n' "$json" | jq -rs --argjson k "$INLINE_N" --argjson w "$INLINE_MAX" '
+    .[0:$k][] |
+    ((.body // "") | gsub("\\s+"; " ") | sub("^ +"; "") | sub(" +$"; "")) as $b |
+    "  " + (.from // "?")
+      + (if .topic then " #" + .topic else "" end)
+      + (if .ask then " (asks)" else "" end)
+      + ": "
+      + (if ($b | length) > $w then ($b[0:$w] + "…") else $b end)
+  ' 2>/dev/null)
+  more=$((n - INLINE_N))
+  if [ "$more" -gt 0 ] && [ -n "$preview" ]; then
+    preview=$(printf '%s\n  (+%d more)\n' "$preview" "$more")
+  fi
+fi
+
+head="[mess] $(date +%H:%M:%S) — $n unread peer message(s)$asknote, newest m$maxid."
+if [ -n "$preview" ]; then
+  # "still queued" matters: these were peeked, so the agent must know the notice
+  # is a preview and the mail is still waiting to be consumed.
+  emit "$head Previews below — still queued, \`mess recv\` to consume:
+$preview"
+else
+  emit "$head Run \`mess recv\` to read them."
+fi
 printf '%s %s %s\n' "$maxid" "$now" "$repeats" > "$statef"
 exit 0
