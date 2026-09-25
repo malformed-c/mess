@@ -32,7 +32,8 @@ import (
 //   - CLAUDE_CODE_SESSION_ID — Claude Code
 //   - CODEX_THREAD_ID        — OpenAI Codex CLI
 //   - GROK_SESSION_ID        — Grok Build (injected into hook processes)
-var sessionEnvVars = []string{"MESS_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "GROK_SESSION_ID"}
+//   - DSH_SESSION_ID         — DeepSeek Harness (dsh)
+var sessionEnvVars = []string{"MESS_SESSION_ID", "DSH_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "GROK_SESSION_ID"}
 
 // sessionID returns the host agent's session identifier, or "" when run outside
 // a recognized agent (e.g. a plain shell). It is the sole key for identity: it is
@@ -62,6 +63,38 @@ func firstEnv(names []string) string {
 	return ""
 }
 
+// stateKey reduces a session id to a safe state-file name. Host session ids
+// are opaque: harnesses may label them ("dsh:session-<uuid>"), and a slash or
+// dash-heavy id would break filepath.Base'd keys or truncate at the first
+// dash. Sanitize to [A-Za-z0-9._-], collapse runs of "-" to "_", and bound
+// the length so long UUID-shaped ids stay filesystem-friendly.
+func stateKey(sid string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range sid {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_':
+			b.WriteRune(r)
+			prevDash = false
+		case r == '-':
+			if !prevDash && b.Len() > 0 {
+				b.WriteRune('-')
+			}
+			prevDash = true
+		default:
+			// path separators, colons, spaces, anything hostile: drop it
+		}
+	}
+	key := strings.Trim(b.String(), "-")
+	if len(key) > 120 {
+		key = key[:120]
+	}
+	if key == "" {
+		key = "anon"
+	}
+	return key
+}
+
 // identityPath returns the file storing this session's mess identity, or "" if
 // there's no session id to key on (run outside a supported agent).
 func identityPath(p paths) string {
@@ -69,7 +102,7 @@ func identityPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
-	return filepath.Join(p.dir, "ident", filepath.Base(sid))
+	return filepath.Join(p.dir, "ident", stateKey(sid))
 }
 
 // readIdentity returns the persisted mid-session identity for this session id, or
@@ -127,7 +160,7 @@ func roomPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
-	return filepath.Join(p.dir, "room", filepath.Base(sid))
+	return filepath.Join(p.dir, "room", stateKey(sid))
 }
 
 // readRoom returns the persisted room for this session id, or "" (the

@@ -213,8 +213,9 @@ unsatisfied, with a perfectly good answer sitting unread in their inbox.
 `recv`/`export`/`log` all prepend a `[question <id> — answer with mess reply,
 or @mention the asker]` marker to an ask's rendering (from the *answerer's*
 point of view it reads as "a question", not internal "ask" jargon), and the
-auto-wake injection (and, if you're mid-turn, the steer notice's unread count)
-calls it out the same way, so the recipient learns this before answering.
+auto-wake injection (and, if you're mid-turn, the steer notice — which marks
+the previewed line `(asks)`) calls it out the same way, so the recipient learns
+this before answering.
 
 **Threads** — `mess send`/`mess pub --thread <id>` tags a message as a reply
 within thread `<id>` (the root message's own id, e.g. `m42`). Replies are
@@ -641,6 +642,16 @@ different, still-live session — so two agents can't both grab `alice` and shar
 inbox. Pass `--force` to take over. A name whose owner has gone offline can be
 taken without `--force`.
 
+**Second-name guard.** `mess register <name>` also refuses a *different* name
+from a session that already holds one. That used to succeed silently: the
+session's identity flipped to the new name, and the old identity's inbox kept
+filling with nothing reading it — from the outside indistinguishable from a
+dead steer hook (a live incident: a diagnostic `register` from a session that
+was `mess-dev` stranded 44 messages). Re-asserting the *same* name stays a
+no-op, which is what the `SessionStart` hook does on every launch. To change
+your name use `mess rename <name>`, which migrates the inbox; `mess unregister`
+first if you genuinely want a fresh identity.
+
 **Ownership gate (defense in depth).** The daemon binds each name to the host
 session id that owns it and enforces that binding on *every* identity-asserting
 op — `send`, `recv`, `sub`, `busy`, … — not just `register`. If a different live
@@ -691,7 +702,9 @@ mess drain periapsis                 # clear another agent's stuck inbox (keeps 
 mess cleanup                         # prune dead agents (idle >24h, or mail undrained >24h)
 mess cleanup 2h --dry-run            # ...custom age; preview without removing
 mess ps                              # who's around: status (listening/working),
-                                     # queue depth + age of oldest unread, topics, state
+                                     # queue depth + age of oldest unread, topics, state,
+                                     # + [cc] if Claude Code's SendMessage can reach it
+mess ps --no-cc                      # ...without the Claude Code session join
 mess ping                            # is the daemon up? (auto-starts it)
 mess stop                            # shut the daemon down
 ```
@@ -727,6 +740,35 @@ dead client. Removing or renaming an agent (`rm`, `rename`, `unregister`,
 instead of lingering as a ghost listener under the old name (and being resurrected
 on a daemon restart). When an agent has unread mail it also shows the **age of the oldest
 unread message** (e.g. `2 pending (oldest 3m)`).
+
+**Claude Code's own roster, joined in.** Claude Code now has native
+cross-session messaging (`SendMessage`/`ListAgents`), so a session on this
+machine can be reached two ways, and the two rosters disagree — Claude Code
+names a session after its working directory plus a random suffix
+(`~/claude` → `claude-bf`), regenerated every launch, while mess names say what
+the agent is *for*. `mess ps` reads Claude Code's per-session records
+(`~/.claude/sessions/<pid>.json`) and joins them on the owning pid, so one
+machine reads as one roster:
+
+```
+uring-bpf    online  idle      0 pending  [cc: claude-bf]
+coordinator  online  working   2 pending  [cc: no socket]
+claude code sessions (no mess identity):
+  greenfield-binary-swing unreachable busy   pid 138923  ~/git/greenfield
+```
+
+`[cc]` means native `SendMessage` can deliver to that agent; `[cc: no socket]`
+means the session is alive — mess reaches it fine — but predates cross-session
+messaging, so `SendMessage` cannot. That difference is deliverability, not
+decoration. The Claude Code name is echoed only when it differs; set
+`CLAUDE_CODE_SESSION_NAME` to your mess name at launch and the two agree. Live
+Claude Code sessions with no mess identity are listed at the end, since they
+are exactly the ones nothing in mess can address. It is a best-effort read of
+another tool's private files: a missing directory, a malformed record, or a
+recorded socket that no longer exists each degrade to "nothing known", never an
+error; crashed sessions (record left behind, process gone) are skipped so the
+stale-presence problem doesn't come back through the side door. `--no-cc`
+omits the join.
 
 `mess ps` is scoped to your own room by default (see [Rooms](#rooms)) —
 identical output to a pre-rooms `mess` if you've never joined one. `--all`
@@ -948,15 +990,31 @@ Auto-wake delivers at *idle*. To have a peer's message reach an agent **while it
 mid-turn** (like typing into a running session), there are two options:
 
 - **Steer hook (default).** [`hooks/mess-steer.sh`](hooks/mess-steer.sh) is a
-  `PreToolUse` hook (POSIX `sh`) that injects a small **unread-count notice**
-  (`[mess] N unread peer message(s) as of this tool call — run mess recv`) into the
-  running turn as `additionalContext`, so the agent learns at its next tool call
-  that peers have messaged it and reads them itself with `mess recv`. It peeks
-  (doesn't consume) and dedups by **newest message id** (monotonic), so it fires
-  once per genuinely new arrival — never repeating on later tool calls, and never
-  *missing* a new message just because the unread count matched after a `recv`.
-  Dedup is **time-bounded as well**: while the same mail stays unread the notice
-  repeats at most once a minute. Watermarking on id alone made this
+  `PreToolUse` hook (POSIX `sh`) that injects a short notice into the running
+  turn as `additionalContext`, so the agent learns at its next tool call that
+  peers have messaged it — and, since a bare count told it nothing about
+  whether acting was worth a tool call, **what they said**:
+
+  ```
+  [mess] 13:22:09 — 4 unread peer message(s), newest m4. Previews below — still queued, `mess recv` to consume:
+    sender: the build is green on main
+    codex-velocity (asks): need your review before I merge the lease refactor
+    sender: third one, to prove the overflow counter works
+    (+1 more)
+  ```
+
+  First line of each of the first three messages, 160 characters each, rendered
+  by `jq` so a body full of backticks or `$()` can't corrupt the notice
+  (`MESS_STEER_INLINE=0` for the count-only line, `_N`/`_MAX` to tune). It was
+  added after an agent sat blocked for six minutes on an answer that was in its
+  inbox the whole time, having been told twice that it had "1 unread" and
+  deferring the fetch each time. It peeks (doesn't consume — `mess recv` still
+  returns everything in full) and dedups by **newest message id** (monotonic),
+  so it fires once per genuinely new arrival — never repeating on later tool
+  calls, and never *missing* a new message just because the unread count matched
+  after a `recv`. Dedup is **time-bounded as well**: while the same mail stays
+  unread the notice repeats, backing off (2 min, doubling to a 15 min ceiling)
+  so a long build doesn't turn it into decoration. Watermarking on id alone made this
   fire-and-forget — the marker advanced the moment the notice was *printed*, with
   no confirmation the agent saw it, so a single dropped injection meant that
   message was never mentioned again. A failed peek is reported as a notice rather

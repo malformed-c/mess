@@ -1075,3 +1075,50 @@ func TestRoomInviteRefusesToMoveYouSilently(t *testing.T) {
 		t.Fatalf("--force should complete the move: %q", out)
 	}
 }
+
+// A session that already holds a name and registers a DIFFERENT one used to
+// succeed silently: the ident file flipped, and the first identity's inbox kept
+// filling with nothing reading it — indistinguishable from a dead steer hook.
+// Self-inflicted live incident (31.08.26): a diagnostic `register steer-probe`
+// from the session that was mess-dev stranded 44 messages. `mess rename` is
+// the supported way to change a name and keeps the inbox, so register now
+// refuses and points there.
+func TestRegisterRefusesASecondNameForTheSameSession(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("sender", "register", "sender")
+	e.mess("sender", "send", "victim", "mail that must stay reachable")
+
+	out, err := e.command("victim", "register", "steer-probe").CombinedOutput()
+	if err == nil {
+		t.Fatalf("registering a second name from the same session should be refused, got: %s", out)
+	}
+	if !strings.Contains(string(out), "already") || !strings.Contains(string(out), "mess rename steer-probe") {
+		t.Fatalf("refusal should name the current identity and the rename path: %s", out)
+	}
+	// Refused BEFORE the daemon saw it: no phantom agent, and the identity and
+	// its mail are untouched.
+	if ps := e.mess("victim", "ps"); strings.Contains(ps, "steer-probe") {
+		t.Fatalf("the refused name must not reach the daemon: %s", ps)
+	}
+	if who := strings.TrimSpace(e.mess("victim", "whoami")); who != "victim" {
+		t.Fatalf("identity should be untouched, whoami = %q", who)
+	}
+	if got := e.mess("victim", "recv"); !strings.Contains(got, "mail that must stay reachable") {
+		t.Fatalf("inbox went unreachable: %q", got)
+	}
+}
+
+// The guard must not break the two things that legitimately re-touch identity:
+// re-asserting the SAME name (what the SessionStart hook does every launch) and
+// `mess rename`, the sanctioned way to change it.
+func TestRegisterSameNameAndRenameStillWork(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("victim", "register", "victim")
+	e.mess("victim", "register", "victim") // idempotent, like the hook
+	e.mess("victim", "register")           // bare re-validation
+	e.mess("victim", "rename", "survivor")
+	if who := strings.TrimSpace(e.mess("victim", "whoami")); who != "survivor" {
+		t.Fatalf("rename should still change identity, whoami = %q", who)
+	}
+}

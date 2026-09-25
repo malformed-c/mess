@@ -32,7 +32,7 @@ func lastMsgPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
-	return filepath.Join(p.dir, "lastmsg", filepath.Base(sid))
+	return filepath.Join(p.dir, "lastmsg", stateKey(sid))
 }
 
 func readLastMsg(p paths) (lastMsgInfo, bool) {
@@ -75,7 +75,7 @@ func openThreadPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
-	return filepath.Join(p.dir, "openthread", filepath.Base(sid))
+	return filepath.Join(p.dir, "openthread", stateKey(sid))
 }
 
 func readOpenThread(p paths) (openThreadInfo, bool) {

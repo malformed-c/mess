@@ -23,7 +23,9 @@ Usage:
 
 Identity:
   mess register [name]            join the network; with a name, set this
-                                  session's identity (persists across turns);
+                                  session's identity (persists across turns;
+                                  refuses a DIFFERENT name once one is set —
+                                  that strands the old inbox — use rename);
                                   auto-joins the room a repo's mess.json
                                   names, if the calling git repo has one and
                                   no room is already chosen (see Rooms
@@ -154,7 +156,11 @@ Receiving and threads:
 Status:
   mess ps [--room NAME | --all]    list agents and topics (online/offline +
                                   working/listening/idle status); scoped to
-                                  your own room by default
+                                  your own room by default. Also joins Claude
+                                  Code's own session registry: [cc] marks an
+                                  agent reachable by its SendMessage, and a
+                                  trailing section lists Claude Code sessions
+                                  with no mess identity (--no-cc to omit)
   mess state [text...]            set your working state (shown in ps); --clear to clear
   mess warn [text...]             set a transient status warning (auto-clears when
                                   you're next active; --ttl DUR, --clear)
@@ -178,8 +184,9 @@ Admin and daemon:
 Identity resolution (most to least specific):
   1. --as NAME on the command
   2. a mid-session name set via "mess register <name>" — persisted per host
-     session (keyed on the first of $MESS_SESSION_ID, $CLAUDE_CODE_SESSION_ID,
-     or $CODEX_THREAD_ID), so it survives across turns, compaction, and resume
+     session (keyed on the first of $MESS_SESSION_ID, $DSH_SESSION_ID,
+     $CLAUDE_CODE_SESSION_ID, or $CODEX_THREAD_ID), so it survives across
+     turns, compaction, and resume
   3. the MESS_AGENT environment variable (set at launch)
 
 Room resolution (same order, independently of identity):
@@ -1452,6 +1459,22 @@ func cmdRegister(p paths, args []string) error {
 	autoRoom := ""
 	if newName != "" && resolveRoom(p, "") == "" {
 		autoRoom = detectRepoRoom(".")
+	}
+
+	// A session that already holds a DIFFERENT name is almost certainly making
+	// a mistake, and a quiet one: the daemon accepts the new name, the ident
+	// file flips to it, and the old identity's inbox keeps filling with nothing
+	// reading it — from the outside that is indistinguishable from a dead steer
+	// hook. Hit live 31.08.26, self-inflicted: a diagnostic `register
+	// steer-probe` from the session that was mess-dev, 44 messages stranded.
+	// `mess rename` is the supported way to change name and migrates the inbox;
+	// `mess unregister` first if a fresh identity really is wanted. Only a
+	// different name is refused — re-asserting the same one must stay a no-op,
+	// because that is what the SessionStart hook does on every launch.
+	if newName != "" {
+		if cur := readIdentity(p); cur != "" && cur != newName {
+			return fmt.Errorf("this session is already %q — `mess rename %s` changes your name and keeps your inbox; `mess unregister` first if you really want to start over", cur, newName)
+		}
 	}
 
 	req := Request{Op: "register", As: name, Force: *force}
