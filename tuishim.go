@@ -21,14 +21,18 @@ func cmdTUI(_ paths, args []string) error {
 			"(it pulls in bubbletea, which mess itself deliberately does not). Build it with:\n" +
 			"  cd " + repoHint() + "/tui && go build -o ~/.local/bin/mess-tui .")
 	}
+
 	cmd := exec.Command(bin, args...)
+
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			os.Exit(ee.ExitCode())
 		}
+
 		return fmt.Errorf("running mess-tui: %w", err)
 	}
+
 	return nil
 }
 
@@ -39,5 +43,6 @@ func repoHint() string {
 			return wd
 		}
 	}
+
 	return "<mess repo>"
 }

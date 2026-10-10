@@ -23,9 +23,11 @@ var userHandles = sync.OnceValue(func() map[string]bool {
 	if u, err := user.Current(); err == nil && u.Username != "" {
 		handles[strings.ToLower(u.Username)] = true
 	}
+
 	if env := os.Getenv("USER"); env != "" {
 		handles[strings.ToLower(env)] = true
 	}
+
 	return handles
 })
 
@@ -48,6 +50,7 @@ func matchesTargets(body string, targets map[string]bool) (string, bool) {
 			return tok, true
 		}
 	}
+
 	return "", false
 }
 
@@ -59,12 +62,15 @@ func userNotice(from, to, body string) (summary string, ok bool) {
 	if from == "" {
 		from = "someone"
 	}
+
 	if isUserHandle(to) {
 		return fmt.Sprintf("mess: %s messaged you", from), true
 	}
+
 	if h, ok := mentionsUser(body); ok {
 		return fmt.Sprintf("mess: %s mentioned @%s", from, h), true
 	}
+
 	return "", false
 }
 
@@ -76,10 +82,12 @@ func notifyUser(from, to, body string) {
 	if !notifyEnabled {
 		return
 	}
+
 	summary, ok := userNotice(from, to, body)
 	if !ok {
 		return
 	}
+
 	desktopNotify(summary, body)
 	bridgeIfAway(summary, body)
 }
@@ -93,9 +101,11 @@ func notifyUserLoud(from, body string) {
 	if !notifyEnabled {
 		return
 	}
+
 	if from == "" {
 		from = "someone"
 	}
+
 	summary := fmt.Sprintf("mess: %s broadcast (loud)", from)
 	desktopNotify(summary, body)
 	bridgeIfAway(summary, body)
@@ -132,6 +142,7 @@ func bridgeIfAway(summary, body string) {
 	if !bridgeEnabled || !presenceAway() {
 		return
 	}
+
 	kdeconnectBridge(summary, body)
 }
 
@@ -141,6 +152,7 @@ func kdeconnectDevice() string {
 	if d := os.Getenv("MESS_KDECONNECT_DEVICE"); d != "" {
 		return d
 	}
+
 	return "engipixel"
 }
 
@@ -154,11 +166,14 @@ var kdeconnectBridge = func(summary, body string) {
 	if err != nil {
 		return // kdeconnect not installed — best effort
 	}
+
 	msg := summary
 	if body != "" {
 		msg = summary + ": " + truncate(body, 200)
 	}
+
 	cmd := exec.Command(path, "--name", kdeconnectDevice(), "--ping-msg", msg)
+
 	if err := cmd.Start(); err != nil {
 		dlog("kdeconnect-cli failed: %v", err)
 		return
@@ -182,7 +197,9 @@ var notifySend = func(summary, body string) {
 	if err != nil {
 		return // no notifier available (e.g. headless) — best effort
 	}
+
 	cmd := exec.Command(path, "-a", "mess", "-i", "dialog-information", summary, body)
+
 	if err := cmd.Start(); err != nil {
 		dlog("notify-send failed: %v", err)
 		return
@@ -196,5 +213,6 @@ func truncate(s string, n int) string {
 	if len(r) <= n {
 		return s
 	}
+
 	return string(r[:n]) + "…"
 }

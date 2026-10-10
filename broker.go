@@ -151,6 +151,7 @@ func (i inviteInfo) what() string {
 	if i.topic != "" {
 		return "#" + i.topic
 	}
+
 	return roomLabel(i.room)
 }
 
@@ -215,6 +216,7 @@ func (br *bridge) otherSide(key string) (string, bool) {
 	case br.b:
 		return br.a, br.dir == bridgeBoth || br.dir == bridgeBToA
 	}
+
 	return "", false
 }
 
@@ -223,6 +225,7 @@ func (br *bridge) otherSide(key string) (string, bool) {
 func (br *bridge) describeFrom(key string) string {
 	other, _ := br.otherSide(key)
 	oRoom, oTopic := splitTopicKey(other)
+
 	dir := br.dir.String()
 	if key == br.b {
 		// Flip the label's sense so it always reads relative to the caller's side.
@@ -233,6 +236,7 @@ func (br *bridge) describeFrom(key string) string {
 			dir = "out"
 		}
 	}
+
 	return fmt.Sprintf("%s (%s)", displayName(oRoom, "#"+oTopic), dir)
 }
 
@@ -264,8 +268,10 @@ func NewBroker() *Broker {
 func (b *Broker) WatchEvict(name string) chan struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	ch := make(chan struct{})
 	b.evicts[name] = append(b.evicts[name], ch)
+
 	return ch
 }
 
@@ -273,6 +279,7 @@ func (b *Broker) WatchEvict(name string) chan struct{} {
 func (b *Broker) UnwatchEvict(name string, ch chan struct{}) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	chans := b.evicts[name]
 	for i, c := range chans {
 		if c == ch {
@@ -280,6 +287,7 @@ func (b *Broker) UnwatchEvict(name string, ch chan struct{}) {
 			break
 		}
 	}
+
 	if len(b.evicts[name]) == 0 {
 		delete(b.evicts, name)
 	}
@@ -291,6 +299,7 @@ func (b *Broker) evictWaitersLocked(name string) {
 	for _, ch := range b.evicts[name] {
 		close(ch)
 	}
+
 	delete(b.evicts, name)
 }
 
@@ -305,6 +314,7 @@ func (b *Broker) evictWaitersLocked(name string) {
 func (b *Broker) EndSession(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	delete(b.busyUntil, name)
 	b.evictWaitersLocked(name)
 }
@@ -314,13 +324,16 @@ func (b *Broker) EndSession(name string) {
 func (b *Broker) SetWarn(name, text string, ttl time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.ensure(name)
+
 	if text == "" {
 		delete(b.warnings, name)
 	} else {
 		b.warnings[name] = warnInfo{text: text, until: b.now().Add(ttl)}
 		b.touch(name)
 	}
+
 	b.changed()
 }
 
@@ -348,6 +361,7 @@ func (b *Broker) ensure(key string) *agentState {
 		a = &agentState{name: name, room: room, topics: map[string]bool{}}
 		b.agents[key] = a
 	}
+
 	return a
 }
 
@@ -365,6 +379,7 @@ func (a *agentState) deliver(m Message) {
 		default:
 		}
 	}
+
 	a.waiters = nil
 }
 
@@ -388,6 +403,7 @@ func (b *Broker) changed() {
 func (b *Broker) Register(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.ensure(name)
 	b.touch(name)
 	b.changed()
@@ -402,14 +418,17 @@ func (b *Broker) Register(name string) {
 func (b *Broker) RegisterOwned(name, session string, pid int, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if !force && b.foreignLiveOwnerLocked(name, session) {
 		return false, ownershipMsg(name)
 	}
+
 	b.ensure(name)
 	b.touch(name)
 	b.clearWarnLocked(name) // re-registering (fresh/resumed session) clears a stale warning
 	b.setOwnerLocked(name, session, pid)
 	b.changed()
+
 	return true, ""
 }
 
@@ -435,7 +454,9 @@ func (b *Broker) setOwnerLocked(name, session string, pid int) {
 func (b *Broker) IsRegistered(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	_, ok := b.owners[name]
+
 	return ok
 }
 
@@ -459,14 +480,18 @@ func (b *Broker) IsRegistered(name string) bool {
 func (b *Broker) FindOtherRoom(callerRoom, bareName string) ([]string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	var rooms []string
+
 	for key := range b.owners {
 		room, name := splitAgentKey(key)
 		if name == bareName && room != callerRoom {
 			rooms = append(rooms, room)
 		}
 	}
+
 	sort.Strings(rooms)
+
 	return rooms, len(rooms) > 0
 }
 
@@ -487,18 +512,24 @@ func (b *Broker) WhoIs(sessionPID int) (names []string, alive bool) {
 	if sessionPID == 0 {
 		return nil, false
 	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	for key, o := range b.owners {
 		if o.pid != sessionPID {
 			continue
 		}
+
 		names = append(names, key)
+
 		if o.comm != "" && b.probeComm(o.pid) == o.comm {
 			alive = true
 		}
 	}
+
 	sort.Strings(names)
+
 	return names, alive
 }
 
@@ -509,6 +540,7 @@ func (b *Broker) WhoIs(sessionPID int) (names []string, alive bool) {
 func (b *Broker) IsOnline(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.aliveLocked(name)
 }
 
@@ -518,6 +550,7 @@ func (b *Broker) IsOnline(name string) bool {
 func (b *Broker) IsWorking(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.workingLocked(name)
 }
 
@@ -548,14 +581,18 @@ func (b *Broker) ClaimIdentity(name, session string, pid int) (bool, string) {
 	if name == "" || session == "" || isUserHandle(name) {
 		return true, "" // no id, or the shared human mailbox — never single-session-owned
 	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if b.foreignLiveOwnerLocked(name, session) {
 		return false, ownershipMsg(name)
 	}
+
 	b.ensure(name)
 	b.touch(name) // acting under a name is activity — keeps ownership live-and-enforced
 	b.setOwnerLocked(name, session, pid)
+
 	return true, ""
 }
 
@@ -570,17 +607,21 @@ func (b *Broker) ClaimIdentity(name, session string, pid int) (bool, string) {
 func (b *Broker) migrateLocked(from, to string) {
 	dst := b.ensure(to)
 	room, _ := splitAgentKey(to)
+
 	if src := b.agents[from]; src != nil {
 		dst.inbox = append(dst.inbox, src.inbox...)
 		if dst.state == "" {
 			dst.state = src.state
 		}
+
 		for topicName := range src.topics {
 			dst.topics[topicName] = true
+
 			tk := topicKey(room, topicName)
 			if b.topics[tk] == nil {
 				b.topics[tk] = map[string]bool{}
 			}
+
 			b.topics[tk][to] = true
 		}
 	}
@@ -588,9 +629,11 @@ func (b *Broker) migrateLocked(from, to string) {
 	if t, ok := b.lastSeen[from]; ok && t.After(b.lastSeen[to]) {
 		b.lastSeen[to] = t
 	}
+
 	if t, ok := b.busyUntil[from]; ok && t.After(b.busyUntil[to]) {
 		b.busyUntil[to] = t
 	}
+
 	b.removeAgentLocked(from) // also unsubscribes from from topics and clears its maps
 }
 
@@ -602,23 +645,29 @@ func (b *Broker) migrateLocked(from, to string) {
 func (b *Broker) Rename(old, newName, session string, pid int, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if newName == "" {
 		return false, "new name required"
 	}
+
 	if old == newName {
 		b.ensure(newName)
 		b.touch(newName)
 		b.setOwnerLocked(newName, session, pid)
 		b.changed()
+
 		return true, ""
 	}
+
 	if !force && b.foreignLiveOwnerLocked(newName, session) {
 		return false, ownershipMsg(newName)
 	}
+
 	b.migrateLocked(old, newName)
 	b.touch(newName)
 	b.setOwnerLocked(newName, session, pid)
 	b.changed()
+
 	return true, ""
 }
 
@@ -642,16 +691,20 @@ func (b *Broker) Rename(old, newName, session string, pid int, force bool) (bool
 func (b *Broker) JoinRoom(from, who, session string, pid int, force bool) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if !force && b.foreignLiveOwnerLocked(who, session) {
 		return false, ownershipMsg(who)
 	}
+
 	if from != who {
 		b.migrateLocked(from, who)
 	}
+
 	b.ensure(who)
 	b.touch(who)
 	b.setOwnerLocked(who, session, pid)
 	b.changed()
+
 	return true, ""
 }
 
@@ -668,15 +721,19 @@ func (b *Broker) aliveLocked(name string) bool {
 	if b.sessionDeadLocked(name) {
 		return false
 	}
+
 	if b.listeners[name] > 0 {
 		return true
 	}
+
 	if b.busyUntil[name].After(b.now()) {
 		return true
 	}
+
 	if t, ok := b.lastSeen[name]; ok && b.now().Sub(t) < 2*time.Minute {
 		return true
 	}
+
 	return false
 }
 
@@ -689,6 +746,7 @@ func (b *Broker) sessionDeadLocked(name string) bool {
 	if !ok || o.pid == 0 || o.comm == "" {
 		return false
 	}
+
 	return b.probeComm(o.pid) != o.comm
 }
 
@@ -743,6 +801,7 @@ func (b *Broker) SendAsk(from, to, body string) (Message, error) {
 	if err == nil {
 		b.rememberAsk(m.ID, from, to)
 	}
+
 	return m, err
 }
 
@@ -752,8 +811,10 @@ func (b *Broker) rememberAsk(token, asker, askee string) {
 	if !ok {
 		return
 	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.evictOldestAsksLocked()
 	b.asks[token] = askInfo{asker: asker, askee: askee, seq: seq}
 }
@@ -768,6 +829,7 @@ func (b *Broker) evictOldestAsksLocked() {
 				oldest, oldestSeq = token, info.seq
 			}
 		}
+
 		delete(b.asks, oldest)
 	}
 }
@@ -778,10 +840,12 @@ func msgSeq(id string) (int, bool) {
 	if len(id) < 2 || id[0] != 'm' {
 		return 0, false
 	}
+
 	n, err := strconv.Atoi(id[1:])
 	if err != nil {
 		return 0, false
 	}
+
 	return n, true
 }
 
@@ -799,10 +863,12 @@ func (b *Broker) answersAskLocked(m Message, token string) bool {
 	if m.ThreadID == token || m.ID == token {
 		return true
 	}
+
 	info, ok := b.asks[token]
 	if !ok {
 		return false
 	}
+
 	if !mentionCouldAnswer(m, info) {
 		return false
 	}
@@ -822,6 +888,7 @@ func (b *Broker) answersAskLocked(m Message, token string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -842,12 +909,15 @@ func (b *Broker) answersAskLocked(m Message, token string) bool {
 func (b *Broker) AmbiguousMentionTokens(m Message) (asker string, tokens []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	for token, info := range b.asks {
 		if mentionCouldAnswer(m, info) {
 			_, asker = splitAgentKey(info.asker)
+
 			tokens = append(tokens, token)
 		}
 	}
+
 	if len(tokens) < 2 {
 		return "", nil
 	}
@@ -867,6 +937,7 @@ func (b *Broker) AmbiguousMentionTokens(m Message) (asker string, tokens []strin
 	// Sorted because map iteration is randomized, and a warning that lists the same
 	// two tokens in a different order each time reads as two different warnings.
 	sort.Strings(tokens)
+
 	return asker, tokens
 }
 
@@ -879,13 +950,17 @@ func mentionCouldAnswer(m Message, info askInfo) bool {
 	if !ok || seq <= info.seq {
 		return false // predates the question, so it cannot be its answer
 	}
+
 	if seq <= info.ambiguousUpTo {
 		return false // already judged ambiguous, when the full picture was visible
 	}
+
 	if _, askee := splitAgentKey(info.askee); m.From != askee {
 		return false
 	}
+
 	_, asker := splitAgentKey(info.asker)
+
 	return mentionsIn(m.Body)[asker]
 }
 
@@ -894,15 +969,18 @@ func mentionCouldAnswer(m Message, info askInfo) bool {
 func (b *Broker) HasPendingAnswer(name, token string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return false
 	}
+
 	for _, m := range a.inbox {
 		if b.answersAskLocked(m, token) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -910,15 +988,19 @@ func (b *Broker) HasPendingAnswer(name, token string) bool {
 func (b *Broker) waitChanAnswer(name, token string) <-chan struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.ensure(name)
 	ch := make(chan struct{}, 1)
+
 	for _, m := range a.inbox {
 		if b.answersAskLocked(m, token) {
 			ch <- struct{}{} // already answered; fire immediately
 			return ch
 		}
 	}
+
 	a.waiters = append(a.waiters, ch)
+
 	return ch
 }
 
@@ -929,14 +1011,17 @@ func (b *Broker) waitChanAnswer(name, token string) <-chan struct{} {
 func (b *Broker) DrainAnswers(name, token string, peek bool, max int) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.ensure(name)
 	b.touch(name)
+
 	msgs := b.drainMatchingLocked(a, peek, max, func(m Message) bool {
 		return b.answersAskLocked(m, token)
 	})
 	if len(msgs) > 0 && !peek {
 		delete(b.asks, token) // answered; stop tracking it
 	}
+
 	return msgs
 }
 
@@ -957,26 +1042,35 @@ type Attachment struct {
 func (b *Broker) send(from, to, body, threadID string, ack bool, attach *Attachment, isAsk bool, invite string) (Message, <-chan struct{}, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if to == "" {
 		return Message{}, nil, fmt.Errorf("recipient required")
 	}
+
 	_, fromName := splitAgentKey(from)
 	_, toName := splitAgentKey(to)
+
 	m := Message{ID: b.nextID(), From: fromName, To: toName, Kind: KindDirect, Body: body, Time: b.now(), AckRequested: ack, ThreadID: threadID, Ask: isAsk, Invite: invite}
 	if attach != nil {
 		m.AttachPath, m.AttachHash, m.AttachSize, m.AttachMTime = attach.Path, attach.Hash, attach.Size, attach.MTime
 	}
+
 	b.touch(from)
+
 	if threadID != "" {
 		b.trackThreadParticipantLocked(threadID, from)
 	}
+
 	b.ensure(to).deliver(m)
+
 	var ackCh chan struct{}
 	if ack {
 		ackCh = make(chan struct{}, 1)
 		b.pendingAcks[m.ID] = ackCh
 	}
+
 	b.changed()
+
 	return m, ackCh, nil
 }
 
@@ -987,6 +1081,7 @@ func (b *Broker) trackThreadParticipantLocked(threadID, key string) {
 	if b.threadParticipants[threadID] == nil {
 		b.threadParticipants[threadID] = map[string]bool{}
 	}
+
 	b.threadParticipants[threadID][key] = true
 }
 
@@ -994,6 +1089,7 @@ func (b *Broker) trackThreadParticipantLocked(threadID, key string) {
 func (b *Broker) CancelAck(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	delete(b.pendingAcks, id)
 }
 
@@ -1014,6 +1110,7 @@ func (b *Broker) CancelAck(id string) {
 func (b *Broker) Broadcast(from, room, body string, loud, hostWide bool) (Message, int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	_, fromName := splitAgentKey(from)
 	m := Message{ID: b.nextID(), From: fromName, Kind: KindBroadcast, Body: body, Time: b.now(), Loud: loud}
 	b.touch(from)
@@ -1027,23 +1124,30 @@ func (b *Broker) Broadcast(from, room, body string, loud, hostWide bool) (Messag
 	// mentioned copy is loud.
 	mentioned := mentionsIn(body)
 	n := 0
+
 	for key, a := range b.agents {
 		if key == from {
 			continue
 		}
+
 		if !hostWide {
 			if r, _ := splitAgentKey(key); r != room {
 				continue
 			}
 		}
+
 		mc := m
 		if _, bare := splitAgentKey(key); mentioned[bare] {
 			mc.Loud = true
 		}
+
 		a.deliver(mc)
+
 		n++
 	}
+
 	b.changed()
+
 	return m, n
 }
 
@@ -1057,13 +1161,17 @@ func (b *Broker) Broadcast(from, room, body string, loud, hostWide bool) (Messag
 func (b *Broker) MentionsNotSubscribed(topic, body string) (unreached, members []string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	reach := map[string]bool{}
+
 	for key := range b.topics[topic] {
 		_, name := splitAgentKey(key)
 		reach[name] = true
 		members = append(members, name)
 	}
+
 	sort.Strings(members)
+
 	return missingMentions(body, reach), members
 }
 
@@ -1072,13 +1180,16 @@ func (b *Broker) MentionsNotSubscribed(topic, body string) (unreached, members [
 func (b *Broker) MentionsNotInRoom(room, body string, hostWide bool) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	reach := map[string]bool{}
+
 	for key := range b.agents {
 		r, name := splitAgentKey(key)
 		if hostWide || r == room {
 			reach[name] = true
 		}
 	}
+
 	return missingMentions(body, reach)
 }
 
@@ -1087,13 +1198,17 @@ func (b *Broker) MentionsNotInRoom(room, body string, hostWide bool) []string {
 // tracked membership. Sorted, so the warning is stable.
 func missingMentions(body string, reach map[string]bool) []string {
 	var out []string
+
 	for name := range mentionsIn(body) {
 		if reach[name] || isUserHandle(name) {
 			continue
 		}
+
 		out = append(out, name)
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -1119,6 +1234,7 @@ func (b *Broker) Invite(from, to, topic, room string, body string) (Message, err
 		if !b.IsSubscribed(from, topicKey(fromRoom, topic)) {
 			return Message{}, fmt.Errorf("you are not subscribed to #%s — you can only invite someone into a topic you follow yourself (`mess sub %s` first)", topic, topic)
 		}
+
 		if toRoom != fromRoom {
 			return Message{}, fmt.Errorf("#%s is a topic in room %s, but %q is in room %s — topics are room-scoped, so they cannot follow it from there. %s",
 				topic, roomLabel(fromRoom), displayName(toRoom, mustBare(to)), roomLabel(toRoom), joinFirstHint(fromRoom, displayName(toRoom, mustBare(to))))
@@ -1130,11 +1246,14 @@ func (b *Broker) Invite(from, to, topic, room string, body string) (Message, err
 	if body == "" {
 		body = fmt.Sprintf("%s invites you to join %s", fromName, inviteInfo{room: room, topic: topic}.what())
 	}
+
 	m, _, err := b.send(from, to, body, "", false, nil, false, inviteInfo{room: room, topic: topic}.what())
 	if err != nil {
 		return Message{}, err
 	}
+
 	b.rememberInvite(m.ID, from, to, room, topic)
+
 	return m, nil
 }
 
@@ -1146,6 +1265,7 @@ func joinFirstHint(fromRoom, invitee string) string {
 	if fromRoom == "" {
 		return "The global room has no name to invite into; they would run `mess room leave` to come back to it, then you can invite them to the topic."
 	}
+
 	return fmt.Sprintf("Invite them to the room first: `mess invite %s %s`", invitee, fromRoom)
 }
 
@@ -1155,6 +1275,7 @@ func mustBare(key string) string { _, name := splitAgentKey(key); return name }
 func (b *Broker) rememberInvite(token, inviter, invitee, room, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	for len(b.invites) >= maxPendingInvites {
 		oldest, oldestSeq := "", 0
 		for t := range b.invites {
@@ -1162,11 +1283,14 @@ func (b *Broker) rememberInvite(token, inviter, invitee, room, topic string) {
 				oldest, oldestSeq = t, seq
 			}
 		}
+
 		if oldest == "" {
 			break
 		}
+
 		delete(b.invites, oldest)
 	}
+
 	b.invites[token] = inviteInfo{inviter: inviter, invitee: invitee, room: room, topic: topic, at: b.now()}
 }
 
@@ -1176,9 +1300,11 @@ func (b *Broker) rememberInvite(token, inviter, invitee, room, topic string) {
 func (b *Broker) PendingInvites(who string) (received, sent []InviteSummary) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	for token, inv := range b.invites {
 		_, from := splitAgentKey(inv.inviter)
 		_, to := splitAgentKey(inv.invitee)
+
 		s := InviteSummary{Token: token, What: inv.what(), From: from, To: to, Time: inv.at}
 		switch who {
 		case inv.invitee:
@@ -1187,15 +1313,18 @@ func (b *Broker) PendingInvites(who string) (received, sent []InviteSummary) {
 			sent = append(sent, s)
 		}
 	}
+
 	bySeq := func(l []InviteSummary) {
 		sort.Slice(l, func(i, j int) bool {
 			a, _ := msgSeq(l[i].Token)
 			b, _ := msgSeq(l[j].Token)
+
 			return a < b
 		})
 	}
 	bySeq(received)
 	bySeq(sent)
+
 	return received, sent
 }
 
@@ -1208,16 +1337,21 @@ func (b *Broker) Decline(who, token, reason string) (inviteInfo, Message, error)
 	if err != nil {
 		return inviteInfo{}, Message{}, err
 	}
+
 	_, name := splitAgentKey(who)
+
 	body := fmt.Sprintf("%s declined your invitation to %s", name, inv.what())
 	if reason != "" {
 		body += ": " + reason
 	}
+
 	m, _, err := b.send(who, inv.inviter, body, "", false, nil, false, "")
 	if err != nil {
 		return inviteInfo{}, Message{}, err
 	}
+
 	b.ClearInvite(token)
+
 	return inv, m, nil
 }
 
@@ -1227,14 +1361,17 @@ func (b *Broker) Decline(who, token, reason string) (inviteInfo, Message, error)
 func (b *Broker) LookupInvite(who, token string) (inviteInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	inv, ok := b.invites[token]
 	if !ok {
 		return inviteInfo{}, fmt.Errorf("no open invitation %q — it may have been accepted already, or lost in a daemon restart (invitations are not persisted); ask for another", token)
 	}
+
 	if inv.invitee != who {
 		_, name := splitAgentKey(inv.invitee)
 		return inviteInfo{}, fmt.Errorf("invitation %q was extended to %q, not to you", token, name)
 	}
+
 	return inv, nil
 }
 
@@ -1242,6 +1379,7 @@ func (b *Broker) LookupInvite(who, token string) (inviteInfo, error) {
 func (b *Broker) ClearInvite(token string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	delete(b.invites, token)
 }
 
@@ -1249,6 +1387,7 @@ func (b *Broker) ClearInvite(token string) {
 func (b *Broker) IsSubscribed(name, topic string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.topics[topic][name]
 }
 
@@ -1263,10 +1402,12 @@ func mentionsIn(body string) map[string]bool {
 	if len(matches) == 0 {
 		return nil
 	}
+
 	set := make(map[string]bool, len(matches))
 	for _, g := range matches {
 		set[g[1]] = true
 	}
+
 	return set
 }
 
@@ -1284,27 +1425,34 @@ func mentionsIn(body string) map[string]bool {
 func (b *Broker) publishLocalLocked(key string, m Message, skip string, isRelay bool) (delivered, woke int) {
 	b.appendTopicHistoryLocked(key, m)
 	mentions := mentionsIn(m.Body)
+
 	participants := b.threadParticipants[m.ThreadID] // nil if ThreadID=="" or nobody's posted yet
 	for subKey := range b.topics[key] {
 		if subKey == skip {
 			continue
 		}
+
 		_, name := splitAgentKey(subKey)
 		a := b.ensure(subKey)
 		mentioned := len(mentions) > 0 && mentions[name]
+
 		participant := m.ThreadID != "" && participants[subKey]
 		switch {
 		case mentioned || participant:
 			a.deliver(m) // wake: explicitly mentioned, or already in this thread
+
 			woke++
 		case isRelay || len(mentions) > 0 || m.ThreadID != "":
 			a.deliverQuiet(m) // relay hop, an unmentioned subscriber of a mentioning publish, or an uninvolved subscriber of a threaded reply
 		default:
 			a.deliver(m) // no mentions, no thread: wake everyone, as before
+
 			woke++
 		}
+
 		delivered++
 	}
+
 	return delivered, woke
 }
 
@@ -1315,6 +1463,7 @@ func (b *Broker) appendTopicHistoryLocked(key string, m Message) {
 	if len(h) > maxHistory {
 		h = h[len(h)-maxHistory:]
 	}
+
 	b.topicHistory[key] = h
 }
 
@@ -1334,20 +1483,25 @@ func (b *Broker) relayLocked(key string, m Message, visited map[string]bool, dep
 		elog("bridge relay: hop cap reached for message %s at %s, stopping (possible cycle)", m.ID, key)
 		return
 	}
+
 	for _, br := range b.bridgesByTopic[key] {
 		if br.expired(b.now()) {
 			continue
 		}
+
 		other, ok := br.otherSide(key)
 		if !ok || visited[other] {
 			continue
 		}
+
 		visited[other] = true
 		rm := m
+
 		rm.BridgeID = br.id
 		if rm.OriginTopic == "" { // stamp true origin only once, at the first hop
 			rm.OriginRoom, rm.OriginTopic = splitTopicKey(key)
 		}
+
 		b.publishLocalLocked(other, rm, "", true)
 		b.relayLocked(other, rm, visited, depth+1)
 	}
@@ -1382,19 +1536,25 @@ func (b *Broker) PubThreadedAttach(from, topic, body, threadID string, attach *A
 func (b *Broker) pub(from, topic, body, threadID string, attach *Attachment) (m Message, delivered, woke int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	_, fromName := splitAgentKey(from)
 	_, topicName := splitAgentKey(topic)
+
 	m = Message{ID: b.nextID(), From: fromName, Topic: topicName, Kind: KindTopic, Body: body, Time: b.now(), ThreadID: threadID}
 	if attach != nil {
 		m.AttachPath, m.AttachHash, m.AttachSize, m.AttachMTime = attach.Path, attach.Hash, attach.Size, attach.MTime
 	}
+
 	b.touch(from)
+
 	if threadID != "" {
 		b.trackThreadParticipantLocked(threadID, from)
 	}
+
 	delivered, woke = b.publishLocalLocked(topic, m, from, false)
 	b.relayLocked(topic, m, map[string]bool{topic: true}, 0)
 	b.changed()
+
 	return m, delivered, woke
 }
 
@@ -1402,12 +1562,15 @@ func (b *Broker) pub(from, topic, body, threadID string, attach *Attachment) (m 
 func (b *Broker) Sub(name, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	_, topicName := splitAgentKey(topic)
 	b.ensure(name).topics[topicName] = true
 	b.touch(name)
+
 	if b.topics[topic] == nil {
 		b.topics[topic] = map[string]bool{}
 	}
+
 	b.topics[topic][name] = true
 	b.changed()
 }
@@ -1416,17 +1579,22 @@ func (b *Broker) Sub(name, topic string) {
 func (b *Broker) Unsub(name, topic string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.touch(name)
+
 	_, topicName := splitAgentKey(topic)
 	if a := b.agents[name]; a != nil {
 		delete(a.topics, topicName)
 	}
+
 	if subs := b.topics[topic]; subs != nil {
 		delete(subs, name)
+
 		if len(subs) == 0 {
 			delete(b.topics, topic)
 		}
 	}
+
 	b.changed()
 }
 
@@ -1448,6 +1616,7 @@ func (b *Broker) findBridgeLocked(a, bKey string, dir bridgeDirection) *bridge {
 			return br
 		}
 	}
+
 	return nil
 }
 
@@ -1463,19 +1632,24 @@ func (b *Broker) findBridgeLocked(a, bKey string, dir bridgeDirection) *bridge {
 func (b *Broker) Bridge(localRoom, localTopic, remoteRoom, remoteTopic string, dir bridgeDirection, creator string, ttl time.Duration, force bool) (*bridge, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	ak, bk := topicKey(localRoom, localTopic), topicKey(remoteRoom, remoteTopic)
 	if ak == bk {
 		return nil, fmt.Errorf("cannot bridge a topic to itself")
 	}
+
 	if !force {
 		if existing := b.findBridgeLocked(ak, bk, dir); existing != nil {
 			return existing, nil // idempotent
 		}
+
 		if len(b.bridges) >= maxBridges {
 			return nil, fmt.Errorf("bridge limit reached (%d); pass --force or unbridge an unused one", maxBridges)
 		}
 	}
+
 	id := b.nextBridgeID()
+
 	br := &bridge{
 		id: id, a: ak, b: bk,
 		aRoom: localRoom, aTopic: localTopic, bRoom: remoteRoom, bTopic: remoteTopic,
@@ -1484,11 +1658,13 @@ func (b *Broker) Bridge(localRoom, localTopic, remoteRoom, remoteTopic string, d
 	if ttl > 0 {
 		br.expiresAt = b.now().Add(ttl)
 	}
+
 	b.bridges[id] = br
 	b.bridgesByTopic[ak] = append(b.bridgesByTopic[ak], br)
 	b.bridgesByTopic[bk] = append(b.bridgesByTopic[bk], br)
 	b.changed()
 	elog("BRIDGE created: id=%s creator=%s %s <-%s-> %s", id, creator, displayName(localRoom, "#"+localTopic), br.dir.String(), displayName(remoteRoom, "#"+remoteTopic))
+
 	return br, nil
 }
 
@@ -1499,21 +1675,28 @@ func (b *Broker) Bridge(localRoom, localTopic, remoteRoom, remoteTopic string, d
 func (b *Broker) Unbridge(id string) (bool, string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	br, ok := b.bridges[id]
 	if !ok {
 		return false, ""
 	}
+
 	delete(b.bridges, id)
 	b.bridgesByTopic[br.a] = removeBridge(b.bridgesByTopic[br.a], br)
+
 	b.bridgesByTopic[br.b] = removeBridge(b.bridgesByTopic[br.b], br)
 	if len(b.bridgesByTopic[br.a]) == 0 {
 		delete(b.bridgesByTopic, br.a)
 	}
+
 	if len(b.bridgesByTopic[br.b]) == 0 {
 		delete(b.bridgesByTopic, br.b)
 	}
+
 	desc := fmt.Sprintf("%s <-%s-> %s", displayName(br.aRoom, "#"+br.aTopic), br.dir.String(), displayName(br.bRoom, "#"+br.bTopic))
+
 	b.changed()
+
 	return true, desc
 }
 
@@ -1524,6 +1707,7 @@ func removeBridge(list []*bridge, target *bridge) []*bridge {
 			out = append(out, br)
 		}
 	}
+
 	return out
 }
 
@@ -1539,15 +1723,21 @@ func bridgeToInfo(br *bridge) BridgeInfo {
 func (b *Broker) ListBridges() []BridgeInfo {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	now := b.now()
+
 	var out []BridgeInfo
+
 	for _, br := range b.bridges {
 		if br.expired(now) {
 			continue
 		}
+
 		out = append(out, bridgeToInfo(br))
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+
 	return out
 }
 
@@ -1571,22 +1761,28 @@ func (b *Broker) drainMatchingLocked(a *agentState, peek bool, max int, match fu
 			keep = append(keep, m)
 		}
 	}
+
 	if !peek && len(out) > 0 {
 		for _, m := range out {
 			if m.AckRequested {
 				if ch := b.pendingAcks[m.ID]; ch != nil {
 					ch <- struct{}{} // buffered(1); never blocks
+
 					delete(b.pendingAcks, m.ID)
 				}
 			}
 		}
+
 		a.inbox = keep
+
 		a.history = append(a.history, out...) // keep for `replay` (recovers a lost wake)
 		if len(a.history) > maxHistory {
 			a.history = a.history[len(a.history)-maxHistory:]
 		}
+
 		b.changed()
 	}
+
 	return out
 }
 
@@ -1596,8 +1792,10 @@ func (b *Broker) drainMatchingLocked(a *agentState, peek bool, max int, match fu
 func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bool) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.ensure(name)
 	b.touch(name)
+
 	return b.drainMatchingLocked(a, peek, max, func(m Message) bool {
 		return kinds == nil || kinds[m.Kind]
 	})
@@ -1620,11 +1818,14 @@ func (b *Broker) DrainKinds(name string, peek bool, max int, kinds map[string]bo
 func (b *Broker) DrainIfIdle(name string, max int, kinds map[string]bool) (msgs []Message, idle bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if b.busyUntil[name].After(b.now()) {
 		return nil, false
 	}
+
 	a := b.ensure(name)
 	b.touch(name)
+
 	return b.drainMatchingLocked(a, false, max, func(m Message) bool {
 		return kinds == nil || kinds[m.Kind]
 	}), true
@@ -1638,8 +1839,10 @@ func (b *Broker) DrainIfIdle(name string, max int, kinds map[string]bool) (msgs 
 func (b *Broker) DrainThread(name, threadID string, peek bool, max int) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.ensure(name)
 	b.touch(name)
+
 	return b.drainMatchingLocked(a, peek, max, func(m Message) bool {
 		return m.ThreadID == threadID || m.ID == threadID
 	})
@@ -1653,10 +1856,12 @@ func (b *Broker) DrainThread(name, threadID string, peek bool, max int) []Messag
 func (b *Broker) DrainQuiet(name string, max int) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return nil
 	}
+
 	var out, keep []Message
 	for _, m := range a.inbox {
 		if max <= 0 || len(out) < max {
@@ -1665,10 +1870,13 @@ func (b *Broker) DrainQuiet(name string, max int) []Message {
 			keep = append(keep, m)
 		}
 	}
+
 	if len(out) > 0 {
 		a.inbox = keep
+
 		b.changed()
 	}
+
 	return out
 }
 
@@ -1682,8 +1890,10 @@ func capAndCopy(h []Message, n int) []Message {
 	if n > 0 && n < len(h) {
 		h = h[len(h)-n:]
 	}
+
 	out := make([]Message, len(h))
 	copy(out, h)
+
 	return out
 }
 
@@ -1693,10 +1903,12 @@ func capAndCopy(h []Message, n int) []Message {
 func (b *Broker) Replay(name string, n int) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return nil
 	}
+
 	return capAndCopy(a.history, n)
 }
 
@@ -1707,6 +1919,7 @@ func (b *Broker) Replay(name string, n int) []Message {
 func (b *Broker) ExportTopic(topic string, max int) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return capAndCopy(b.topicHistory[topic], max)
 }
 
@@ -1732,6 +1945,7 @@ func (b *Broker) ExportThread(name, threadID string, max int) []Message {
 // view" gap as ExportThread: a message name sent to peer won't appear.
 func (b *Broker) ExportDirect(name, peer string, max int) []Message {
 	_, peerName := splitAgentKey(peer)
+
 	return b.exportOwn(name, max, func(m Message) bool {
 		return m.Kind == KindDirect && (m.From == peerName || m.To == peerName)
 	})
@@ -1743,25 +1957,32 @@ func (b *Broker) ExportDirect(name, peer string, max int) []Message {
 func (b *Broker) exportOwn(name string, max int, match func(Message) bool) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return nil
 	}
+
 	var out []Message
+
 	for _, m := range a.history {
 		if match(m) {
 			out = append(out, m)
 		}
 	}
+
 	for _, m := range a.inbox {
 		if match(m) {
 			out = append(out, m)
 		}
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+
 	if max > 0 && max < len(out) {
 		out = out[len(out)-max:]
 	}
+
 	return out
 }
 
@@ -1777,10 +1998,12 @@ func (b *Broker) exportOwn(name string, max int, match func(Message) bool) []Mes
 func (b *Broker) ListThreads(name string) []ThreadInfo {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return nil
 	}
+
 	_, myName := splitAgentKey(name)
 
 	all := make([]Message, 0, len(a.history)+len(a.inbox))
@@ -1788,11 +2011,13 @@ func (b *Broker) ListThreads(name string) []ThreadInfo {
 	all = append(all, a.inbox...)
 
 	ids := map[string]bool{}
+
 	for _, m := range all {
 		if m.ThreadID != "" {
 			ids[m.ThreadID] = true
 		}
 	}
+
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1801,24 +2026,30 @@ func (b *Broker) ListThreads(name string) []ThreadInfo {
 	for id := range ids {
 		infos[id] = &ThreadInfo{ID: id}
 	}
+
 	for _, m := range all {
 		id := m.ThreadID
 		isRoot := false
+
 		if id == "" {
 			if !ids[m.ID] {
 				continue // an ordinary message, not part of any thread we're tracking
 			}
+
 			id, isRoot = m.ID, true
 		}
+
 		info := infos[id]
 		if info.Kind == "" {
 			info.Kind, info.Topic = m.Kind, m.Topic
 		}
+
 		if isRoot {
 			info.RootBody = m.Body
 		} else {
 			info.Replies++
 		}
+
 		if info.Kind == KindDirect && info.Peer == "" {
 			if m.From != myName {
 				info.Peer = m.From
@@ -1826,6 +2057,7 @@ func (b *Broker) ListThreads(name string) []ThreadInfo {
 				info.Peer = m.To
 			}
 		}
+
 		if m.Time.After(info.LastActivity) {
 			info.LastActivity = m.Time
 		}
@@ -1836,7 +2068,9 @@ func (b *Broker) ListThreads(name string) []ThreadInfo {
 		info.Participants = len(b.threadParticipants[id])
 		out = append(out, *info)
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].LastActivity.After(out[j].LastActivity) })
+
 	return out
 }
 
@@ -1857,15 +2091,18 @@ func wakes(m Message, kinds map[string]bool) bool {
 func (b *Broker) HasPending(name string, kinds map[string]bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return false
 	}
+
 	for _, m := range a.inbox {
 		if wakes(m, kinds) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -1876,15 +2113,19 @@ func (b *Broker) HasPending(name string, kinds map[string]bool) bool {
 func (b *Broker) waitChan(name string, kinds map[string]bool) <-chan struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.ensure(name)
 	ch := make(chan struct{}, 1)
+
 	for _, m := range a.inbox {
 		if wakes(m, kinds) {
 			ch <- struct{}{} // already has a wake-worthy message; fire immediately
 			return ch
 		}
 	}
+
 	a.waiters = append(a.waiters, ch)
+
 	return ch
 }
 
@@ -1896,15 +2137,18 @@ func (b *Broker) waitChan(name string, kinds map[string]bool) <-chan struct{} {
 func (b *Broker) HasPendingThread(name, threadID string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.agents[name]
 	if a == nil {
 		return false
 	}
+
 	for _, m := range a.inbox {
 		if m.ThreadID == threadID || m.ID == threadID {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -1915,15 +2159,19 @@ func (b *Broker) HasPendingThread(name, threadID string) bool {
 func (b *Broker) waitChanThread(name, threadID string) <-chan struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	a := b.ensure(name)
 	ch := make(chan struct{}, 1)
+
 	for _, m := range a.inbox {
 		if m.ThreadID == threadID || m.ID == threadID {
 			ch <- struct{}{} // already answered; fire immediately
 			return ch
 		}
 	}
+
 	a.waiters = append(a.waiters, ch)
+
 	return ch
 }
 
@@ -1931,6 +2179,7 @@ func (b *Broker) waitChanThread(name, threadID string) <-chan struct{} {
 func (b *Broker) AddListener(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.ensure(name)
 	b.touch(name)
 	b.listeners[name]++
@@ -1940,6 +2189,7 @@ func (b *Broker) AddListener(name string) {
 func (b *Broker) RemoveListener(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if b.listeners[name] <= 1 {
 		delete(b.listeners, name)
 	} else {
@@ -1951,6 +2201,7 @@ func (b *Broker) RemoveListener(name string) {
 func (b *Broker) IsListening(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.listeners[name] > 0
 }
 
@@ -1959,9 +2210,11 @@ func (b *Broker) IsListening(name string) bool {
 func (b *Broker) Stat(name string) (pending int, listening bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if a := b.agents[name]; a != nil {
 		pending = len(a.inbox)
 	}
+
 	return pending, b.listeners[name] > 0
 }
 
@@ -1970,6 +2223,7 @@ func (b *Broker) Stat(name string) (pending int, listening bool) {
 func (b *Broker) SetBusy(name string, dur time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.ensure(name)
 	b.touch(name)
 	b.clearWarnLocked(name) // becoming active means any prior warning is stale
@@ -1980,6 +2234,7 @@ func (b *Broker) SetBusy(name string, dur time.Duration) {
 func (b *Broker) ClearBusy(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	delete(b.busyUntil, name)
 }
 
@@ -1987,6 +2242,7 @@ func (b *Broker) ClearBusy(name string) {
 func (b *Broker) SetState(name, state string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.ensure(name).state = state
 	b.touch(name)
 	b.changed()
@@ -1997,10 +2253,13 @@ func (b *Broker) SetState(name, state string) {
 func (b *Broker) RemoveAgent(name string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	if !b.removeAgentLocked(name) {
 		return false
 	}
+
 	b.changed()
+
 	return true
 }
 
@@ -2011,18 +2270,22 @@ func (b *Broker) removeAgentLocked(name string) bool {
 	if _, ok := b.agents[name]; !ok {
 		return false
 	}
+
 	delete(b.agents, name)
 	delete(b.listeners, name)
 	delete(b.busyUntil, name)
 	delete(b.lastSeen, name)
 	delete(b.owners, name)
 	b.evictWaitersLocked(name)
+
 	for topic, subs := range b.topics {
 		delete(subs, name)
+
 		if len(subs) == 0 {
 			delete(b.topics, topic)
 		}
 	}
+
 	return true
 }
 
@@ -2036,33 +2299,43 @@ func (b *Broker) removeAgentLocked(name string) bool {
 func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	now := b.now()
+
 	var keys, names []string
+
 	for key, a := range b.agents {
 		if b.aliveLocked(key) {
 			continue // online (listening / working / recently active) — keep
 		}
+
 		if isUserHandle(a.name) {
 			continue // the human's mailbox — never prune unread pings, in any room
 		}
+
 		stale := false
 		if seen, ok := b.lastSeen[key]; ok && now.Sub(seen) > maxAge {
 			stale = true // no activity for too long
 		}
+
 		if len(a.inbox) > 0 && now.Sub(a.inbox[0].Time) > maxAge {
 			stale = true // mail undrained for too long — a dead session accumulating
 		}
+
 		if stale {
 			keys = append(keys, key)
 			names = append(names, displayName(a.room, a.name))
 		}
 	}
+
 	sort.Strings(names)
 	sort.Strings(keys)
+
 	if !dryRun && len(keys) > 0 {
 		for _, key := range keys {
 			b.removeAgentLocked(key)
 		}
+
 		b.changed()
 	}
 
@@ -2072,23 +2345,28 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 	// bridges map from a long-running daemon accumulating short-lived bridges.
 	if !dryRun {
 		var expiredIDs []string
+
 		for id, br := range b.bridges {
 			if br.expired(now) {
 				expiredIDs = append(expiredIDs, id)
 			}
 		}
+
 		if len(expiredIDs) > 0 {
 			sort.Strings(expiredIDs)
+
 			for _, id := range expiredIDs {
 				br := b.bridges[id]
 				delete(b.bridges, id)
 				b.bridgesByTopic[br.a] = removeBridge(b.bridgesByTopic[br.a], br)
 				b.bridgesByTopic[br.b] = removeBridge(b.bridgesByTopic[br.b], br)
 			}
+
 			elog("cleanup swept %d expired bridge(s): %v", len(expiredIDs), expiredIDs)
 			b.changed()
 		}
 	}
+
 	return names
 }
 
@@ -2106,13 +2384,18 @@ func (b *Broker) Cleanup(maxAge time.Duration, dryRun bool) []string {
 func (b *Broker) ExpireInbox(maxAge time.Duration, dryRun bool) []Message {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	now := b.now()
+
 	var expired []Message
+
 	for _, a := range b.agents {
 		if isUserHandle(a.name) || len(a.inbox) == 0 {
 			continue
 		}
+
 		var keep []Message
+
 		for _, m := range a.inbox {
 			if now.Sub(m.Time) > maxAge {
 				expired = append(expired, m)
@@ -2120,13 +2403,16 @@ func (b *Broker) ExpireInbox(maxAge time.Duration, dryRun bool) []Message {
 				keep = append(keep, m)
 			}
 		}
+
 		if !dryRun && len(keep) != len(a.inbox) {
 			a.inbox = keep
 		}
 	}
+
 	if !dryRun && len(expired) > 0 {
 		b.changed()
 	}
+
 	return expired
 }
 
@@ -2142,26 +2428,33 @@ func (b *Broker) ExpireInbox(maxAge time.Duration, dryRun bool) []Message {
 func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	var agents []AgentInfo
 	for key, a := range b.agents {
 		if !all && a.room != room && !isUserHandle(a.name) {
 			continue
 		}
+
 		topics := make([]string, 0, len(a.topics))
 		for t := range a.topics {
 			topics = append(topics, t)
 		}
+
 		sort.Strings(topics)
+
 		var oldest time.Time
 		if len(a.inbox) > 0 {
 			oldest = a.inbox[0].Time // inbox is in arrival order; [0] is oldest
 		}
+
 		warning := ""
 		if w, ok := b.warnings[key]; ok && w.until.After(b.now()) {
 			warning = w.text // expired warnings are simply not reported
 		}
+
 		agents = append(agents, AgentInfo{Name: a.name, Room: a.room, Pending: len(a.inbox), Topics: topics, Listening: b.listeners[key] > 0, Working: b.workingLocked(key), Online: b.aliveLocked(key), State: a.state, Warning: warning, Oldest: oldest, SessionPID: b.owners[key].pid})
 	}
+
 	sort.Slice(agents, func(i, j int) bool {
 		return roomThenNameLess(agents[i].Room, agents[i].Name, agents[j].Room, agents[j].Name)
 	})
@@ -2172,21 +2465,27 @@ func (b *Broker) Ps(room string, all bool) ([]AgentInfo, []TopicInfo) {
 		if !all && tRoom != room {
 			continue
 		}
+
 		names := make([]string, 0, len(subs))
 		for key := range subs {
 			_, n := splitAgentKey(key)
 			names = append(names, n)
 		}
+
 		sort.Strings(names)
+
 		var bridged []string
 		for _, br := range b.bridgesByTopic[tk] {
 			bridged = append(bridged, br.describeFrom(tk))
 		}
+
 		sort.Strings(bridged)
 		topics = append(topics, TopicInfo{Name: tName, Room: tRoom, Subscribers: names, Bridged: bridged})
 	}
+
 	sort.Slice(topics, func(i, j int) bool {
 		return roomThenNameLess(topics[i].Room, topics[i].Name, topics[j].Room, topics[j].Name)
 	})
+
 	return agents, topics
 }

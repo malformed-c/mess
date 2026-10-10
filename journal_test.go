@@ -9,6 +9,7 @@ import (
 
 func TestJournalWriterRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
 	jw, err := openJournal(path)
 	if err != nil {
 		t.Fatal(err)
@@ -18,6 +19,7 @@ func TestJournalWriterRoundTrips(t *testing.T) {
 	if err := jw.append(journalLine{Message: Message{ID: "m1", From: "alice", To: "bob", Kind: KindDirect, Body: "hi", Time: time.Now()}, Event: "sent"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := jw.close(); err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +28,7 @@ func TestJournalWriterRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(msgs) != 1 || msgs[0].ID != "m1" || msgs[0].Body != "hi" {
 		t.Fatalf("expected the round-tripped message, got %+v", msgs)
 	}
@@ -33,6 +36,7 @@ func TestJournalWriterRoundTrips(t *testing.T) {
 
 func TestSearchJournalFilters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
 	jw, err := openJournal(path)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +45,7 @@ func TestSearchJournalFilters(t *testing.T) {
 
 	now := time.Now()
 	old := now.Add(-48 * time.Hour)
+
 	lines := []journalLine{
 		{Message: Message{ID: "m1", From: "alice", Topic: "eng", Kind: KindTopic, Body: "deploy is green", Time: now}, Room: "A", Event: "sent"},
 		{Message: Message{ID: "m2", From: "bob", Topic: "eng", Kind: KindTopic, Body: "the license question", Time: now}, Room: "A", Event: "sent"},
@@ -53,6 +58,7 @@ func TestSearchJournalFilters(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	if err := jw.close(); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +68,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 4 {
 		t.Fatalf("expected 4 messages in room A, got %d: %+v", len(got), got)
 	}
@@ -71,6 +78,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 5 {
 		t.Fatalf("expected all 5 messages with --all, got %d", len(got))
 	}
@@ -80,6 +88,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 3 {
 		t.Fatalf("expected alice's 3 messages, got %d: %+v", len(got), got)
 	}
@@ -91,6 +100,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 1 || got[0].ID != "m5" {
 		t.Fatalf("expected only bob's direct message, got %+v", got)
 	}
@@ -100,6 +110,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 1 || got[0].ID != "m2" {
 		t.Fatalf("expected only the license message, got %+v", got)
 	}
@@ -109,6 +120,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 1 || got[0].ID != "m3" {
 		t.Fatalf("expected only the #ops message, got %+v", got)
 	}
@@ -118,6 +130,7 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 3 {
 		t.Fatalf("expected 3 recent messages (excluding the 48h-old one), got %d: %+v", len(got), got)
 	}
@@ -150,12 +163,15 @@ func TestParseSince(t *testing.T) {
 			if err == nil {
 				t.Errorf("parseSince(%q): expected an error, got %v", c.in, got)
 			}
+
 			continue
 		}
+
 		if err != nil {
 			t.Errorf("parseSince(%q): unexpected error: %v", c.in, err)
 			continue
 		}
+
 		if got != c.want {
 			t.Errorf("parseSince(%q) = %v, want %v", c.in, got, c.want)
 		}
@@ -167,6 +183,7 @@ func TestParseSince(t *testing.T) {
 func TestSearchJournalToleratesCorruptTrailingLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
 	good := `{"id":"m1","from":"alice","kind":"direct","body":"hi","time":"2026-01-01T00:00:00Z","event":"sent"}` + "\n"
+
 	corrupt := `{"id":"m2","from":"alice","kind":"direct","bo` // truncated mid-object, no trailing newline
 	if err := os.WriteFile(path, []byte(good+corrupt), 0o600); err != nil {
 		t.Fatal(err)
@@ -176,6 +193,7 @@ func TestSearchJournalToleratesCorruptTrailingLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 1 || got[0].ID != "m1" {
 		t.Fatalf("expected only the valid line, got %+v", got)
 	}
@@ -186,22 +204,28 @@ func TestSearchJournalToleratesCorruptTrailingLine(t *testing.T) {
 func TestJournalRotation(t *testing.T) {
 	origSize := journalRotateSize
 	journalRotateSize = 1 // rotate after every single write
+
 	t.Cleanup(func() { journalRotateSize = origSize })
 
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
 	jw, err := openJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := jw.append(journalLine{Message: Message{ID: "m1", From: "alice", Kind: KindDirect, Body: "first", Time: time.Now()}, Event: "sent"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := os.Stat(path + ".1"); err != nil {
 		t.Fatalf("expected rotation to have produced %s.1: %v", path, err)
 	}
+
 	if err := jw.append(journalLine{Message: Message{ID: "m2", From: "bob", Kind: KindDirect, Body: "second", Time: time.Now()}, Event: "sent"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := jw.close(); err != nil {
 		t.Fatal(err)
 	}
@@ -210,9 +234,11 @@ func TestJournalRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 2 {
 		t.Fatalf("expected both generations to be greppable together, got %d: %+v", len(got), got)
 	}
+
 	if got[0].ID != "m1" || got[1].ID != "m2" {
 		t.Fatalf("expected oldest-first order across generations, got %+v", got)
 	}

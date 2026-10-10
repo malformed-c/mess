@@ -27,6 +27,7 @@ func TestDetectRepoRoomDormantWithoutMessJSON(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
 	}
+
 	if got := detectRepoRoom(dir); got != "" {
 		t.Fatalf("expected no auto-join without a mess.json, got %q", got)
 	}
@@ -46,10 +47,13 @@ func TestDetectRepoRoomRespectsOptOut(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
 	}
+
 	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{"room":"custom-room"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	t.Setenv("MESS_NO_AUTO_ROOM", "1")
+
 	if got := detectRepoRoom(dir); got != "" {
 		t.Fatalf("expected MESS_NO_AUTO_ROOM to suppress detection even with a mess.json present, got %q", got)
 	}
@@ -63,9 +67,11 @@ func TestDetectRepoRoomHonorsMessJSONOverride(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
 	}
+
 	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{"room":"custom-room"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := detectRepoRoom(dir); got != "custom-room" {
 		t.Fatalf("expected mess.json's room override, got %q", got)
 	}
@@ -79,9 +85,11 @@ func TestDetectRepoRoomDormantOnMalformedMessJSON(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Skipf("git not available: %v: %s", err, out)
 	}
+
 	if err := os.WriteFile(filepath.Join(dir, "mess.json"), []byte(`{not valid json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := detectRepoRoom(dir); got != "" {
 		t.Fatalf("expected auto-join to stay dormant on a malformed mess.json, got %q", got)
 	}
@@ -92,6 +100,7 @@ func TestReadRepoConfigMissingFileIsNotAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a missing mess.json should not be an error, got %v", err)
 	}
+
 	if cfg.Room != "" {
 		t.Fatalf("expected an empty config, got %+v", cfg)
 	}
@@ -99,10 +108,12 @@ func TestReadRepoConfigMissingFileIsNotAnError(t *testing.T) {
 
 func TestReadRepoConfigMalformedFileIsAnError(t *testing.T) {
 	dir := t.TempDir()
+
 	path := filepath.Join(dir, "mess.json")
 	if err := os.WriteFile(path, []byte(`{not valid json`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := readRepoConfig(path); err == nil {
 		t.Fatal("expected a malformed mess.json to be a hard error, not silently ignored")
 	}
@@ -120,14 +131,17 @@ func TestReadRepoConfigMalformedFileIsAnError(t *testing.T) {
 
 func TestBodyFromReadsFile(t *testing.T) {
 	dir := t.TempDir()
+
 	path := filepath.Join(dir, "body.txt")
 	if err := os.WriteFile(path, []byte("contains `backticks` and $(command) literally\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := bodyFrom(nil, path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got != "contains `backticks` and $(command) literally" {
 		t.Fatalf("expected the file's literal content (trailing newline trimmed), got %q", got)
 	}
@@ -141,10 +155,12 @@ func TestBodyFromErrorsOnMissingFile(t *testing.T) {
 
 func TestBodyFromRejectsFileAndArgsTogether(t *testing.T) {
 	dir := t.TempDir()
+
 	path := filepath.Join(dir, "body.txt")
 	if err := os.WriteFile(path, []byte("from file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := bodyFrom([]string{"also", "on", "argv"}, path); err == nil {
 		t.Fatal("expected an error when both --file and a body argument are given")
 	}
@@ -154,17 +170,22 @@ func TestBodyFromRejectsFileAndArgsTogether(t *testing.T) {
 // fn, restoring the original afterward.
 func withStdin(t *testing.T, content string, fn func()) {
 	t.Helper()
+
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	orig := os.Stdin
+
 	os.Stdin = r
 	defer func() { os.Stdin = orig }()
+
 	go func() {
 		_, _ = w.WriteString(content)
 		w.Close()
 	}()
+
 	fn()
 }
 
@@ -179,6 +200,7 @@ func TestBodyFromSoleDashReadsStdin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if got != "heredoc content" {
 			t.Fatalf("expected stdin content via sole \"-\", got %q", got)
 		}
@@ -192,6 +214,7 @@ func TestBodyFromDashAmongOtherWordsIsLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got != "status - ok" {
 		t.Fatalf("expected the dash preserved as literal text, got %q", got)
 	}
@@ -204,6 +227,7 @@ func TestBodyFromFileDashReadsStdin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if got != "piped via --file -" {
 			t.Fatalf("expected stdin content via --file -, got %q", got)
 		}
@@ -213,10 +237,12 @@ func TestBodyFromFileDashReadsStdin(t *testing.T) {
 func TestSetAttachComputesHashAndStat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.yaml")
+
 	content := []byte("hello attachment")
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	sum := sha256.Sum256(content)
 	wantHash := "sha256:" + hex.EncodeToString(sum[:])
 
@@ -224,15 +250,19 @@ func TestSetAttachComputesHashAndStat(t *testing.T) {
 	if err := setAttach(&req, path); err != nil {
 		t.Fatal(err)
 	}
+
 	if req.AttachHash != wantHash {
 		t.Fatalf("hash mismatch: got %q want %q", req.AttachHash, wantHash)
 	}
+
 	if req.AttachSize != int64(len(content)) {
 		t.Fatalf("expected size %d, got %d", len(content), req.AttachSize)
 	}
+
 	if !filepath.IsAbs(req.AttachPath) {
 		t.Fatalf("expected an absolute path, got %q", req.AttachPath)
 	}
+
 	if req.AttachMTime.IsZero() {
 		t.Fatal("expected a non-zero mtime")
 	}
@@ -250,13 +280,16 @@ func TestSetAttachErrorsOnMissingFile(t *testing.T) {
 func TestFormatMessageLineAppendsAttachmentSuffix(t *testing.T) {
 	m := Message{From: "alice", Kind: KindDirect, Body: "see this",
 		AttachPath: "/tmp/cfg.yaml", AttachHash: "sha256:" + strings.Repeat("a", 64), AttachSize: 2355}
+
 	line := formatMessageLine("12:00:00", m)
 	if !strings.Contains(line, "[attached: /tmp/cfg.yaml") {
 		t.Fatalf("expected an attachment suffix, got %q", line)
 	}
+
 	if strings.Contains(line, strings.Repeat("a", 64)) {
 		t.Fatalf("expected the text rendering to truncate the hash, got %q", line)
 	}
+
 	if !strings.Contains(line, "sha256:aaaaaaaaaaaa") { // 12 hex chars
 		t.Fatalf("expected a 12-char truncated hash, got %q", line)
 	}
@@ -264,6 +297,7 @@ func TestFormatMessageLineAppendsAttachmentSuffix(t *testing.T) {
 
 func TestFormatMessageLineOmitsSuffixWithoutAttachment(t *testing.T) {
 	m := Message{From: "alice", Kind: KindDirect, Body: "plain message"}
+
 	line := formatMessageLine("12:00:00", m)
 	if strings.Contains(line, "[attached:") {
 		t.Fatalf("expected no attachment suffix, got %q", line)
@@ -276,6 +310,7 @@ func TestFormatMessageLineOmitsSuffixWithoutAttachment(t *testing.T) {
 // anyway" (nothing else about the message looked any different).
 func TestFormatMessageLinePrependsAskMarker(t *testing.T) {
 	m := Message{ID: "m42", From: "alice", Kind: KindDirect, Body: "status?", Ask: true}
+
 	line := formatMessageLine("12:00:00", m)
 	if !strings.Contains(line, "[question m42") || !strings.Contains(line, "mess reply") {
 		t.Fatalf("expected a prominent question marker naming the token, got %q", line)
@@ -284,6 +319,7 @@ func TestFormatMessageLinePrependsAskMarker(t *testing.T) {
 
 func TestFormatMessageLineOmitsAskMarkerForOrdinaryMessage(t *testing.T) {
 	m := Message{From: "alice", Kind: KindDirect, Body: "just a status update"}
+
 	line := formatMessageLine("12:00:00", m)
 	if strings.Contains(line, "[question") {
 		t.Fatalf("expected no question marker on an ordinary message, got %q", line)
@@ -323,6 +359,7 @@ func TestParseReplayCountAcceptsPlainNumber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if n != 20 {
 		t.Fatalf("expected 20, got %d", n)
 	}
@@ -333,6 +370,7 @@ func TestParseReplayCountDefaultsToZeroWithNoArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if n != 0 {
 		t.Fatalf("expected 0 (whole history), got %d", n)
 	}
@@ -343,6 +381,7 @@ func TestParseReplayCountErrorsClearlyOnUnsupportedFlag(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an unsupported flag like --since")
 	}
+
 	if !strings.Contains(err.Error(), "mess log") {
 		t.Fatalf("expected the error to point at `mess log` for filtered queries, got %q", err.Error())
 	}
@@ -364,10 +403,12 @@ func TestRouteFromThreadMessagesPrefersRootForDirect(t *testing.T) {
 		{ID: "m1", Kind: KindDirect, From: "alice", To: "bob"}, // root
 		{ID: "m2", Kind: KindDirect, From: "bob", To: "alice", ThreadID: "m1"},
 	}
+
 	kind, topic, to, err := routeFromThreadMessages("bob", "m1", msgs)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if kind != KindDirect || topic != "" || to != "alice" {
 		t.Fatalf("expected to route back to alice, got kind=%q topic=%q to=%q", kind, topic, to)
 	}
@@ -378,10 +419,12 @@ func TestRouteFromThreadMessagesPrefersRootForTopic(t *testing.T) {
 		{ID: "m1", Kind: KindTopic, Topic: "eng", From: "alice"}, // root
 		{ID: "m2", Kind: KindTopic, Topic: "eng", From: "bob", ThreadID: "m1"},
 	}
+
 	kind, topic, to, err := routeFromThreadMessages("bob", "m1", msgs)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if kind != KindTopic || topic != "eng" || to != "" {
 		t.Fatalf("expected to route to #eng, got kind=%q topic=%q to=%q", kind, topic, to)
 	}
@@ -392,10 +435,12 @@ func TestRouteFromThreadMessagesFallsBackWithoutRoot(t *testing.T) {
 	msgs := []Message{
 		{ID: "m2", Kind: KindDirect, From: "alice", To: "bob", ThreadID: "m1"},
 	}
+
 	kind, topic, to, err := routeFromThreadMessages("bob", "m1", msgs)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if kind != KindDirect || topic != "" || to != "alice" {
 		t.Fatalf("expected to route back to alice from the fallback reply, got kind=%q topic=%q to=%q", kind, topic, to)
 	}
@@ -407,10 +452,12 @@ func TestRouteFromThreadMessagesFallbackUsesOtherParty(t *testing.T) {
 	msgs := []Message{
 		{ID: "m2", Kind: KindDirect, From: "bob", To: "alice", ThreadID: "m1"},
 	}
+
 	kind, _, to, err := routeFromThreadMessages("bob", "m1", msgs)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if kind != KindDirect || to != "alice" {
 		t.Fatalf("expected to route to alice (the other party), got kind=%q to=%q", kind, to)
 	}
@@ -431,6 +478,7 @@ func TestRouteFromThreadMessagesFallbackUsesOtherParty(t *testing.T) {
 func TestAmbiguousReplyTargetFiresWhenLastMsgIsADifferentThread(t *testing.T) {
 	open := openThreadInfo{ThreadID: "m4320", Kind: KindDirect, To: "alice"}
 	last := lastMsgInfo{ID: "m4384", Kind: KindDirect, From: "bob"}
+
 	amb := ambiguousReplyTarget(open, last, true)
 	if amb == "" {
 		t.Fatal("expected a refusal when the open thread differs from the most recently received message")
@@ -446,6 +494,7 @@ func TestAmbiguousReplyTargetFiresWhenLastMsgIsADifferentThread(t *testing.T) {
 
 func TestAmbiguousReplyTargetSilentWhenSameThread(t *testing.T) {
 	open := openThreadInfo{ThreadID: "m1", Kind: KindDirect, To: "alice"}
+
 	last := lastMsgInfo{ID: "m1", Kind: KindDirect, From: "alice"}
 	if amb := ambiguousReplyTarget(open, last, true); amb != "" {
 		t.Fatalf("continuing the same thread is not ambiguous, got %q", amb)
@@ -507,6 +556,7 @@ func TestUsageForFindsPerCommandEntries(t *testing.T) {
 			t.Errorf("usageFor(%q) is empty — subcommand help would fall back to bare flags", cmd)
 			continue
 		}
+
 		if !strings.Contains(got, "mess "+cmd) {
 			t.Errorf("usageFor(%q) does not mention the command: %q", cmd, got)
 		}
@@ -570,6 +620,7 @@ func newStrictTestFlagSet() *flag.FlagSet {
 	fs.String("from", "", "")
 	fs.String("to", "", "")
 	fs.String("grep", "", "")
+
 	return fs
 }
 
@@ -591,9 +642,11 @@ func TestParseStrictAcceptsKnownFlags(t *testing.T) {
 	if err := parseStrict(fs, []string{"--to", "bob", "--grep", "hello"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := fs.Lookup("to").Value.String(); got != "bob" {
 		t.Fatalf("--to parsed as %q, want %q", got, "bob")
 	}
+
 	if got := fs.Lookup("grep").Value.String(); got != "hello" {
 		t.Fatalf("--grep parsed as %q, want %q", got, "hello")
 	}
@@ -614,6 +667,7 @@ func TestParseAnywhereStillDemotesUnknownFlags(t *testing.T) {
 	// that the lenient path never panics or exits on an unknown flag.)
 	fs := newStrictTestFlagSet()
 	parseAnywhere(fs, []string{"--form", "alice"})
+
 	if fs.NArg() != 2 || fs.Arg(0) != "--form" || fs.Arg(1) != "alice" {
 		t.Fatalf("expected --form demoted to positionals, got %q", fs.Args())
 	}
@@ -631,6 +685,7 @@ func TestLooksLikeMessageID(t *testing.T) {
 			t.Errorf("looksLikeMessageID(%q) = false, want true", s)
 		}
 	}
+
 	for _, s := range []string{"", "m", "msg", "6203", "m62a", "mm1", "hello"} {
 		if looksLikeMessageID(s) {
 			t.Errorf("looksLikeMessageID(%q) = true, want false — an ordinary reply body must not be rejected", s)
@@ -652,6 +707,7 @@ func TestReplyHelpPrintsUsageInsteadOfMessagingAPeer(t *testing.T) {
 	if !strings.Contains(out, "mess reply") || !strings.Contains(out, "flags:") {
 		t.Fatalf("`mess reply --help` did not print usage: %q", out)
 	}
+
 	if got := e.mess("bob", "recv"); strings.Contains(got, "help") {
 		t.Fatalf("`mess reply --help` was delivered to a peer as a message: %q", got)
 	}
@@ -694,6 +750,7 @@ func TestAProperlyEscapedBodySurvives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a legitimate body with backticks was rejected: %v", err)
 	}
+
 	if got != "use `apsis pawns add` for that" {
 		t.Fatalf("body was altered: %q", got)
 	}
@@ -710,13 +767,16 @@ func TestBodyEchoShowsShortBodiesVerbatimAndSizesLongOnes(t *testing.T) {
 	// excerpt was worse than nothing: the truncation only bit past the limit,
 	// so a short multi-line body reprinted itself in full, flattened.
 	multi := "line one\nline two\nline three"
+
 	got := bodyEcho(multi)
 	if strings.Contains(got, "line one") {
 		t.Fatalf("a multi-line body must not reprint itself: %s", got)
 	}
+
 	if got != "28 bytes, 3 lines" {
 		t.Fatalf("want a bare size summary, got %q", got)
 	}
+
 	if got := bodyEcho(strings.Repeat("x", 300)); got != "300 bytes, 1 line" {
 		t.Fatalf("a single long line should read naturally, got %q", got)
 	}
@@ -737,6 +797,7 @@ func TestParseDisplayNameIsDisplayNamesInverse(t *testing.T) {
 		{"coord-s1", "operator"},
 	} {
 		rendered := displayName(tc.room, tc.name)
+
 		room, name, ok := parseDisplayName(rendered)
 		if !ok || room != tc.room || name != tc.name {
 			t.Errorf("round trip of %q gave (%q, %q, %v)", rendered, room, name, ok)
@@ -765,9 +826,11 @@ func TestSessionPIDRefusesArgumentsInsteadOfIgnoringThem(t *testing.T) {
 	if err == nil {
 		t.Fatal("session-pid must refuse an argument rather than answer a different question")
 	}
+
 	if !strings.Contains(err.Error(), "whois") {
 		t.Fatalf("the refusal should name the command that DOES answer it: %v", err)
 	}
+
 	if !strings.Contains(err.Error(), "trail-main") {
 		t.Fatalf("the refusal should quote what was ignored: %v", err)
 	}

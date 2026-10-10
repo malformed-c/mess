@@ -15,14 +15,17 @@ func TestIdentityFileRoundTrip(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-123")
+
 	p := resolvePaths()
 
 	if got := readIdentity(p); got != "" {
 		t.Fatalf("expected no identity initially, got %q", got)
 	}
+
 	if err := writeIdentity(p, "alice"); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := readIdentity(p); got != "alice" {
 		t.Fatalf("expected alice, got %q", got)
 	}
@@ -31,6 +34,7 @@ func TestIdentityFileRoundTrip(t *testing.T) {
 func TestIdentityRequiresSessionID(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
+
 	p := resolvePaths()
 	if err := writeIdentity(p, "bob"); err == nil {
 		t.Fatal("expected error when no session id is available")
@@ -43,15 +47,18 @@ func TestSessionIDSupportsCodexAndOverride(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
 	t.Setenv("CODEX_THREAD_ID", "codex-thread-1")
+
 	p := resolvePaths()
 	if err := writeIdentity(p, "cx"); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := readIdentity(p); got != "cx" {
 		t.Fatalf("codex identity not persisted, got %q", got)
 	}
 	// MESS_SESSION_ID takes priority, so it keys a *different* identity file.
 	t.Setenv("MESS_SESSION_ID", "override-9")
+
 	if got := readIdentity(p); got != "" {
 		t.Fatalf("override should key a fresh (empty) identity, got %q", got)
 	}
@@ -62,6 +69,7 @@ func TestAgentNamePrecedence(t *testing.T) {
 	clearSessionEnv(t)
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-abc")
 	t.Setenv("MESS_AGENT", "from-env")
+
 	p := resolvePaths()
 
 	// Env only.
@@ -72,6 +80,7 @@ func TestAgentNamePrecedence(t *testing.T) {
 	if err := writeIdentity(p, "from-file"); err != nil {
 		t.Fatal(err)
 	}
+
 	if got, _ := agentName(p, ""); got != "from-file" {
 		t.Fatalf("expected file identity to win over env, got %q", got)
 	}
@@ -93,22 +102,26 @@ func TestIdentityDoesNotLeakAcrossSessions(t *testing.T) {
 	t.Setenv("KONSOLE_DBUS_SESSION", "term-1")
 	t.Setenv("TMUX_PANE", "term-1")
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
+
 	p := resolvePaths()
 
 	if err := writeIdentity(p, "codex-research"); err != nil {
 		t.Fatal(err)
 	}
+
 	if got := readIdentity(p); got != "codex-research" {
 		t.Fatalf("same session must resolve its own identity, got %q", got)
 	}
 	// A brand-new Claude session in the same terminal: different id, no name.
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "sess-B")
+
 	if got := readIdentity(p); got != "" {
 		t.Fatalf("a new session must not inherit the prior occupant's name, got %q", got)
 	}
 	// A Codex agent in the same terminal: also independent.
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	t.Setenv("CODEX_THREAD_ID", "codex-1")
+
 	if got := readIdentity(p); got != "" {
 		t.Fatalf("a different host must not inherit the name either, got %q", got)
 	}
@@ -118,6 +131,7 @@ func TestAgentNameNoneSet(t *testing.T) {
 	t.Setenv("MESS_DIR", t.TempDir())
 	clearSessionEnv(t)
 	t.Setenv("MESS_AGENT", "")
+
 	p := resolvePaths()
 	if _, err := agentName(p, ""); err == nil {
 		t.Fatal("expected error when no identity is resolvable")

@@ -18,15 +18,19 @@ type ccEnv struct {
 
 func newCCEnv(t *testing.T) *ccEnv {
 	t.Helper()
+
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "sessions"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	t.Setenv("CLAUDE_CONFIG_DIR", root)
 	e := &ccEnv{t: t, dir: root, live: map[int]string{}}
 	prev := ccProcessComm
 	ccProcessComm = func(pid int) string { return e.live[pid] }
+
 	t.Cleanup(func() { ccProcessComm = prev })
+
 	return e
 }
 
@@ -34,38 +38,50 @@ func newCCEnv(t *testing.T) *ccEnv {
 // code checks the socket exists rather than trusting the recorded path.
 func (e *ccEnv) write(pid int, name, status, cwd string, sock bool) string {
 	e.t.Helper()
+
 	rec := map[string]any{"pid": pid, "name": name, "status": status, "cwd": cwd}
+
 	sockPath := ""
 	if sock {
 		// Keep it short: a unix socket path has a low length limit.
 		sockPath = filepath.Join(e.t.TempDir(), "s.sock")
+
 		l, err := net.Listen("unix", sockPath)
 		if err != nil {
 			e.t.Fatal(err)
 		}
+
 		e.t.Cleanup(func() { l.Close() })
+
 		rec["messagingSocketPath"] = sockPath
 	}
+
 	b, err := json.Marshal(rec)
 	if err != nil {
 		e.t.Fatal(err)
 	}
+
 	f := filepath.Join(e.dir, "sessions", strconv.Itoa(pid)+".json")
 	if err := os.WriteFile(f, b, 0o600); err != nil {
 		e.t.Fatal(err)
 	}
+
 	e.live[pid] = "claude"
+
 	return sockPath
 }
 
 func find(t *testing.T, ss []ccSession, name string) ccSession {
 	t.Helper()
+
 	for _, s := range ss {
 		if s.Name == name {
 			return s
 		}
 	}
+
 	t.Fatalf("session %q not in roster %+v", name, ss)
+
 	return ccSession{}
 }
 
@@ -81,12 +97,15 @@ func TestCCSessionsReportAddressability(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("want 2 sessions, got %d: %+v", len(got), got)
 	}
+
 	if s := find(t, got, "with-socket"); !s.Addressable() {
 		t.Fatalf("session with a live socket should be addressable: %+v", s)
 	}
+
 	if s := find(t, got, "no-socket"); s.Addressable() {
 		t.Fatalf("session without a socket must not read as addressable: %+v", s)
 	}
+
 	if s := find(t, got, "no-socket"); s.Status != "busy" {
 		t.Fatalf("status should come from the record: %+v", s)
 	}
@@ -123,6 +142,7 @@ func TestCCSessionsIgnoreRecycledPIDs(t *testing.T) {
 // is written at startup; the socket can go away underneath it.
 func TestCCSessionsRequireTheSocketToExist(t *testing.T) {
 	e := newCCEnv(t)
+
 	sock := e.write(401, "vanished", "idle", "/home/x", true)
 	if err := os.Remove(sock); err != nil {
 		t.Fatal(err)
@@ -139,9 +159,11 @@ func TestCCSessionsDegradeQuietly(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(e.dir, "sessions", "not-a-pid.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(e.dir, "sessions", "999.json"), []byte(`{"pid":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	e.live[999] = "claude"
 	e.write(501, "good", "idle", "/home/x", true)
 
@@ -150,6 +172,7 @@ func TestCCSessionsDegradeQuietly(t *testing.T) {
 	}
 
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(e.dir, "does-not-exist"))
+
 	if got := ccSessions(); got != nil {
 		t.Fatalf("a missing directory should yield no sessions, got %+v", got)
 	}
@@ -181,12 +204,15 @@ func TestCompactHomeShortensUnderHome(t *testing.T) {
 	if err != nil || home == "" {
 		t.Skip("no home directory")
 	}
+
 	if got := compactHome(filepath.Join(home, "git", "mess")); got != "~/git/mess" {
 		t.Fatalf("want ~/git/mess, got %q", got)
 	}
+
 	if got := compactHome(home); got != "~" {
 		t.Fatalf("want ~, got %q", got)
 	}
+
 	if got := compactHome("/etc/hosts"); got != "/etc/hosts" {
 		t.Fatalf("paths outside home must be untouched, got %q", got)
 	}

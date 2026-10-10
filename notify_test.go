@@ -14,11 +14,13 @@ import (
 // just no-ops instead of touching the OS.
 func TestMain(m *testing.M) {
 	notifySend = func(string, string) {}
+
 	os.Exit(m.Run())
 }
 
 func TestMatchesTargets(t *testing.T) {
 	targets := map[string]bool{"user": true, "engi": true}
+
 	cases := []struct {
 		body    string
 		wantTok string
@@ -46,6 +48,7 @@ func TestMentionsUserLiteral(t *testing.T) {
 	if _, ok := mentionsUser("ping @user please"); !ok {
 		t.Fatal("@user should always notify the operator")
 	}
+
 	if _, ok := mentionsUser("nothing to see"); ok {
 		t.Fatal("no mention should not match")
 	}
@@ -57,12 +60,15 @@ func TestUserNotice(t *testing.T) {
 	if _, ok := userNotice("alice", "user", "here is the report"); !ok {
 		t.Fatal("a direct send to @user's mailbox should notify")
 	}
+
 	if _, ok := userNotice("alice", "bob", "@user take a look"); !ok {
 		t.Fatal("an @user mention (to another agent) should still notify")
 	}
+
 	if _, ok := userNotice("alice", "bob", "regular status update"); ok {
 		t.Fatal("ordinary agent-to-agent traffic must not notify")
 	}
+
 	if _, ok := userNotice("alice", "", "broadcast with no mention"); ok {
 		t.Fatal("a broadcast with no mention must not notify")
 	}
@@ -78,12 +84,16 @@ func TestUserNotice(t *testing.T) {
 // headless CI box) — mirrors the injectable-clock pattern used for Broker.now.
 func mockNotifySend(t *testing.T) *[]string {
 	t.Helper()
+
 	var calls []string
+
 	orig := notifySend
 	notifySend = func(summary, body string) {
 		calls = append(calls, summary+"|"+body)
 	}
+
 	t.Cleanup(func() { notifySend = orig })
+
 	return &calls
 }
 
@@ -91,9 +101,11 @@ func TestNotifyUserFiresMockedNotifySend(t *testing.T) {
 	calls := mockNotifySend(t)
 
 	notifyUser("alice", "user", "here is the report")
+
 	if len(*calls) != 1 {
 		t.Fatalf("expected one notification, got %v", *calls)
 	}
+
 	if !strings.Contains((*calls)[0], "alice messaged you") {
 		t.Fatalf("unexpected summary: %q", (*calls)[0])
 	}
@@ -103,6 +115,7 @@ func TestNotifyUserStaysQuietForOrdinaryTraffic(t *testing.T) {
 	calls := mockNotifySend(t)
 
 	notifyUser("alice", "bob", "regular status update")
+
 	if len(*calls) != 0 {
 		t.Fatalf("ordinary agent-to-agent traffic must not notify, got %v", *calls)
 	}
@@ -114,9 +127,11 @@ func TestNotifyUserRespectsNotifyEnabledFlag(t *testing.T) {
 	calls := mockNotifySend(t)
 	orig := notifyEnabled
 	notifyEnabled = false
+
 	t.Cleanup(func() { notifyEnabled = orig })
 
 	notifyUser("alice", "user", "should be silenced")
+
 	if len(*calls) != 0 {
 		t.Fatalf("MESS_NO_NOTIFY should silence notifications, got %v", *calls)
 	}
@@ -126,12 +141,16 @@ func TestNotifyUserRespectsNotifyEnabledFlag(t *testing.T) {
 // duration of the test — mirrors mockNotifySend exactly.
 func mockKdeconnectBridge(t *testing.T) *[]string {
 	t.Helper()
+
 	var calls []string
+
 	orig := kdeconnectBridge
 	kdeconnectBridge = func(summary, body string) {
 		calls = append(calls, summary+"|"+body)
 	}
+
 	t.Cleanup(func() { kdeconnectBridge = orig })
+
 	return &calls
 }
 
@@ -139,18 +158,25 @@ func mockKdeconnectBridge(t *testing.T) *[]string {
 // a zero-regression-risk default, since desktop-only is today's behavior.
 func TestPresenceAwayDefaultsToPresent(t *testing.T) {
 	t.Setenv("MESS_PRESENCE", "")
+
 	if presenceAway() {
 		t.Fatal("expected present (no bridging) when MESS_PRESENCE is unset")
 	}
+
 	t.Setenv("MESS_PRESENCE", "present")
+
 	if presenceAway() {
 		t.Fatal("expected present (no bridging) when MESS_PRESENCE=present")
 	}
+
 	t.Setenv("MESS_PRESENCE", "away")
+
 	if !presenceAway() {
 		t.Fatal("expected away (bridging) when MESS_PRESENCE=away")
 	}
+
 	t.Setenv("MESS_PRESENCE", "AWAY") // case-insensitive
+
 	if !presenceAway() {
 		t.Fatal("expected MESS_PRESENCE to be matched case-insensitively")
 	}
@@ -161,16 +187,21 @@ func TestPresenceAwayDefaultsToPresent(t *testing.T) {
 func TestBridgeIfAwayFiresOnlyWhenAway(t *testing.T) {
 	calls := mockKdeconnectBridge(t)
 	origPresence := presenceAway
+
 	t.Cleanup(func() { presenceAway = origPresence })
 
 	presenceAway = func() bool { return false }
+
 	bridgeIfAway("summary", "body")
+
 	if len(*calls) != 0 {
 		t.Fatalf("must not bridge when present, got %v", *calls)
 	}
 
 	presenceAway = func() bool { return true }
+
 	bridgeIfAway("summary", "body")
+
 	if len(*calls) != 1 {
 		t.Fatalf("expected exactly one bridge call when away, got %v", *calls)
 	}
@@ -181,11 +212,14 @@ func TestBridgeIfAwayFiresOnlyWhenAway(t *testing.T) {
 func TestBridgeIfAwayRespectsBridgeEnabledFlag(t *testing.T) {
 	calls := mockKdeconnectBridge(t)
 	origPresence, origEnabled := presenceAway, bridgeEnabled
+
 	t.Cleanup(func() { presenceAway, bridgeEnabled = origPresence, origEnabled })
 
 	presenceAway = func() bool { return true }
 	bridgeEnabled = false
+
 	bridgeIfAway("summary", "body")
+
 	if len(*calls) != 0 {
 		t.Fatalf("MESS_NO_BRIDGE should silence bridging even when away, got %v", *calls)
 	}
@@ -198,15 +232,18 @@ func TestNotifyUserBridgesWhenAway(t *testing.T) {
 	bridgeCalls := mockKdeconnectBridge(t)
 	origPresence := presenceAway
 	presenceAway = func() bool { return true }
+
 	t.Cleanup(func() { presenceAway = origPresence })
 
 	notifyUser("alice", "user", "need your input")
+
 	if len(*bridgeCalls) != 1 {
 		t.Fatalf("expected notifyUser to bridge when away, got %v", *bridgeCalls)
 	}
 
 	// Ordinary agent-to-agent traffic still must not notify or bridge.
 	notifyUser("alice", "bob", "regular status update")
+
 	if len(*bridgeCalls) != 1 {
 		t.Fatalf("ordinary traffic must not trigger a bridge, got %v", *bridgeCalls)
 	}
@@ -226,13 +263,16 @@ func TestDesktopNotifyTruncatesLongBody(t *testing.T) {
 	calls := mockNotifySend(t)
 
 	desktopNotify("summary", strings.Repeat("x", 300))
+
 	if len(*calls) != 1 {
 		t.Fatalf("expected one call, got %v", *calls)
 	}
+
 	body := strings.SplitN((*calls)[0], "|", 2)[1]
 	if !strings.HasSuffix(body, "…") {
 		t.Fatalf("expected truncated body to end with an ellipsis, got %q", body)
 	}
+
 	if len([]rune(body)) != 201 { // 200 runes + the ellipsis
 		t.Fatalf("expected 201 runes (200 + ellipsis), got %d: %q", len([]rune(body)), body)
 	}

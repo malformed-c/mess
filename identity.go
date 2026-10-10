@@ -60,6 +60,7 @@ func firstEnv(names []string) string {
 			return v
 		}
 	}
+
 	return ""
 }
 
@@ -70,28 +71,35 @@ func firstEnv(names []string) string {
 // the length so long UUID-shaped ids stay filesystem-friendly.
 func stateKey(sid string) string {
 	var b strings.Builder
+
 	prevDash := false
+
 	for _, r := range sid {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_':
 			b.WriteRune(r)
+
 			prevDash = false
 		case r == '-':
 			if !prevDash && b.Len() > 0 {
 				b.WriteRune('-')
 			}
+
 			prevDash = true
 		default:
 			// path separators, colons, spaces, anything hostile: drop it
 		}
 	}
+
 	key := strings.Trim(b.String(), "-")
 	if len(key) > 120 {
 		key = key[:120]
 	}
+
 	if key == "" {
 		key = "anon"
 	}
+
 	return key
 }
 
@@ -102,6 +110,7 @@ func identityPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
+
 	return filepath.Join(p.dir, "ident", stateKey(sid))
 }
 
@@ -116,10 +125,12 @@ func readIdentFile(path string) string {
 	if path == "" {
 		return ""
 	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
+
 	return strings.TrimSpace(string(data))
 }
 
@@ -129,6 +140,7 @@ func writeIdentity(p paths, name string) error {
 	if path == "" {
 		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / GROK_SESSION_ID / MESS_SESSION_ID); cannot persist a mid-session identity (pass --as or set MESS_AGENT instead)")
 	}
+
 	return writeIdentFile(path, name)
 }
 
@@ -136,6 +148,7 @@ func writeIdentFile(path, name string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+
 	return os.WriteFile(path, []byte(name+"\n"), 0o600)
 }
 
@@ -146,9 +159,11 @@ func clearIdentity(p paths) error {
 	if path == "" {
 		return nil
 	}
+
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	return nil
 }
 
@@ -160,6 +175,7 @@ func roomPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
+
 	return filepath.Join(p.dir, "room", stateKey(sid))
 }
 
@@ -175,6 +191,7 @@ func writeRoom(p paths, room string) error {
 	if path == "" {
 		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / GROK_SESSION_ID / MESS_SESSION_ID); cannot persist a room (pass --room or set MESS_ROOM instead)")
 	}
+
 	return writeIdentFile(path, room)
 }
 
@@ -185,8 +202,10 @@ func clearRoom(p paths) error {
 	if path == "" {
 		return nil
 	}
+
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	return nil
 }

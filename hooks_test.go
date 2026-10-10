@@ -32,29 +32,37 @@ type hookEnv struct {
 
 func newHookEnv(t *testing.T) *hookEnv {
 	t.Helper()
+
 	if testing.Short() {
 		t.Skip("builds a binary and runs a daemon")
 	}
+
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("hooks require jq")
 	}
+
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "mess")
+
 	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building mess: %v\n%s", err, out)
 	}
+
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	e := &hookEnv{t: t, bin: bin, dir: filepath.Join(dir, "state"), tmp: filepath.Join(dir, "tmp"), hook: filepath.Join(wd, "hooks")}
 	for _, d := range []string{e.dir, e.tmp} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	t.Cleanup(func() { _ = e.command("", "stop").Run() })
+
 	return e
 }
 
@@ -70,22 +78,26 @@ func (e *hookEnv) env(as string, extra ...string) []string {
 	if as != "" {
 		env = append(env, "MESS_AGENT="+as, "MESS_SESSION_ID=sess-"+as)
 	}
+
 	return append(env, extra...)
 }
 
 func (e *hookEnv) command(as string, args ...string) *exec.Cmd {
 	cmd := exec.Command(e.bin, args...)
 	cmd.Env = e.env(as)
+
 	return cmd
 }
 
 // mess runs a mess command and fails the test if it errors.
 func (e *hookEnv) mess(as string, args ...string) string {
 	e.t.Helper()
+
 	out, err := e.command(as, args...).CombinedOutput()
 	if err != nil {
 		e.t.Fatalf("mess %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+
 	return string(out)
 }
 
@@ -101,8 +113,10 @@ func (e *hookEnv) waitListening(as string, want bool, within time.Duration) bool
 		if e.listening(as) == want {
 			return true
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	return false
 }
 
@@ -118,8 +132,10 @@ type runningHook struct {
 // not (and does not re-arm).
 func (h *runningHook) wait(t *testing.T, within time.Duration) (int, string) {
 	t.Helper()
+
 	done := make(chan error, 1)
 	go func() { done <- h.cmd.Wait() }()
+
 	select {
 	case err := <-done:
 		code := 0
@@ -128,6 +144,7 @@ func (h *runningHook) wait(t *testing.T, within time.Duration) (int, string) {
 		} else if err != nil {
 			t.Fatalf("waiting for wake hook: %v", err)
 		}
+
 		return code, h.stderr.String()
 	case <-time.After(within):
 		t.Fatalf("wake hook did not exit within %s (it kept parking)", within)
@@ -139,12 +156,16 @@ func (h *runningHook) wait(t *testing.T, within time.Duration) (int, string) {
 func (e *hookEnv) wakeHook(as string, extra ...string) *runningHook {
 	cmd := exec.Command("sh", filepath.Join(e.hook, "mess-wake.sh"))
 	cmd.Env = e.env(as, extra...)
+
 	var stderr bytes.Buffer
+
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		e.t.Fatalf("starting wake hook: %v", err)
 	}
+
 	e.t.Cleanup(func() { _ = cmd.Process.Kill() })
+
 	return &runningHook{cmd: cmd, stderr: &stderr}
 }
 
@@ -172,6 +193,7 @@ func TestWakeHookRepArksAfterLosingTheDrainRace(t *testing.T) {
 	// The doomed park still counts as listening until its batch window expires,
 	// so wait that out before asking whether the hook stood down or re-parked.
 	time.Sleep(1500 * time.Millisecond)
+
 	if !e.listening("victim") {
 		t.Fatal("hook stood down after losing the drain race — the agent is now unwakeable until its next Stop")
 	}
@@ -179,6 +201,7 @@ func TestWakeHookRepArksAfterLosingTheDrainRace(t *testing.T) {
 	// And it is a live park, not a stale listener: the next message must
 	// actually be delivered, as an asyncRewake (exit 2, body on stderr).
 	e.mess("sender", "send", "victim", "second")
+
 	code, stderr := h.wait(t, 10*time.Second)
 	if code != 2 || !strings.Contains(stderr, "second") {
 		t.Fatalf("re-parked hook did not deliver the next message: exit=%d stderr=%q", code, stderr)
@@ -197,6 +220,7 @@ func TestWakeHookRepArksWhenItsWakeLeavesOnlyQuietMail(t *testing.T) {
 	e.mess("sender", "sub", "work")
 
 	e.wakeHook("victim")
+
 	if !e.waitListening("victim", true, 5*time.Second) {
 		t.Fatal("wake hook never parked")
 	}
@@ -205,6 +229,7 @@ func TestWakeHookRepArksWhenItsWakeLeavesOnlyQuietMail(t *testing.T) {
 	// not a wake trigger on its own.
 	e.mess("sender", "pub", "work", "@sender only, not victim")
 	time.Sleep(300 * time.Millisecond)
+
 	if !e.listening("victim") {
 		t.Fatal("a quiet message must not wake the park")
 	}
@@ -216,6 +241,7 @@ func TestWakeHookRepArksWhenItsWakeLeavesOnlyQuietMail(t *testing.T) {
 	e.mess("victim", "recv", "--if-idle", "--kind", "direct", "--json")
 
 	time.Sleep(1500 * time.Millisecond)
+
 	if !e.listening("victim") {
 		t.Fatal("hook stood down when its wake turned up only quiet mail")
 	}
@@ -244,6 +270,7 @@ func TestWakeHookStandsDownWhenItsSessionDies(t *testing.T) {
 	}
 	// Still parking while the session lives, despite the short park timeout.
 	time.Sleep(time.Second)
+
 	if !e.listening("victim") {
 		t.Fatal("hook stood down while its session was still alive")
 	}
@@ -256,6 +283,7 @@ func TestWakeHookStandsDownWhenItsSessionDies(t *testing.T) {
 	if code, _ := hook.wait(t, 5*time.Second); code != 0 {
 		t.Fatalf("orphaned hook should stand down silently, got exit %d", code)
 	}
+
 	if !e.waitListening("victim", false, 2*time.Second) {
 		t.Fatal("orphaned hook left a phantom listener behind")
 	}
@@ -274,9 +302,11 @@ func TestSessionEndHookFreesTheWaiterForARelaunch(t *testing.T) {
 	if !e.waitListening("victim", true, 5*time.Second) {
 		t.Fatal("wake hook never parked")
 	}
+
 	e.mess("victim", "busy", "--ttl", "1h") // mid-turn when the session ends
 
 	cmd := exec.Command("sh", filepath.Join(e.hook, "mess-session-end.sh"))
+
 	cmd.Env = e.env("victim")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("session-end hook: %v\n%s", err, out)
@@ -287,9 +317,11 @@ func TestSessionEndHookFreesTheWaiterForARelaunch(t *testing.T) {
 	if code, _ := hook.wait(t, 5*time.Second); code != 0 {
 		t.Fatalf("evicted wake hook should exit cleanly, got %d", code)
 	}
+
 	if !e.waitListening("victim", false, 3*time.Second) {
 		t.Fatal("session-end left a phantom listener behind")
 	}
+
 	for line := range strings.SplitSeq(e.mess("victim", "ps"), "\n") {
 		if strings.Contains(line, "victim") && strings.Contains(line, "working") {
 			t.Fatalf("session-end must clear `working`, not leave busy's 1h backstop running: %q", line)
@@ -302,7 +334,9 @@ func TestSessionEndHookFreesTheWaiterForARelaunch(t *testing.T) {
 	if !e.waitListening("victim", true, 5*time.Second) {
 		t.Fatal("a relaunch under the same name could not park — the lock was never released")
 	}
+
 	e.mess("sender", "send", "victim", "mail after the session ended")
+
 	code, stderr := relaunch.wait(t, 10*time.Second)
 	if code != 2 || !strings.Contains(stderr, "mail after the session ended") {
 		t.Fatalf("relaunched hook did not deliver mail queued while away: exit=%d stderr=%q", code, stderr)
@@ -315,6 +349,7 @@ func (e *hookEnv) steer(as string, extra ...string) string {
 	cmd := exec.Command("sh", filepath.Join(e.hook, "mess-steer.sh"), "PreToolUse")
 	cmd.Env = e.env(as, extra...)
 	out, _ := cmd.Output()
+
 	return string(out)
 }
 
@@ -329,6 +364,7 @@ func TestSteerHookReAnnouncesStillUnreadMail(t *testing.T) {
 	e.mess("sender", "send", "victim", "hello")
 
 	fast := []string{"MESS_STEER_RENOTIFY=1", "MESS_STEER_RENOTIFY_MAX=1"}
+
 	first := e.steer("victim", fast...)
 	if !strings.Contains(first, "1 unread peer message") {
 		t.Fatalf("no notice for new mail: %q", first)
@@ -340,6 +376,7 @@ func TestSteerHookReAnnouncesStillUnreadMail(t *testing.T) {
 	}
 	// Once the window passes and the mail is still unread, say so again.
 	time.Sleep(2100 * time.Millisecond)
+
 	if retry := e.steer("victim", fast...); !strings.Contains(retry, "1 unread peer message") {
 		t.Fatalf("dropped notice was never retried: %q", retry)
 	}
@@ -347,6 +384,7 @@ func TestSteerHookReAnnouncesStillUnreadMail(t *testing.T) {
 	// Once read, it goes quiet again.
 	e.mess("victim", "recv")
 	time.Sleep(2100 * time.Millisecond)
+
 	if after := e.steer("victim", fast...); after != "" {
 		t.Fatalf("kept announcing after the inbox was drained: %q", after)
 	}
@@ -372,18 +410,22 @@ func TestSteerHookBacksOffOnRepeatsButNotOnNewMail(t *testing.T) {
 	if got := e.steer("victim", slow...); !strings.Contains(got, "unread") {
 		t.Fatalf("new mail should announce at once: %q", got)
 	}
+
 	time.Sleep(4 * time.Second) // measures 4-5, comfortably past the 3s base
+
 	if got := e.steer("victim", slow...); !strings.Contains(got, "unread") {
 		t.Fatalf("first repeat should fire after the base window: %q", got)
 	}
 	// The window has now doubled to 6s, so a much shorter wait is not enough.
 	time.Sleep(2 * time.Second) // measures 2-3, comfortably short of 6s
+
 	if got := e.steer("victim", slow...); got != "" {
 		t.Fatalf("second repeat fired too early — the backoff did not grow: %q", got)
 	}
 
 	// New mail bypasses the backoff entirely: it is information, not a nag.
 	e.mess("sender", "send", "victim", "second")
+
 	got := e.steer("victim", slow...)
 	if !strings.Contains(got, "2 unread") {
 		t.Fatalf("new mail must announce immediately despite the backoff: %q", got)
@@ -404,9 +446,11 @@ func TestSteerNoticeIsStampedAndIdentifiesTheMail(t *testing.T) {
 	if !regexp.MustCompile(`\d\d:\d\d:\d\d`).MatchString(got) {
 		t.Fatalf("notice should carry the time it was emitted: %q", got)
 	}
+
 	if !regexp.MustCompile(`newest m\d+`).MatchString(got) {
 		t.Fatalf("notice should name the newest message id: %q", got)
 	}
+
 	if strings.Contains(got, "still unread") {
 		t.Fatalf("the present-tense wording is what made a stale line misleading: %q", got)
 	}
@@ -425,6 +469,7 @@ func TestSteerNoticeInlinesShortBodies(t *testing.T) {
 	if !strings.Contains(got, "the build is green") {
 		t.Fatalf("body was not inlined, agent must still round-trip to read it: %q", got)
 	}
+
 	if !strings.Contains(got, "sender") {
 		t.Fatalf("preview should attribute the sender: %q", got)
 	}
@@ -441,6 +486,7 @@ func TestSteerInlineTruncatesAndCapsTheBatch(t *testing.T) {
 	e.mess("victim", "register", "victim")
 	e.mess("sender", "register", "sender")
 	e.mess("sender", "send", "victim", "first line\nsecond line\nthird line")
+
 	for i := range 5 {
 		e.mess("sender", "send", "victim", fmt.Sprintf("filler %d", i))
 	}
@@ -451,12 +497,15 @@ func TestSteerInlineTruncatesAndCapsTheBatch(t *testing.T) {
 			t.Fatalf("a body escaped truncation and blew up a line: %q", line)
 		}
 	}
+
 	if strings.Contains(got, "second line") {
 		t.Fatalf("multi-line body was not squashed/truncated: %q", got)
 	}
+
 	if !strings.Contains(got, "…") {
 		t.Fatalf("over-long body should be elided with an ellipsis: %q", got)
 	}
+
 	if !strings.Contains(got, "(+4 more)") {
 		t.Fatalf("messages beyond the inline cap should still be counted: %q", got)
 	}
@@ -474,7 +523,9 @@ func TestSteerInlineSurvivesShellMetacharacters(t *testing.T) {
 	if strings.Contains(got, "pwned\n") || !strings.Contains(got, "$(echo pwned)") {
 		t.Fatalf("body was not carried through literally: %q", got)
 	}
+
 	var probe map[string]any
+
 	line, _, _ := strings.Cut(strings.TrimSpace(got), "\n")
 	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &probe); err != nil {
 		t.Fatalf("notice is not valid JSON (%v); first line %q", err, line)
@@ -493,6 +544,7 @@ func TestSteerInlineCanBeDisabled(t *testing.T) {
 	if strings.Contains(got, "the build is green") {
 		t.Fatalf("MESS_STEER_INLINE=0 should suppress bodies: %q", got)
 	}
+
 	if !strings.Contains(got, "1 unread peer message") {
 		t.Fatalf("count notice should still fire: %q", got)
 	}
@@ -534,6 +586,7 @@ func TestShoutStaysInItsRoomUnlessAskedToCross(t *testing.T) {
 	if !strings.Contains(out, "1 agent(s) in your room") {
 		t.Fatalf("a plain shout should reach only the sender's room, got %q", out)
 	}
+
 	if got := e.mess("outsider", "recv"); strings.Contains(got, "everyone in my room") {
 		t.Fatalf("shout leaked across a room boundary: %q", got)
 	}
@@ -542,9 +595,11 @@ func TestShoutStaysInItsRoomUnlessAskedToCross(t *testing.T) {
 	if !strings.Contains(out, "2 agent(s) in every room") {
 		t.Fatalf("--host-wide should cross rooms, got %q", out)
 	}
+
 	if got := e.mess("outsider", "recv"); !strings.Contains(got, "everyone everywhere") {
 		t.Fatalf("--host-wide shout did not reach the other room: %q", got)
 	}
+
 	_ = e.mess("bob", "recv")
 }
 
@@ -563,11 +618,13 @@ func TestShoutWakesAParkedWaiterAndAPlainBroadcastDoesNot(t *testing.T) {
 	// A plain, unmentioning broadcast must leave it parked.
 	e.mess("alice", "broadcast", "routine status, nobody in particular")
 	time.Sleep(1500 * time.Millisecond)
+
 	if !e.listening("bob") {
 		t.Fatal("a plain broadcast woke a --no-broadcast waiter — that is the wake storm this filter exists to prevent")
 	}
 
 	e.mess("alice", "shout", "everybody up")
+
 	code, stderr := h.wait(t, 10*time.Second)
 	if code != 2 || !strings.Contains(stderr, "everybody up") {
 		t.Fatalf("shout did not wake the parked hook: exit=%d stderr=%q", code, stderr)
@@ -587,6 +644,7 @@ func TestBroadcastMentionWakesTheNamedAgentEndToEnd(t *testing.T) {
 	}
 
 	e.mess("alice", "broadcast", "@bob can you check the deploy?")
+
 	code, stderr := h.wait(t, 10*time.Second)
 	if code != 2 || !strings.Contains(stderr, "check the deploy") {
 		t.Fatalf("an @mentioning broadcast did not wake the named agent: exit=%d stderr=%q", code, stderr)
@@ -619,6 +677,7 @@ func TestAddressingAnotherRoomDoesNotLeakYourIdentityIntoIt(t *testing.T) {
 	if got := e.agents("alice"); strings.Contains(got, "coord/alice") {
 		t.Fatalf("addressing a room materialized a ghost copy of the sender inside it:\n%s", got)
 	}
+
 	if got := e.mess("carol", "recv"); !strings.Contains(got, "cross-room hello") {
 		t.Fatalf("the real recipient never got the message: %q", got)
 	}
@@ -629,11 +688,13 @@ func TestAddressingAnotherRoomDoesNotLeakYourIdentityIntoIt(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a reply to a name living in another room should be refused, not swallowed: %q", out)
 	}
+
 	if !strings.Contains(string(out), "--global") {
 		t.Fatalf("the refusal should name the flag that reaches the global room, got %q", out)
 	}
 	// ...and once aimed correctly it lands on the real alice.
 	e.mess("carol", "send", "alice", "answer", "--global")
+
 	if got := e.mess("alice", "recv"); !strings.Contains(got, "answer") {
 		t.Fatalf("the correctly-aimed reply never reached the real sender: %q", got)
 	}
@@ -666,6 +727,7 @@ func TestBroadcastPubAndShoutDoNotLeakTheSenderIntoOtherRooms(t *testing.T) {
 		!strings.Contains(out, "published into coord") || !strings.Contains(out, "everyone everywhere") {
 		t.Fatalf("cross-room fan-out did not deliver: %q", out)
 	}
+
 	if out := e.mess("dave", "recv"); !strings.Contains(out, "everyone everywhere") {
 		t.Fatalf("host-wide shout did not reach the other room: %q", out)
 	}
@@ -686,6 +748,7 @@ func TestReplyCanAimAtAnotherRoom(t *testing.T) {
 	if got := e.mess("carol", "recv"); !strings.Contains(got, "answer back to coord") {
 		t.Fatalf("cross-room reply never arrived: %q", got)
 	}
+
 	if got := e.agents("alice"); strings.Contains(got, "coord/alice") {
 		t.Fatalf("replying into a room leaked an identity there:\n%s", got)
 	}
@@ -705,11 +768,13 @@ func TestAskIsAnsweredByAPlainMentionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = park.Process.Kill() }()
+
 	if !e.waitListening("bob", true, 5*time.Second) {
 		t.Fatal("bob never parked")
 	}
 
 	asked := make(chan string, 1)
+
 	go func() {
 		out, _ := e.command("alice", "ask", "bob", "ready to deploy?", "--timeout", "15s").CombinedOutput()
 		asked <- string(out)
@@ -743,12 +808,14 @@ func TestAWokenAgentsInboxIsAlreadyEmpty(t *testing.T) {
 	if !e.waitListening("bob", true, 5*time.Second) {
 		t.Fatal("wake hook never parked")
 	}
+
 	e.mess("alice", "send", "bob", "the actual message body")
 
 	code, stderr := h.wait(t, 10*time.Second)
 	if code != 2 {
 		t.Fatalf("want an asyncRewake delivery (exit 2), got %d", code)
 	}
+
 	if !strings.Contains(stderr, "the actual message body") {
 		t.Fatalf("the wake must carry the body itself, got %q", stderr)
 	}
@@ -770,20 +837,25 @@ func TestAWakeLeavesNonWakingBacklogQueued(t *testing.T) {
 	if !e.waitListening("bob", true, 5*time.Second) {
 		t.Fatal("wake hook never parked")
 	}
+
 	e.mess("alice", "broadcast", "fleet notice nobody is woken for")
 	time.Sleep(500 * time.Millisecond)
+
 	if !e.listening("bob") {
 		t.Fatal("a plain broadcast must not wake the park")
 	}
+
 	e.mess("alice", "send", "bob", "the direct message that wakes")
 
 	code, stderr := h.wait(t, 10*time.Second)
 	if code != 2 || !strings.Contains(stderr, "the direct message that wakes") {
 		t.Fatalf("want the direct message delivered on wake, got exit=%d stderr=%q", code, stderr)
 	}
+
 	if strings.Contains(stderr, "fleet notice") {
 		t.Fatal("a plain broadcast should not be swept into the wake injection")
 	}
+
 	if got := e.mess("bob", "recv"); !strings.Contains(got, "fleet notice") {
 		t.Fatalf("the non-waking broadcast should still be queued for a later recv, got %q", got)
 	}
@@ -803,12 +875,15 @@ func TestAskNotifyHookResolvesItsIdentityLikeTheOthers(t *testing.T) {
 		cmd.Env = env
 		cmd.Stdin = strings.NewReader(stdin)
 		out, err := cmd.CombinedOutput()
+
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		}
+
 		return string(out), code
 	}
+
 	const askInput = `{"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"ship it?"}]}}`
 
 	// A session with an identity gets past the guard (notify-send may be absent
@@ -821,11 +896,13 @@ func TestAskNotifyHookResolvesItsIdentityLikeTheOthers(t *testing.T) {
 	// preamble maps it across; without that this hook resolved no identity and
 	// silently did nothing, unlike its three siblings.
 	grok := []string{}
+
 	for _, kv := range e.env("alice") {
 		if !strings.HasPrefix(kv, "MESS_SESSION_ID=") {
 			grok = append(grok, kv)
 		}
 	}
+
 	grok = append(grok, "GROK_SESSION_ID=sess-alice")
 	cmd := exec.Command("sh", filepath.Join(e.hook, "mess-common.sh"))
 	cmd.Env = grok
@@ -833,10 +910,12 @@ func TestAskNotifyHookResolvesItsIdentityLikeTheOthers(t *testing.T) {
 
 	probe := exec.Command("sh", "-c", `. "$1/mess-common.sh"; printf '%s' "$who"`, "sh", e.hook)
 	probe.Env = grok
+
 	out, err := probe.Output()
 	if err != nil {
 		t.Fatalf("probing the shared preamble: %v", err)
 	}
+
 	if string(out) != "alice" {
 		t.Fatalf("the shared preamble must map GROK_SESSION_ID into an identity, resolved %q", out)
 	}
@@ -847,22 +926,27 @@ func TestAskNotifyHookResolvesItsIdentityLikeTheOthers(t *testing.T) {
 func TestHooksNoOpIfTheSharedPreambleIsMissing(t *testing.T) {
 	e := newHookEnv(t)
 	bare := t.TempDir()
+
 	for _, h := range []string{"mess-wake.sh", "mess-steer.sh", "mess-session-end.sh", "mess-ask-notify.sh"} {
 		src, err := os.ReadFile(filepath.Join(e.hook, h))
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := os.WriteFile(filepath.Join(bare, h), src, 0o755); err != nil {
 			t.Fatal(err)
 		}
+
 		cmd := exec.Command("sh", filepath.Join(bare, h))
 		cmd.Env = e.env("alice")
 		cmd.Stdin = strings.NewReader("{}")
 		out, err := cmd.CombinedOutput()
+
 		code := 0
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		}
+
 		if code != 0 {
 			t.Fatalf("%s should stand down quietly without mess-common.sh, got exit %d: %s", h, code, out)
 		}
@@ -887,6 +971,7 @@ func TestHooksDoNotExecuteShellMetacharactersInABody(t *testing.T) {
 	}
 	// Sent via stdin so the test's own shell can't be the thing that mangles it.
 	send := e.command("alice", "send", "bob")
+
 	send.Stdin = strings.NewReader(hostile)
 	if out, err := send.CombinedOutput(); err != nil {
 		t.Fatalf("send: %v\n%s", err, out)
@@ -896,6 +981,7 @@ func TestHooksDoNotExecuteShellMetacharactersInABody(t *testing.T) {
 	if !strings.Contains(stderr, "`touch "+canary+"`") {
 		t.Fatalf("the body should reach the agent verbatim, backticks and all: %q", stderr)
 	}
+
 	for _, f := range []string{canary, canary + "2"} {
 		if _, err := os.Stat(f); err == nil {
 			t.Fatalf("a message body was EXECUTED by the hook: %s exists", f)
@@ -916,12 +1002,16 @@ func TestWakeAdvisesOnBackticksOnceAndOnlyWhenRelevant(t *testing.T) {
 		if !e.waitListening("bob", true, 5*time.Second) {
 			t.Fatal("wake hook never parked")
 		}
+
 		send := e.command("alice", "send", "bob")
+
 		send.Stdin = strings.NewReader(body)
 		if out, err := send.CombinedOutput(); err != nil {
 			t.Fatalf("send: %v\n%s", err, out)
 		}
+
 		_, stderr := h.wait(t, 10*time.Second)
+
 		return stderr
 	}
 
@@ -929,9 +1019,11 @@ func TestWakeAdvisesOnBackticksOnceAndOnlyWhenRelevant(t *testing.T) {
 	if got := deliver("plain prose, no metacharacters"); strings.Contains(got, advice) {
 		t.Fatalf("advice fired for a body with nothing to warn about: %q", got)
 	}
+
 	if got := deliver("see `go build ./...` in the log"); !strings.Contains(got, advice) {
 		t.Fatalf("advice did not fire for a body containing backticks: %q", got)
 	}
+
 	if got := deliver("and `make test` too"); strings.Contains(got, advice) {
 		t.Fatalf("advice repeated — it must be said once per agent, not per message: %q", got)
 	}
@@ -951,14 +1043,17 @@ func TestQualifiedNameAddressesAnAgentInAnotherRoom(t *testing.T) {
 	bz := func(args ...string) *exec.Cmd {
 		cmd := exec.Command(e.bin, append(args, "--as", "breeze")...)
 		cmd.Env = e.env("") // no MESS_AGENT: a long-lived daemon has no identity
+
 		return cmd
 	}
 	if out, err := bz("send", "coord/roomer", "stage build succeeded").CombinedOutput(); err != nil {
 		t.Fatalf("qualified send failed: %v\n%s", err, out)
 	}
+
 	if out, err := bz("pub", "coord/ci", "stage build succeeded").CombinedOutput(); err != nil {
 		t.Fatalf("qualified pub failed: %v\n%s", err, out)
 	}
+
 	got := e.mess("roomer", "recv")
 	if !strings.Contains(got, "stage build succeeded") {
 		t.Fatalf("the room-joined agent never got the notification: %q", got)
@@ -970,6 +1065,7 @@ func TestQualifiedNameAddressesAnAgentInAnotherRoom(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a bare cross-room name must still be refused: %q", out)
 	}
+
 	if !strings.Contains(string(out), `"coord/roomer"`) {
 		t.Fatalf("the refusal should name the address that works: %q", out)
 	}
@@ -989,6 +1085,7 @@ func TestReplyRefusesAnAmbiguousTarget(t *testing.T) {
 	for _, n := range []string{"me", "alice", "bob"} {
 		e.mess(n, "register", n)
 	}
+
 	e.mess("alice", "send", "me", "first question")
 	e.mess("me", "recv")
 	e.mess("me", "reply", "answering alice") // opens a thread with alice
@@ -999,6 +1096,7 @@ func TestReplyRefusesAnAmbiguousTarget(t *testing.T) {
 	if err == nil {
 		t.Fatalf("an ambiguous reply must be refused, not guessed: %q", out)
 	}
+
 	for _, want := range []string{"ambiguous", "alice", "bob", "--thread", "thread close"} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("refusal should mention %q so the caller can resolve it: %q", want, out)
@@ -1009,6 +1107,7 @@ func TestReplyRefusesAnAmbiguousTarget(t *testing.T) {
 	if out, err := e.command("me", "thread", "close").CombinedOutput(); err != nil {
 		t.Fatalf("thread close: %v\n%s", err, out)
 	}
+
 	if got := e.mess("me", "reply", "now unambiguous"); !strings.Contains(got, "bob") {
 		t.Fatalf("after closing the stale thread, reply should answer the newest: %q", got)
 	}
@@ -1026,6 +1125,7 @@ func TestInviteEndToEnd(t *testing.T) {
 	if !strings.Contains(out, "mess accept") {
 		t.Fatalf("the sender should be told how the invitee accepts: %q", out)
 	}
+
 	token := regexp.MustCompile(`accept (m\d+)`).FindStringSubmatch(out)
 	if token == nil {
 		t.Fatalf("no invite token in %q", out)
@@ -1040,6 +1140,7 @@ func TestInviteEndToEnd(t *testing.T) {
 	if out := e.mess("fable", "accept", token[1]); !strings.Contains(out, "#peri-refactor") {
 		t.Fatalf("accept should say what was joined: %q", out)
 	}
+
 	if ps := e.mess("fable", "ps"); !strings.Contains(ps, "peri-refactor") {
 		t.Fatalf("accepting should have subscribed fable: %q", ps)
 	}
@@ -1059,6 +1160,7 @@ func TestRoomInviteRefusesToMoveYouSilently(t *testing.T) {
 	e.mess("busy", "room", "join", "other")
 
 	out := e.mess("host", "invite", "--room", "other", "busy", "coord", "come over")
+
 	token := regexp.MustCompile(`accept (m\d+)`).FindStringSubmatch(out)
 	if token == nil {
 		t.Fatalf("no invite token in %q", out)
@@ -1068,9 +1170,11 @@ func TestRoomInviteRefusesToMoveYouSilently(t *testing.T) {
 	if err == nil {
 		t.Fatalf("accepting must not silently move an agent out of its room: %q", res)
 	}
+
 	if !strings.Contains(string(res), "--force") || !strings.Contains(string(res), "other") {
 		t.Fatalf("the refusal should name the move and the way to consent: %q", res)
 	}
+
 	if out := e.mess("busy", "accept", token[1], "--force"); !strings.Contains(out, "coord") {
 		t.Fatalf("--force should complete the move: %q", out)
 	}
@@ -1093,6 +1197,7 @@ func TestRegisterRefusesASecondNameForTheSameSession(t *testing.T) {
 	if err == nil {
 		t.Fatalf("registering a second name from the same session should be refused, got: %s", out)
 	}
+
 	if !strings.Contains(string(out), "already") || !strings.Contains(string(out), "mess rename steer-probe") {
 		t.Fatalf("refusal should name the current identity and the rename path: %s", out)
 	}
@@ -1101,9 +1206,11 @@ func TestRegisterRefusesASecondNameForTheSameSession(t *testing.T) {
 	if ps := e.mess("victim", "ps"); strings.Contains(ps, "steer-probe") {
 		t.Fatalf("the refused name must not reach the daemon: %s", ps)
 	}
+
 	if who := strings.TrimSpace(e.mess("victim", "whoami")); who != "victim" {
 		t.Fatalf("identity should be untouched, whoami = %q", who)
 	}
+
 	if got := e.mess("victim", "recv"); !strings.Contains(got, "mail that must stay reachable") {
 		t.Fatalf("inbox went unreachable: %q", got)
 	}
@@ -1118,6 +1225,7 @@ func TestRegisterSameNameAndRenameStillWork(t *testing.T) {
 	e.mess("victim", "register", "victim") // idempotent, like the hook
 	e.mess("victim", "register")           // bare re-validation
 	e.mess("victim", "rename", "survivor")
+
 	if who := strings.TrimSpace(e.mess("victim", "whoami")); who != "survivor" {
 		t.Fatalf("rename should still change identity, whoami = %q", who)
 	}

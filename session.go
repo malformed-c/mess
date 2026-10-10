@@ -41,15 +41,19 @@ func hostSessionPIDFrom(pid int) int {
 		if pid <= 1 {
 			return 0
 		}
+
 		comm := processComm(pid)
 		if comm == "" {
 			return 0
 		}
+
 		if hostSessionComms[comm] {
 			return pid
 		}
+
 		pid = parentPID(pid)
 	}
+
 	return 0
 }
 
@@ -58,10 +62,12 @@ func processComm(pid int) string {
 	if pid <= 0 {
 		return ""
 	}
+
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
 	if err != nil {
 		return ""
 	}
+
 	return strings.TrimSpace(string(b))
 }
 
@@ -71,14 +77,17 @@ func parentPID(pid int) int {
 	if err != nil {
 		return 0
 	}
+
 	for line := range strings.SplitSeq(string(b), "\n") {
 		if after, ok := strings.CutPrefix(line, "PPid:"); ok {
 			p, err := strconv.Atoi(strings.TrimSpace(after))
 			if err != nil {
 				return 0
 			}
+
 			return p
 		}
 	}
+
 	return 0
 }

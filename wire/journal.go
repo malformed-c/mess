@@ -51,19 +51,24 @@ type Filter struct {
 // is tolerated, not fatal — same defensive posture as loadSnapshotFile).
 func SearchJournal(path string, filter Filter) ([]Message, error) {
 	var grepRe *regexp.Regexp
+
 	if filter.Grep != "" {
 		re, err := regexp.Compile(filter.Grep)
 		if err != nil {
 			return nil, fmt.Errorf("invalid --grep pattern: %w", err)
 		}
+
 		grepRe = re
 	}
+
 	var cutoff time.Time
+
 	if filter.Since > 0 {
 		now := filter.Now
 		if now.IsZero() {
 			now = time.Now()
 		}
+
 		cutoff = now.Add(-filter.Since)
 	}
 
@@ -71,44 +76,57 @@ func SearchJournal(path string, filter Filter) ([]Message, error) {
 	for i := maxGenerations; i >= 1; i-- { // oldest generation first
 		files = append(files, fmt.Sprintf("%s.%d", path, i))
 	}
+
 	files = append(files, path) // current, newest, active file last
 
 	var out []Message
+
 	for _, fp := range files {
 		f, err := os.Open(fp)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
+
 			return nil, err
 		}
+
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow lines well past a giant message body
+
 		for sc.Scan() {
 			var line JournalLine
 			if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
 				continue // truncated/corrupt line; skip, don't fail the whole query
 			}
+
 			if !filter.All && line.Room != filter.Room {
 				continue
 			}
+
 			if filter.From != "" && !strings.EqualFold(line.From, filter.From) {
 				continue
 			}
+
 			if filter.To != "" && !strings.EqualFold(line.To, filter.To) {
 				continue
 			}
+
 			if filter.Topic != "" && line.Topic != filter.Topic {
 				continue
 			}
+
 			if !cutoff.IsZero() && line.Time.Before(cutoff) {
 				continue
 			}
+
 			if grepRe != nil && !grepRe.MatchString(line.Body) {
 				continue
 			}
+
 			out = append(out, line.Message)
 		}
+
 		if err := sc.Err(); err != nil {
 			// e.g. a line past the buffer cap. Best-effort: report it if the
 			// host wired up a logger, otherwise carry on with what parsed.
@@ -116,11 +134,14 @@ func SearchJournal(path string, filter Filter) ([]Message, error) {
 				Debugf("journal scan of %s stopped early: %v", fp, err)
 			}
 		}
+
 		f.Close()
 	}
+
 	if filter.Max > 0 && filter.Max < len(out) {
 		out = out[len(out)-filter.Max:]
 	}
+
 	return out, nil
 }
 
@@ -130,9 +151,11 @@ func ParseSince(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, nil
 	}
+
 	if d, err := time.ParseDuration(s); err == nil {
 		return d, nil
 	}
+
 	if n := len(s); n > 1 {
 		unit := s[n-1]
 		if num, err := strconv.Atoi(s[:n-1]); err == nil {
@@ -144,5 +167,6 @@ func ParseSince(s string) (time.Duration, error) {
 			}
 		}
 	}
+
 	return 0, fmt.Errorf("invalid duration %q (try 90s, 15m, 3h, 2d, 1w)", s)
 }

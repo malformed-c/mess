@@ -38,10 +38,12 @@ var events = &eventLog{}
 func (e *eventLog) log(msg string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.count > 0 && msg == e.last {
 		e.count++
 		return
 	}
+
 	e.flushLocked()
 	e.last, e.count = msg, 1
 }
@@ -56,6 +58,7 @@ func (e *eventLog) flushLocked() {
 	default:
 		log.Printf("%s (×%d)", e.last, e.count)
 	}
+
 	e.count = 0
 }
 
@@ -64,6 +67,7 @@ func (e *eventLog) flushLocked() {
 func (e *eventLog) flush() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	e.flushLocked()
 }
 
@@ -99,6 +103,7 @@ func (d *daemon) journalAppend(room string, m Message) {
 	if d.journal == nil {
 		return
 	}
+
 	if err := d.journal.append(journalLine{Message: m, Room: room, Event: "sent"}); err != nil {
 		dlog("journal append failed: %v", err)
 	}
@@ -121,6 +126,7 @@ func (d *daemon) expireDurably(maxAge time.Duration) []Message {
 	if len(preview) == 0 {
 		return nil
 	}
+
 	if d.journal != nil {
 		now := d.broker.now()
 		for _, m := range preview {
@@ -130,6 +136,7 @@ func (d *daemon) expireDurably(maxAge time.Duration) []Message {
 			}
 		}
 	}
+
 	return d.broker.ExpireInbox(maxAge, false)
 }
 
@@ -146,34 +153,44 @@ func (d *daemon) startAutoSweep(stop <-chan struct{}) {
 	if os.Getenv("MESS_AUTO_EXPIRE") != "1" {
 		return
 	}
+
 	cleanupMaxAge := 24 * time.Hour
+
 	if v := os.Getenv("MESS_CLEANUP_MAXAGE"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cleanupMaxAge = d
 		}
 	}
+
 	expireMaxAge := defaultExpireMaxAge
+
 	if v := os.Getenv("MESS_EXPIRE_MAXAGE"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			expireMaxAge = d
 		}
 	}
+
 	interval := time.Hour
+
 	if v := os.Getenv("MESS_CLEANUP_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			interval = d
 		}
 	}
+
 	elog("auto-sweep enabled: cleanup maxage=%s, expire maxage=%s, every %s", cleanupMaxAge, expireMaxAge, interval)
+
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
+
 		for {
 			select {
 			case <-ticker.C:
 				if names := d.broker.Cleanup(cleanupMaxAge, false); len(names) > 0 {
 					elog("auto-sweep: cleanup removed %d agent(s): %v", len(names), names)
 				}
+
 				if expired := d.expireDurably(expireMaxAge); len(expired) > 0 {
 					elog("auto-sweep: expired %d unread message(s)", len(expired))
 				}
@@ -218,6 +235,7 @@ func runDaemon(p paths) error {
 
 	// Periodically flush the dedup logger so a trailing collapsed line lands.
 	flushTicker := time.NewTicker(time.Second)
+
 	go func() {
 		for {
 			select {
@@ -232,16 +250,22 @@ func runDaemon(p paths) error {
 	d.startAutoSweep(d.stop)
 
 	elog("mess daemon listening on %s", p.sock)
+
 	go d.acceptLoop()
+
 	<-d.stop
 	flushTicker.Stop()
+
 	_ = ln.Close()
 	_ = os.Remove(p.sock)
+
 	if d.journal != nil {
 		_ = d.journal.close()
 	}
+
 	elog("mess daemon stopped")
 	events.flush()
+
 	return nil
 }
 
@@ -249,6 +273,7 @@ func runDaemon(p paths) error {
 func (d *daemon) persist(s snapshot) {
 	d.saveMu.Lock()
 	defer d.saveMu.Unlock()
+
 	if err := saveSnapshot(d.paths.state, s); err != nil {
 		elog("warning: could not save state: %v", err)
 	}
@@ -266,12 +291,14 @@ func (d *daemon) acceptLoop() {
 				return
 			}
 		}
+
 		go d.handle(conn)
 	}
 }
 
 func (d *daemon) handle(conn net.Conn) {
 	defer conn.Close()
+
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		writeResp(conn, Response{Error: "bad request: " + err.Error()})
@@ -296,21 +323,26 @@ func (d *daemon) handle(conn net.Conn) {
 		if ok, msg := d.broker.ClaimIdentity(who, req.Session, req.SessionPID); !ok {
 			elog("%s as %s refused: %s", req.Op, req.As, msg)
 			writeResp(conn, Response{Error: msg})
+
 			return
 		}
 	}
+
 	if req.Op == "listen" { // streaming: many responses over one held connection
 		d.handleListen(conn, req)
 		return
 	}
+
 	if req.Op == "recv" { // may block (recv --wait); needs disconnect detection
 		writeResp(conn, d.recv(conn, req))
 		return
 	}
+
 	if req.Op == "ask" || req.Op == "await" { // may block; needs disconnect detection like recv
 		writeResp(conn, d.askOrAwait(conn, req))
 		return
 	}
+
 	writeResp(conn, d.dispatch(req))
 }
 
@@ -322,57 +354,75 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 		writeResp(conn, Response{Error: "no identity for listen"})
 		return
 	}
+
 	who := agentKey(req.Room, req.As)
+
 	var idle time.Duration
+
 	if req.Timeout != "" {
 		dur, err := time.ParseDuration(req.Timeout)
 		if err != nil {
 			writeResp(conn, Response{Error: "invalid timeout: " + err.Error()})
 			return
 		}
+
 		idle = dur
 	}
 
 	d.broker.AddListener(who)
 	defer d.broker.RemoveListener(who)
+
 	elog("listen %s start (waiting on %s)", req.As, kindsLabel(req.Kinds))
 	defer elog("listen %s end", req.As)
 
 	// Detect client disconnect by watching for EOF on the connection.
 	gone := make(chan struct{})
+
 	go func() { _, _ = io.Copy(io.Discard, conn); close(gone) }() // copy error IS the EOF signal; best-effort
 
 	enc := json.NewEncoder(conn)
-	var timer *time.Timer
-	var idleCh <-chan time.Time
+
+	var (
+		timer  *time.Timer
+		idleCh <-chan time.Time
+	)
+
 	if idle > 0 {
 		timer = time.NewTimer(idle)
+
 		idleCh = timer.C
 		defer timer.Stop()
 	}
+
 	resetIdle := func() {
 		if timer == nil {
 			return
 		}
+
 		if !timer.Stop() {
 			select {
 			case <-timer.C:
 			default:
 			}
 		}
+
 		timer.Reset(idle)
 	}
 
 	kinds := kindSet(req.Kinds)
+
 	batch, _ := time.ParseDuration(req.Batch) // 0 on empty/invalid = no batching
 	for {
 		if msgs := d.broker.DrainKinds(who, false, req.Max, kinds); len(msgs) > 0 {
 			if err := enc.Encode(Response{OK: true, Messages: msgs, Count: len(msgs)}); err != nil {
 				return
 			}
+
 			resetIdle()
+
 			continue
 		}
+
 		ch := d.broker.waitChan(who, kinds)
 		select {
 		case <-ch:
@@ -416,6 +466,7 @@ func actsAsSelf(op string) bool {
 		"bridge", "unbridge", "export", "thread-list", "ask", "await":
 		return true
 	}
+
 	return false
 }
 
@@ -440,6 +491,7 @@ func parseInviteTarget(target, callerRoom string) (topic, room string) {
 	if rest, found := strings.CutPrefix(target, "#"); found {
 		return rest, callerRoom
 	}
+
 	return "", target
 }
 
@@ -453,6 +505,7 @@ func callerRoom(req Request) string {
 	if req.SelfRoom != nil {
 		return *req.SelfRoom
 	}
+
 	return req.Room
 }
 
@@ -478,9 +531,11 @@ func (d *daemon) dispatch(req Request) Response {
 	if r, n, ok := parseDisplayName(req.To); ok {
 		to = agentKey(r, n)
 	}
+
 	if isUserHandle(req.To) {
 		to = req.To
 	}
+
 	topic := topicKey(req.Room, req.Topic)
 	if r, n, ok := parseDisplayName(req.Topic); ok {
 		topic = topicKey(r, n)
@@ -493,28 +548,35 @@ func (d *daemon) dispatch(req Request) Response {
 		if err := rejectSlashName(req.As); err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		if ok, msg := b.RegisterOwned(who, req.Session, req.SessionPID, req.Force); !ok {
 			elog("register %s refused: %s", req.As, msg)
 			return Response{Error: msg}
 		}
+
 		elog("register %s", req.As)
+
 		return Response{OK: true}
 	case "room-join":
 		if err := rejectSlashName(req.As); err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		from := agentKey(req.FromRoom, req.As)
 		if ok, msg := b.JoinRoom(from, who, req.Session, req.SessionPID, req.Force); !ok {
 			elog("room-join %s in %q refused: %s", req.As, req.Room, msg)
 			return Response{Error: msg}
 		}
+
 		elog("room-join %s in %q", req.As, req.Room)
+
 		return Response{OK: true}
 	case "room-leave":
 		if b.RemoveAgent(who) {
 			elog("room-leave %s from %q", req.As, req.Room)
 			return Response{OK: true, Count: 1}
 		}
+
 		return Response{OK: true, Count: 0} // idempotent
 	case "send":
 		if !isUserHandle(req.To) && !b.IsRegistered(to) {
@@ -522,9 +584,12 @@ func (d *daemon) dispatch(req Request) Response {
 				elog("send %s -> %s refused: registered in room(s) %q, not %q", req.As, req.To, strings.Join(others, ","), req.Room)
 				return Response{Error: crossRoomGhostMsg(req.To, req.Room, others)}
 			}
+
 			elog("send %s -> %s refused: not a registered agent", req.As, req.To)
+
 			return Response{Error: fmt.Sprintf("no such agent %q — send requires a previously-registered recipient (it may just not have registered yet, or the name is a typo)", req.To)}
 		}
+
 		resp, m := d.send(req, self, to)
 		if resp.Error == "" {
 			notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
@@ -536,11 +601,13 @@ func (d *daemon) dispatch(req Request) Response {
 				elog("send %s -> %s: mention is ambiguous across %d open asks from %s", req.As, req.To, len(tokens), asker)
 			}
 		}
+
 		return resp
 	case "broadcast":
 		m, n := b.Broadcast(self, req.Room, req.Body, req.Loud, req.HostWide)
 		if req.Loud {
 			notifyUserLoud(req.As, req.Body)
+
 			if req.HostWide {
 				elog("broadcast %s -> %d agent(s) (loud, host-wide)", req.As, n)
 			} else {
@@ -550,53 +617,67 @@ func (d *daemon) dispatch(req Request) Response {
 			notifyUser(req.As, "", req.Body)
 			elog("broadcast %s -> %d agent(s)", req.As, n)
 		}
+
 		d.journalAppend(req.Room, m)
+
 		resp := Response{OK: true, Count: n}
 		if unreached := b.MentionsNotInRoom(callerRoom(req), req.Body, req.HostWide); len(unreached) > 0 {
 			resp.Unreached = unreached
 			elog("broadcast %s: @%s not reachable here", req.As, strings.Join(unreached, ", @"))
 		}
+
 		return resp
 	case "pub":
 		m, delivered, woke := b.pub(self, topic, req.Body, req.ThreadID, attachFromRequest(req))
 		notifyUser(req.As, "", req.Body)
+
 		if woke < delivered {
 			elog("pub %s #%s -> %d sub(s), woke %d (@mention/thread)", req.As, req.Topic, delivered, woke)
 		} else {
 			elog("pub %s #%s -> %d sub(s)", req.As, req.Topic, delivered)
 		}
+
 		d.journalAppend(req.Room, m)
+
 		resp := Response{OK: true, Count: delivered, Woke: woke}
 		if unreached, members := b.MentionsNotSubscribed(topic, req.Body); len(unreached) > 0 {
 			resp.Unreached, resp.Members = unreached, members
 			elog("pub %s #%s: @%s not subscribed", req.As, req.Topic, strings.Join(unreached, ", @"))
 		}
+
 		return resp
 	case "invite":
 		if !isUserHandle(req.To) && !b.IsRegistered(to) {
 			if others, found := b.FindOtherRoom(req.Room, req.To); found {
 				return Response{Error: crossRoomGhostMsg(req.To, req.Room, others)}
 			}
+
 			return Response{Error: fmt.Sprintf("no such agent %q — invite requires a previously-registered recipient", req.To)}
 		}
+
 		topicName, roomName := parseInviteTarget(req.Invite, callerRoom(req))
+
 		m, err := b.Invite(self, to, topicName, roomName, req.Body)
 		if err != nil {
 			elog("invite %s -> %s refused: %v", req.As, req.To, err)
 			return Response{Error: err.Error()}
 		}
+
 		elog("invite %s -> %s to %s (token %s)", req.As, req.To, req.Invite, m.ID)
 		d.journalAppend(req.Room, m)
+
 		return Response{OK: true, ID: m.ID, Invite: req.Invite}
 	case "accept":
 		inv, err := b.LookupInvite(self, req.ThreadID)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		if inv.topic != "" {
 			b.Sub(self, topicKey(inv.room, inv.topic))
 			b.ClearInvite(req.ThreadID)
 			elog("accept %s -> #%s", req.As, inv.topic)
+
 			return Response{OK: true, Invite: inv.what()}
 		}
 		// A room join MOVES an identity: it migrates the inbox and every
@@ -606,21 +687,27 @@ func (d *daemon) dispatch(req Request) Response {
 		if cur := callerRoom(req); cur != "" && cur != inv.room && !req.Force {
 			return Response{Error: fmt.Sprintf("accepting moves you from room %s to %s, taking your inbox and subscriptions with you — re-run with --force if that is what you want", roomLabel(cur), roomLabel(inv.room))}
 		}
+
 		from := agentKey(callerRoom(req), req.As)
 		if ok, msg := b.JoinRoom(from, agentKey(inv.room, req.As), req.Session, req.SessionPID, req.Force); !ok {
 			return Response{Error: msg}
 		}
+
 		b.ClearInvite(req.ThreadID)
 		elog("accept %s -> room %q", req.As, inv.room)
+
 		return Response{OK: true, Invite: inv.what()}
 	case "decline":
 		inv, m, err := b.Decline(self, req.ThreadID, req.Body)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		elog("decline %s -> %s (%s)", req.As, inv.what(), req.ThreadID)
 		d.journalAppend(req.Room, m)
+
 		_, inviter := splitAgentKey(inv.inviter)
+
 		return Response{OK: true, Invite: inv.what(), Notified: inviter}
 	case "invites":
 		received, sent := b.PendingInvites(self)
@@ -633,16 +720,21 @@ func (d *daemon) dispatch(req Request) Response {
 		if session == 0 {
 			return Response{Error: fmt.Sprintf("pid %d resolves to no live agent session — it may have exited, or it may never have been one (only a process descended from a claude/node/grok session can be attributed)", req.SessionPID)}
 		}
+
 		names, alive := b.WhoIs(session)
 		if len(names) == 0 {
 			return Response{Error: fmt.Sprintf("pid %d belongs to session pid %d, but no registered agent claims it — an agent that never registered with a session id has no pid on record", req.SessionPID, session)}
 		}
+
 		var agents []AgentInfo
+
 		for _, key := range names {
 			room, bare := splitAgentKey(key)
 			agents = append(agents, AgentInfo{Name: bare, Room: room, Online: alive})
 		}
+
 		elog("whois %d -> %s", req.SessionPID, strings.Join(names, ", "))
+
 		return Response{OK: true, Agents: agents, SessionPID: session}
 	case "sub":
 		// Same reservation as rejectSlashName does for agents: a topic whose
@@ -651,7 +743,9 @@ func (d *daemon) dispatch(req Request) Response {
 		if err := rejectSlashTopic(req.Topic); err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		b.Sub(who, topic)
+
 		return Response{OK: true}
 	case "unsub":
 		b.Unsub(who, topic)
@@ -666,32 +760,40 @@ func (d *daemon) dispatch(req Request) Response {
 			if req.LocalRoom != req.Room && !req.Force {
 				return Response{Error: fmt.Sprintf("not currently in room %q; pass --force to bridge on its behalf", req.LocalRoom)}
 			}
+
 			localRoom = req.LocalRoom
 		}
+
 		remoteTopic := strings.TrimPrefix(req.RemoteTopic, "#")
 		dir := parseBridgeDirection(req.Direction)
+
 		var ttl time.Duration
+
 		if req.Timeout != "" {
 			if d, err := time.ParseDuration(req.Timeout); err == nil {
 				ttl = d
 			}
 		}
+
 		br, err := b.Bridge(localRoom, req.Topic, req.RemoteRoom, remoteTopic, dir, req.As, ttl, req.Force)
 		if err != nil {
 			elog("bridge %s -> %s refused: %s", displayName(localRoom, req.Topic), displayName(req.RemoteRoom, remoteTopic), err)
 			return Response{Error: err.Error()}
 		}
+
 		return Response{OK: true, Bridges: []BridgeInfo{bridgeToInfo(br)}}
 	case "unbridge":
 		if ok, desc := b.Unbridge(req.BridgeID); ok {
 			elog("BRIDGE removed: id=%s by=%s (%s)", req.BridgeID, req.As, desc)
 			return Response{OK: true, Count: 1}
 		}
+
 		return Response{OK: true, Count: 0} // idempotent
 	case "bridges":
 		return Response{OK: true, Bridges: b.ListBridges()}
 	case "export":
 		var msgs []Message
+
 		switch {
 		case req.Topic != "":
 			msgs = b.ExportTopic(topic, req.Max)
@@ -702,6 +804,7 @@ func (d *daemon) dispatch(req Request) Response {
 		default:
 			return Response{Error: "export requires --topic, --thread, or --to"}
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "thread-list":
 		threads := b.ListThreads(who)
@@ -711,6 +814,7 @@ func (d *daemon) dispatch(req Request) Response {
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		msgs, err := searchJournal(d.paths.journal, journalFilter{
 			Room: req.Room, All: req.All, From: req.From, To: req.To, Topic: req.Topic,
 			Grep: req.Grep, Since: since, Max: req.Max, Now: d.broker.now(),
@@ -718,27 +822,34 @@ func (d *daemon) dispatch(req Request) Response {
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "state":
 		b.SetState(who, req.Body)
 		return Response{OK: true}
 	case "warn":
 		ttl := 15 * time.Minute // default; auto-clears even if the agent never recovers
+
 		if req.Timeout != "" {
 			if d, err := time.ParseDuration(req.Timeout); err == nil {
 				ttl = d
 			}
 		}
+
 		b.SetWarn(who, req.Body, ttl)
+
 		return Response{OK: true}
 	case "busy":
 		dur := time.Hour // generous crash backstop; turn hooks refresh, Stop clears
+
 		if req.Timeout != "" {
 			if d, err := time.ParseDuration(req.Timeout); err == nil {
 				dur = d
 			}
 		}
+
 		b.SetBusy(who, dur)
+
 		return Response{OK: true}
 	case "unbusy":
 		b.ClearBusy(who)
@@ -746,18 +857,21 @@ func (d *daemon) dispatch(req Request) Response {
 	case "session-end":
 		b.EndSession(who)
 		elog("session-end %s", req.As)
+
 		return Response{OK: true}
 	case "rm":
 		if b.RemoveAgent(to) {
 			elog("rm %s", req.To)
 			return Response{OK: true, Count: 1}
 		}
+
 		return Response{OK: true, Count: 0} // idempotent: unknown agent is not an error
 	case "drain":
 		msgs := b.DrainQuiet(who, req.Max) // clear a backlog without touching/acking
 		if len(msgs) > 0 {
 			elog("drain %s -> %d", req.As, len(msgs))
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	case "replay":
 		msgs := b.Replay(who, req.Max) // recently-consumed history (recover a lost wake)
@@ -767,6 +881,7 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("unregister %s", req.As)
 			return Response{OK: true, Count: 1}
 		}
+
 		return Response{OK: true, Count: 0} // idempotent
 	case "rename":
 		if err := rejectSlashName(req.To); err != nil {
@@ -778,10 +893,13 @@ func (d *daemon) dispatch(req Request) Response {
 			elog("rename %s -> %s refused: %s", req.As, req.To, msg)
 			return Response{Error: msg}
 		}
+
 		elog("rename %s -> %s", req.As, req.To)
+
 		return Response{OK: true}
 	case "cleanup":
 		maxAge := 24 * time.Hour
+
 		if req.Timeout != "" {
 			if d, err := time.ParseDuration(req.Timeout); err == nil {
 				maxAge = d
@@ -789,28 +907,35 @@ func (d *daemon) dispatch(req Request) Response {
 				return Response{Error: "invalid duration: " + req.Timeout}
 			}
 		}
+
 		names := b.Cleanup(maxAge, req.Peek) // Peek == dry-run
 		if len(names) > 0 && !req.Peek {
 			elog("cleanup removed %d agent(s): %v", len(names), names)
 		}
+
 		return Response{OK: true, Count: len(names), Removed: names}
 	case "expire":
 		maxAge := defaultExpireMaxAge
+
 		if req.Timeout != "" {
 			d, err := time.ParseDuration(req.Timeout)
 			if err != nil {
 				return Response{Error: "invalid duration: " + req.Timeout}
 			}
+
 			maxAge = d
 		}
+
 		if req.Peek { // dry-run: preview only, never journal or commit
 			expired := b.ExpireInbox(maxAge, true)
 			return Response{OK: true, Expired: len(expired)}
 		}
+
 		expired := d.expireDurably(maxAge)
 		if len(expired) > 0 {
 			elog("expire dropped %d unread message(s) older than %s", len(expired), maxAge)
 		}
+
 		return Response{OK: true, Expired: len(expired)}
 	case "ps":
 		agents, topics := b.Ps(req.Room, req.All)
@@ -828,10 +953,12 @@ func kindSet(list []string) map[string]bool {
 	if len(list) == 0 {
 		return nil
 	}
+
 	m := make(map[string]bool, len(list))
 	for _, k := range list {
 		m[k] = true
 	}
+
 	return m
 }
 
@@ -841,11 +968,14 @@ func timerFor(spec string) (<-chan time.Time, func(), error) {
 	if spec == "" {
 		return nil, func() {}, nil
 	}
+
 	dur, err := time.ParseDuration(spec)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("invalid timeout: %w", err)
 	}
+
 	t := time.NewTimer(dur)
+
 	return t.C, func() { t.Stop() }, nil
 }
 
@@ -856,6 +986,7 @@ func attachFromRequest(req Request) *Attachment {
 	if req.AttachPath == "" {
 		return nil
 	}
+
 	return &Attachment{Path: req.AttachPath, Hash: req.AttachHash, Size: req.AttachSize, MTime: req.AttachMTime}
 }
 
@@ -864,14 +995,17 @@ func attachFromRequest(req Request) *Attachment {
 // only visible to the recipient's own inbox.
 func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	b := d.broker
+
 	attach := attachFromRequest(req)
 	if !req.Ack {
 		m, _, err := b.send(who, to, req.Body, req.ThreadID, false, attach, false, "")
 		if err != nil {
 			return Response{Error: err.Error()}, Message{}
 		}
+
 		pending, listening := b.Stat(to)
 		elog("send %s -> %s | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
+
 		return Response{OK: true, Count: 1}, m
 	}
 
@@ -880,14 +1014,17 @@ func (d *daemon) send(req Request, who, to string) (Response, Message) {
 	if err != nil {
 		return Response{Error: err.Error()}, Message{}
 	}
+
 	pending, listening := b.Stat(to)
 	elog("send %s -> %s (ack) | recipient pending=%d listening=%v", req.As, req.To, pending, listening)
+
 	timeout, stop, err := timerFor(req.Timeout)
 	if err != nil {
 		b.CancelAck(m.ID)
 		return Response{Error: err.Error()}, Message{}
 	}
 	defer stop()
+
 	select {
 	case <-ackCh:
 		return Response{OK: true, Count: 1, Acked: true}, m
@@ -916,21 +1053,26 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 		} else {
 			dlog("recv %s drained 0 (thread %s)", req.As, req.ThreadID)
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
+
 	if !req.Wait && req.IfIdle {
 		msgs, idle := b.DrainIfIdle(who, req.Max, trigger)
 		if !idle {
 			dlog("recv %s stood down (busy)", req.As)
 			return Response{OK: true, Busy: true}
 		}
+
 		if len(msgs) > 0 {
 			elog("recv %s drained %d (if-idle)%s", req.As, len(msgs), peekNote(req.Peek))
 		} else {
 			dlog("recv %s drained 0 (if-idle)", req.As)
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
+
 	if !req.Wait {
 		msgs := b.DrainKinds(who, req.Peek, req.Max, trigger)
 		if len(msgs) > 0 {
@@ -938,6 +1080,7 @@ func (d *daemon) recv(conn net.Conn, req Request) Response {
 		} else {
 			dlog("recv %s drained 0", req.As)
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -965,6 +1108,7 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 	// Watch for client disconnect, so a parked waiter whose client dies releases
 	// its listener count instead of leaking it (and showing a false "listening").
 	gone := make(chan struct{})
+
 	go func() { _, _ = io.Copy(io.Discard, conn); close(gone) }() // copy error IS the EOF signal; best-effort
 
 	// finish drains everything and returns. With --batch it first waits a short
@@ -980,8 +1124,10 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 				return Response{Error: "daemon shutting down"}
 			}
 		}
+
 		msgs := drain()
 		elog("%s woke -> drained %d", waitLabel, len(msgs))
+
 		if len(msgs) == 0 {
 			// We woke on real mail but drained nothing: another consumer got
 			// there first — a second wake-hook instance, or the agent's own
@@ -991,6 +1137,7 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 			// instead of standing down and going deaf until its next Stop.
 			return Response{OK: true, Count: 0, Reason: ReasonRaced}
 		}
+
 		return Response{OK: true, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -1011,7 +1158,9 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 	// instead of lingering as a ghost listener (and being resurrected on restart).
 	evicted := b.WatchEvict(who)
 	defer b.UnwatchEvict(who, evicted)
+
 	elog("%s parked", waitLabel)
+
 	for {
 		ch := wakeChan()
 		select {
@@ -1051,6 +1200,7 @@ func rejectSlashTopic(topic string) error {
 	if strings.Contains(topic, "/") {
 		return fmt.Errorf("topic names can't contain '/' (reserved for displaying room/topic pairs) — got %q; `mess pub <room>/<topic>` addresses a topic in another room", topic)
 	}
+
 	return nil
 }
 
@@ -1058,6 +1208,7 @@ func rejectSlashName(name string) error {
 	if strings.Contains(name, "/") {
 		return fmt.Errorf("agent names can't contain '/' (reserved for displaying room/name pairs) — got %q; use `mess room join <room>` to scope an identity to a room instead", name)
 	}
+
 	return nil
 }
 
@@ -1066,6 +1217,7 @@ func roomLabel(room string) string {
 	if room == "" {
 		return "(global)"
 	}
+
 	return room
 }
 
@@ -1084,11 +1236,14 @@ func crossRoomGhostMsg(bareName, callerRoom string, otherRooms []string) string 
 		for _, r := range otherRooms {
 			addrs = append(addrs, strconv.Quote(displayName(r, bareName)))
 		}
+
 		return fmt.Sprintf(
 			"%q is registered in %d different rooms (%s) and not in your room %s — mess will not guess which you meant; address one explicitly: %s",
 			bareName, len(otherRooms), strings.Join(otherRooms, ", "), roomLabel(callerRoom), strings.Join(addrs, " or "))
 	}
+
 	other := otherRooms[0]
+
 	return fmt.Sprintf(
 		"%q is registered in room %s, not your room %s — address it as %q, pass %s, or have it join your room",
 		bareName, roomLabel(other), roomLabel(callerRoom), displayName(other, bareName), roomFlagFor(other))
@@ -1101,6 +1256,7 @@ func roomFlagFor(room string) string {
 	if room == "" {
 		return "--global"
 	}
+
 	return "--room " + room
 }
 
@@ -1113,10 +1269,12 @@ func crossRoomHint(b *Broker, callerRoom, bareName string) string {
 	if !found {
 		return ""
 	}
+
 	if len(others) > 1 {
 		return fmt.Sprintf(" (it IS registered, but in %d different rooms (%s), none of them your room %s — address one explicitly, e.g. %q)",
 			len(others), strings.Join(others, ", "), roomLabel(callerRoom), displayName(others[0], bareName))
 	}
+
 	return fmt.Sprintf(" (it IS registered, but in room %s, not your room %s — pass %s to reach it there)",
 		roomLabel(others[0]), roomLabel(callerRoom), roomFlagFor(others[0]))
 }
@@ -1158,18 +1316,23 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 			if !b.IsRegistered(to) {
 				return Response{Error: fmt.Sprintf("no such agent %q — ask requires a previously-registered recipient%s", req.To, crossRoomHint(b, req.Room, req.To))}
 			}
+
 			if !b.IsOnline(to) {
 				return Response{Error: fmt.Sprintf("%q is offline — ask requires an online recipient (nobody's there to answer right now); use mess send if it can wait", req.To)}
 			}
 		}
+
 		m, err := b.SendAsk(who, to, req.Body)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
+
 		notifyUser(req.As, req.To, req.Body) // ping the human on a direct-to-mailbox or @mention
+
 		token = m.ID
 		elog("ask %s -> %s (token %s)", req.As, req.To, token)
 	}
+
 	if token == "" {
 		return Response{Error: "await requires a token"}
 	}
@@ -1181,6 +1344,7 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 		} else {
 			dlog("%s %s drained 0 (thread %s)", req.Op, req.As, token)
 		}
+
 		return Response{OK: true, ID: token, Messages: msgs, Count: len(msgs)}
 	}
 
@@ -1190,6 +1354,7 @@ func (d *daemon) askOrAwait(conn net.Conn, req Request) Response {
 		func() []Message { return b.DrainAnswers(who, token, req.Peek, req.Max) },
 	)
 	resp.ID = token
+
 	return resp
 }
 
@@ -1198,6 +1363,7 @@ func peekNote(peek bool) string {
 	if peek {
 		return " (peek; left queued)"
 	}
+
 	return ""
 }
 
@@ -1206,5 +1372,6 @@ func kindsLabel(kinds []string) string {
 	if len(kinds) == 0 {
 		return "all"
 	}
+
 	return strings.Join(kinds, ",")
 }

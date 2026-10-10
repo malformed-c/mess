@@ -12,13 +12,13 @@ linters:
     - misspell
     - unconvert
     - modernize
-    # wsl_v5 (whitespace style, from velocity via periapsis: a blank line where
-    # a block ends and a new statement group begins) is deliberately NOT in
-    # the default set yet: measured 2026-10-10, this tree carries ~1790
-    # findings, and a gate that fires 1791 times on style is a gate nobody
-    # finishes reading — periapsis's own stated anti-pattern. It runs via
-    # `just wsl` / `just wsl-fix` as a separate, reviewed conversion commit;
-    # move it into this enable list once that lands.
+    # Whitespace style, from velocity via periapsis: a blank line where a block
+    # ends and a new statement group begins. Adopted 2026-10-10 in a dedicated
+    # conversion commit (`just wsl-fix` — blank lines and var-grouping only,
+    # verified no behavior change) rather than enabled against a ~1790-finding
+    # tree: a gate that fires 1791 times on style is a gate nobody finishes
+    # reading, which is periapsis's own stated anti-pattern.
+    - wsl_v5
 
   settings:
     staticcheck:

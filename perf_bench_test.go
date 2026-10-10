@@ -37,6 +37,7 @@ func BenchmarkSendNoPersist(b *testing.B) {
 			br := NewBroker()
 			populateBroker(br, size.agents, size.msgs)
 			b.ResetTimer()
+
 			for i := 0; i < b.N; i++ {
 				br.Send("bench-sender", "target", "benchmark message body")
 			}
@@ -57,6 +58,7 @@ func BenchmarkSendWithDiskPersist(b *testing.B) {
 			br.onChange = func(s snapshot) { _ = saveSnapshot(path, s) }
 			populateBroker(br, size.agents, size.msgs)
 			b.ResetTimer()
+
 			for i := 0; i < b.N; i++ {
 				br.Send("bench-sender", "target", "benchmark message body")
 			}
@@ -73,6 +75,7 @@ func BenchmarkSnapshotAndMarshal(b *testing.B) {
 			br := NewBroker()
 			populateBroker(br, size.agents, size.msgs)
 			b.ResetTimer()
+
 			for i := 0; i < b.N; i++ {
 				snap := br.snapshot()
 				_ = snap
@@ -89,10 +92,12 @@ func BenchmarkDrainLargeInbox(b *testing.B) {
 		b.Run(fmt.Sprintf("backlog=%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
+
 				br := NewBroker()
 				for range n {
 					br.Send("bench-sender", "bob", "message body")
 				}
+
 				b.StartTimer()
 				br.Drain("bob", false, 0)
 			}

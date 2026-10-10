@@ -71,7 +71,9 @@ func (s *snapshot) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
+
 	s.Seq, s.Agents, s.Bridges = raw.Seq, raw.Agents, raw.Bridges
+
 	trimmed := bytes.TrimLeft(raw.Topics, " \t\r\n")
 	switch {
 	case len(trimmed) == 0:
@@ -83,11 +85,14 @@ func (s *snapshot) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(raw.Topics, &legacy); err != nil {
 			return err
 		}
+
 		for name, subs := range legacy {
 			s.Topics = append(s.Topics, topicSnap{Name: name, Subscribers: subs})
 		}
+
 		sort.Slice(s.Topics, func(i, j int) bool { return s.Topics[i].Name < s.Topics[j].Name })
 	}
+
 	return nil
 }
 
@@ -99,13 +104,16 @@ func (b *Broker) snapshot() snapshot {
 		for t := range a.topics {
 			topics = append(topics, t)
 		}
+
 		sort.Strings(topics)
+
 		owner, owned := b.owners[key]
 		s.Agents = append(s.Agents, agentSnap{
 			Room: a.room, Name: a.name, Inbox: a.inbox, Topics: topics, State: a.state, LastSeen: b.lastSeen[key],
 			Owned: owned, Session: owner.session,
 		})
 	}
+
 	sort.Slice(s.Agents, func(i, j int) bool {
 		return roomThenNameLess(s.Agents[i].Room, s.Agents[i].Name, s.Agents[j].Room, s.Agents[j].Name)
 	})
@@ -116,30 +124,38 @@ func (b *Broker) snapshot() snapshot {
 	for tk := range b.topics {
 		topicKeys[tk] = true
 	}
+
 	for tk := range b.topicHistory {
 		topicKeys[tk] = true
 	}
+
 	for tk := range topicKeys {
 		tRoom, tName := splitTopicKey(tk)
 		subs := b.topics[tk]
+
 		names := make([]string, 0, len(subs))
 		for key := range subs {
 			_, n := splitAgentKey(key)
 			names = append(names, n)
 		}
+
 		sort.Strings(names)
 		s.Topics = append(s.Topics, topicSnap{Room: tRoom, Name: tName, Subscribers: names, History: b.topicHistory[tk]})
 	}
+
 	sort.Slice(s.Topics, func(i, j int) bool {
 		return roomThenNameLess(s.Topics[i].Room, s.Topics[i].Name, s.Topics[j].Room, s.Topics[j].Name)
 	})
+
 	for _, br := range b.bridges {
 		s.Bridges = append(s.Bridges, bridgeSnap{
 			ID: br.id, ARoom: br.aRoom, ATopic: br.aTopic, BRoom: br.bRoom, BTopic: br.bTopic,
 			Direction: br.dir.String(), Creator: br.creator, CreatedAt: br.createdAt, ExpiresAt: br.expiresAt,
 		})
 	}
+
 	sort.Slice(s.Bridges, func(i, j int) bool { return s.Bridges[i].ID < s.Bridges[j].ID })
+
 	return s
 }
 
@@ -147,6 +163,7 @@ func (b *Broker) snapshot() snapshot {
 func (b *Broker) load(s snapshot) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.seq = s.Seq
 	b.agents = map[string]*agentState{}
 	b.topics = map[string]map[string]bool{}
@@ -155,14 +172,17 @@ func (b *Broker) load(s snapshot) {
 	b.bridgesByTopic = map[string][]*bridge{}
 	b.topicHistory = map[string][]Message{}
 	b.owners = map[string]ownerInfo{}
+
 	for _, as := range s.Agents {
 		key := agentKey(as.Room, as.Name)
 		a := b.ensure(key)
 		a.inbox = as.Inbox
+
 		a.state = as.State
 		for _, t := range as.Topics {
 			a.topics[t] = true
 		}
+
 		if as.Owned {
 			b.owners[key] = ownerInfo{session: as.Session}
 		}
@@ -175,6 +195,7 @@ func (b *Broker) load(s snapshot) {
 			b.lastSeen[key] = as.LastSeen
 		}
 	}
+
 	for _, ts := range s.Topics {
 		tk := topicKey(ts.Room, ts.Name)
 		if len(ts.Subscribers) > 0 {
@@ -182,20 +203,25 @@ func (b *Broker) load(s snapshot) {
 			for _, n := range ts.Subscribers {
 				subs[agentKey(ts.Room, n)] = true
 			}
+
 			b.topics[tk] = subs
 		}
+
 		if len(ts.History) > 0 {
 			b.topicHistory[tk] = ts.History
 		}
 	}
+
 	for _, bs := range s.Bridges {
 		dir := bridgeBoth
+
 		switch bs.Direction {
 		case "out":
 			dir = bridgeAToB
 		case "in":
 			dir = bridgeBToA
 		}
+
 		br := &bridge{
 			id: bs.ID, aRoom: bs.ARoom, aTopic: bs.ATopic, bRoom: bs.BRoom, bTopic: bs.BTopic,
 			a: topicKey(bs.ARoom, bs.ATopic), b: topicKey(bs.BRoom, bs.BTopic),
@@ -213,27 +239,34 @@ func saveSnapshot(path string, s snapshot) error {
 	if err != nil {
 		return err
 	}
+
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
+
 	return os.Rename(tmp, path)
 }
 
 // loadSnapshotFile reads a snapshot, returning a zero snapshot if absent.
 func loadSnapshotFile(path string) (snapshot, error) {
 	var s snapshot
+
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return s, nil
 	}
+
 	if err != nil {
 		return s, err
 	}
+
 	if len(data) == 0 {
 		return s, nil
 	}
+
 	err = json.Unmarshal(data, &s)
+
 	return s, err
 }
 
@@ -256,12 +289,14 @@ func loadSnapshotWithRecovery(path string, now func() time.Time, warn func(strin
 	if err == nil {
 		return snap
 	}
+
 	backup := fmt.Sprintf("%s.corrupt-%d", path, now().Unix())
 	if renameErr := os.Rename(path, backup); renameErr == nil {
 		warn(fmt.Sprintf("state file %s failed to load (%v) — every agent's identity/inbox/subscriptions would otherwise be silently lost; preserved the corrupt file at %s for recovery, starting with empty state", path, err, backup))
 	} else {
 		warn(fmt.Sprintf("state file %s failed to load (%v) and could not be preserved (%v) — starting with empty state, all prior agent data is lost", path, err, renameErr))
 	}
+
 	return snapshot{}
 }
 
@@ -276,8 +311,10 @@ func resolvePaths() paths {
 		if err != nil {
 			home = os.TempDir()
 		}
+
 		dir = filepath.Join(home, ".mess")
 	}
+
 	return paths{
 		dir:     dir,
 		sock:    filepath.Join(dir, "mess.sock"),

@@ -15,10 +15,12 @@ func Dir() string {
 	if d := os.Getenv("MESS_DIR"); d != "" {
 		return d
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = os.TempDir()
 	}
+
 	return filepath.Join(home, ".mess")
 }
 
@@ -39,16 +41,20 @@ func Call(sock string, req Request) (Response, error) {
 		return Response{}, ErrNoDaemon
 	}
 	defer conn.Close()
+
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return Response{}, err
 	}
+
 	var resp Response
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return Response{}, err
 	}
+
 	if !resp.OK && resp.Error != "" {
 		return resp, errors.New(resp.Error)
 	}
+
 	return resp, nil
 }

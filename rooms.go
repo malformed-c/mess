@@ -18,6 +18,7 @@ func agentKey(room, name string) string {
 	if room == "" || name == "" {
 		return name
 	}
+
 	return room + roomSep + name
 }
 
@@ -26,6 +27,7 @@ func splitAgentKey(key string) (room, name string) {
 	if r, n, ok := strings.Cut(key, roomSep); ok {
 		return r, n
 	}
+
 	return "", key
 }
 
@@ -47,6 +49,7 @@ func displayName(room, name string) string {
 	if room == "" {
 		return name
 	}
+
 	return room + "/" + name
 }
 
@@ -64,6 +67,7 @@ func parseDisplayName(s string) (room, name string, ok bool) {
 	if !found || room == "" || name == "" || strings.Contains(name, "/") {
 		return "", "", false
 	}
+
 	return room, name, true
 }
 
@@ -74,5 +78,6 @@ func roomThenNameLess(roomA, nameA, roomB, nameB string) bool {
 	if roomA != roomB {
 		return roomA < roomB
 	}
+
 	return nameA < nameB
 }

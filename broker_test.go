@@ -13,6 +13,7 @@ import (
 func newTestBroker() *Broker {
 	b := NewBroker()
 	b.now = func() time.Time { return time.Unix(0, 0) }
+
 	return b
 }
 
@@ -21,10 +22,12 @@ func TestSendAndDrain(t *testing.T) {
 	if _, err := b.Send("alice", "bob", "hi"); err != nil {
 		t.Fatal(err)
 	}
+
 	msgs := b.Drain("bob", false, 0)
 	if len(msgs) != 1 || msgs[0].Body != "hi" || msgs[0].From != "alice" {
 		t.Fatalf("unexpected messages: %+v", msgs)
 	}
+
 	if msgs[0].Kind != KindDirect {
 		t.Fatalf("expected direct, got %q", msgs[0].Kind)
 	}
@@ -44,9 +47,11 @@ func TestSendRequiresRecipient(t *testing.T) {
 func TestPeekDoesNotConsume(t *testing.T) {
 	b := newTestBroker()
 	b.Send("a", "b", "one")
+
 	if got := b.Drain("b", true, 0); len(got) != 1 {
 		t.Fatalf("peek got %d", len(got))
 	}
+
 	if got := b.Drain("b", false, 0); len(got) != 1 {
 		t.Fatalf("after peek expected 1, got %d", len(got))
 	}
@@ -57,10 +62,12 @@ func TestDrainMax(t *testing.T) {
 	for _, body := range []string{"1", "2", "3"} {
 		b.Send("a", "b", body)
 	}
+
 	first := b.Drain("b", false, 2)
 	if len(first) != 2 || first[0].Body != "1" || first[1].Body != "2" {
 		t.Fatalf("unexpected first batch: %+v", first)
 	}
+
 	rest := b.Drain("b", false, 0)
 	if len(rest) != 1 || rest[0].Body != "3" {
 		t.Fatalf("unexpected rest: %+v", rest)
@@ -72,13 +79,16 @@ func TestBroadcastExcludesSender(t *testing.T) {
 	b.Register("alice")
 	b.Register("bob")
 	b.Register("carol")
+
 	_, n := b.Broadcast("alice", "", "hello all", false, false)
 	if n != 2 {
 		t.Fatalf("expected 2 recipients, got %d", n)
 	}
+
 	if got := b.Drain("alice", false, 0); len(got) != 0 {
 		t.Fatalf("sender should not receive own broadcast: %+v", got)
 	}
+
 	if got := b.Drain("bob", false, 0); len(got) != 1 || got[0].Kind != KindBroadcast {
 		t.Fatalf("bob should have broadcast: %+v", got)
 	}
@@ -90,18 +100,23 @@ func TestBroadcastExcludesSender(t *testing.T) {
 func TestLoudBroadcastBypassesKindFilter(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
+
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
 	b.Broadcast("alice", "", "quiet to a --no-broadcast waiter", false, false)
+
 	if b.HasPending("bob", noBroadcast) {
 		t.Fatal("a plain broadcast must not satisfy a --no-broadcast wake trigger")
 	}
+
 	b.Drain("bob", false, 0)
 
 	b.Broadcast("alice", "", "loud, should wake anyway", true, false)
+
 	if !b.HasPending("bob", noBroadcast) {
 		t.Fatal("a --loud broadcast should satisfy the wake trigger even under --no-broadcast")
 	}
+
 	ch := b.waitChan("bob", noBroadcast)
 	select {
 	case <-ch:
@@ -116,10 +131,12 @@ func TestTopicPubSub(t *testing.T) {
 	b.Sub("bob", "builds")
 	b.Sub("carol", "builds")
 	b.Sub("alice", "builds")
+
 	_, n, _ := b.Pub("alice", "builds", "green")
 	if n != 2 { // alice is a subscriber but also the sender; excluded
 		t.Fatalf("expected 2 deliveries, got %d", n)
 	}
+
 	got := b.Drain("bob", false, 0)
 	if len(got) != 1 || got[0].Topic != "builds" || got[0].Kind != KindTopic {
 		t.Fatalf("unexpected topic message: %+v", got)
@@ -137,11 +154,13 @@ func TestTopicMentionWakesOnlyMentioned(t *testing.T) {
 	if delivered != 2 || woke != 1 {
 		t.Fatalf("want delivered=2 woke=1, got delivered=%d woke=%d", delivered, woke)
 	}
+
 	select { // mentioned bob is woken
 	case <-bobCh:
 	default:
 		t.Fatal("mentioned bob should be woken")
 	}
+
 	select { // unmentioned carol is NOT woken
 	case <-carolCh:
 		t.Fatal("unmentioned carol should not be woken")
@@ -151,6 +170,7 @@ func TestTopicMentionWakesOnlyMentioned(t *testing.T) {
 	if got := b.Drain("carol", false, 0); len(got) != 1 {
 		t.Fatalf("carol should still receive the topic message: %+v", got)
 	}
+
 	if got := b.Drain("bob", false, 0); len(got) != 1 {
 		t.Fatalf("bob should receive it too: %+v", got)
 	}
@@ -162,15 +182,18 @@ func TestTopicNoMentionWakesAll(t *testing.T) {
 	b.Sub("carol", "work")
 	bobCh := b.waitChan("bob", nil)
 	carolCh := b.waitChan("carol", nil)
+
 	_, delivered, woke := b.Pub("alice", "work", "email me at me@host — no mentions")
 	if delivered != 2 || woke != 2 {
 		t.Fatalf("no @mention should wake all: got delivered=%d woke=%d", delivered, woke)
 	}
+
 	select {
 	case <-bobCh:
 	default:
 		t.Fatal("bob should wake")
 	}
+
 	select {
 	case <-carolCh:
 	default:
@@ -189,6 +212,7 @@ func TestQuietTopicMessageDoesNotTriggerWake(t *testing.T) {
 	if b.HasPending("carol", topic) {
 		t.Fatal("a quiet topic message must not trigger a wake")
 	}
+
 	ch := b.waitChan("carol", topic)
 	select {
 	case <-ch:
@@ -205,10 +229,12 @@ func TestUnsubStopsDelivery(t *testing.T) {
 	b := newTestBroker()
 	b.Sub("bob", "builds")
 	b.Unsub("bob", "builds")
+
 	_, n, _ := b.Pub("alice", "builds", "green")
 	if n != 0 {
 		t.Fatalf("expected no deliveries after unsub, got %d", n)
 	}
+
 	_, topics := b.Ps("", false)
 	if len(topics) != 0 {
 		t.Fatalf("empty topic should be removed: %+v", topics)
@@ -217,13 +243,16 @@ func TestUnsubStopsDelivery(t *testing.T) {
 
 func TestWaitChanFiresOnDelivery(t *testing.T) {
 	b := newTestBroker()
+
 	ch := b.waitChan("bob", nil)
 	select {
 	case <-ch:
 		t.Fatal("waiter fired before any delivery")
 	default:
 	}
+
 	b.Send("alice", "bob", "ping")
+
 	select {
 	case <-ch:
 		// good
@@ -235,6 +264,7 @@ func TestWaitChanFiresOnDelivery(t *testing.T) {
 func TestWaitChanFiresImmediatelyIfPending(t *testing.T) {
 	b := newTestBroker()
 	b.Send("alice", "bob", "already here")
+
 	ch := b.waitChan("bob", nil)
 	select {
 	case <-ch:
@@ -247,19 +277,23 @@ func TestWaitChanFiresImmediatelyIfPending(t *testing.T) {
 
 func TestWaitChanThreadFiresOnMatchingReply(t *testing.T) {
 	b := newTestBroker()
+
 	root, err := b.Send("alice", "bob", "question")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ch := b.waitChanThread("alice", root.ID)
 	select {
 	case <-ch:
 		t.Fatal("waiter fired before any reply")
 	default:
 	}
+
 	if _, err := b.SendThreaded("bob", "alice", "the answer", root.ID); err != nil {
 		t.Fatal(err)
 	}
+
 	select {
 	case <-ch:
 		// good
@@ -277,10 +311,13 @@ func TestHasPendingThreadDistinguishesSpuriousWakeFromRealAnswer(t *testing.T) {
 	b := newTestBroker()
 	root, _ := b.Send("alice", "bob", "question")
 	b.Send("carol", "alice", "unrelated")
+
 	if b.HasPendingThread("alice", root.ID) {
 		t.Fatal("an unrelated message must not satisfy HasPendingThread")
 	}
+
 	b.SendThreaded("bob", "alice", "the answer", root.ID)
+
 	if !b.HasPendingThread("alice", root.ID) {
 		t.Fatal("expected the threaded reply to satisfy HasPendingThread")
 	}
@@ -288,13 +325,16 @@ func TestHasPendingThreadDistinguishesSpuriousWakeFromRealAnswer(t *testing.T) {
 
 func TestWaitChanThreadFiresImmediatelyIfAlreadyAnswered(t *testing.T) {
 	b := newTestBroker()
+
 	root, err := b.Send("alice", "bob", "question")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := b.SendThreaded("bob", "alice", "already answered", root.ID); err != nil {
 		t.Fatal(err)
 	}
+
 	ch := b.waitChanThread("alice", root.ID)
 	select {
 	case <-ch:
@@ -312,6 +352,7 @@ func TestHasPendingThreadIgnoresOtherThreads(t *testing.T) {
 	if b.HasPendingThread("alice", root.ID) {
 		t.Fatal("must not see a reply belonging to a different thread")
 	}
+
 	if !b.HasPendingThread("alice", other.ID) {
 		t.Fatal("expected the reply belonging to this thread")
 	}
@@ -319,10 +360,12 @@ func TestHasPendingThreadIgnoresOtherThreads(t *testing.T) {
 
 func TestAckFiresAutomaticallyOnRead(t *testing.T) {
 	b := newTestBroker()
+
 	_, ackCh, err := b.SendAck("alice", "bob", "did you see this?")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	select {
 	case <-ackCh:
 		t.Fatal("acked before the recipient read it")
@@ -330,6 +373,7 @@ func TestAckFiresAutomaticallyOnRead(t *testing.T) {
 	}
 	// A plain recv (no special ack step) must trigger the receipt.
 	b.Drain("bob", false, 0)
+
 	select {
 	case <-ackCh:
 	case <-time.After(time.Second):
@@ -341,6 +385,7 @@ func TestPeekDoesNotAck(t *testing.T) {
 	b := newTestBroker()
 	_, ackCh, _ := b.SendAck("alice", "bob", "hi")
 	b.Drain("bob", true, 0) // peek: not a read
+
 	select {
 	case <-ackCh:
 		t.Fatal("peek should not ack")
@@ -353,6 +398,7 @@ func TestPlainSendHasNoAckChannel(t *testing.T) {
 	if _, err := b.Send("alice", "bob", "fire and forget"); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(b.pendingAcks) != 0 {
 		t.Fatalf("plain send should not register an ack: %v", b.pendingAcks)
 	}
@@ -363,6 +409,7 @@ func TestCancelAckPreventsSignal(t *testing.T) {
 	m, ackCh, _ := b.SendAck("alice", "bob", "timed out")
 	b.CancelAck(m.ID) // sender gave up
 	b.Drain("bob", false, 0)
+
 	select {
 	case <-ackCh:
 		t.Fatal("cancelled ack should not fire")
@@ -393,19 +440,23 @@ func TestDrainKindsFiltersAndPreserves(t *testing.T) {
 func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
+
 	directOnly := map[string]bool{KindDirect: true, KindTopic: true} // --no-broadcast
 
 	// A broadcast alone must NOT satisfy a direct/topic wake trigger.
 	b.Broadcast("alice", "", "fyi", false, false)
+
 	if b.HasPending("bob", directOnly) {
 		t.Fatal("a broadcast should not trigger a --no-broadcast waiter")
 	}
+
 	if !b.HasPending("bob", nil) {
 		t.Fatal("broadcast should still count as pending for an unfiltered check")
 	}
 
 	// A direct message triggers the wake...
 	b.Send("alice", "bob", "do this")
+
 	if !b.HasPending("bob", directOnly) {
 		t.Fatal("a direct message should trigger the waiter")
 	}
@@ -414,6 +465,7 @@ func TestHasPendingTriggerAndDrainAll(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("wake should drain all queued messages, got %d: %+v", len(got), got)
 	}
+
 	if b.HasPending("bob", nil) {
 		t.Fatal("inbox should be empty after draining all")
 	}
@@ -428,16 +480,20 @@ func TestPsReportsTheOwningSessionPID(t *testing.T) {
 	if ok, _ := b.RegisterOwned("bob", "sess-1", 4242, false); !ok {
 		t.Fatal("registration was refused")
 	}
+
 	b.Register("anon") // no owner recorded
 
 	agents, _ := b.Ps("", false)
+
 	seen := map[string]int{}
 	for _, a := range agents {
 		seen[a.Name] = a.SessionPID
 	}
+
 	if seen["bob"] != 4242 {
 		t.Fatalf("owner pid should reach the client, got %d", seen["bob"])
 	}
+
 	if seen["anon"] != 0 {
 		t.Fatalf("an unowned agent must report 0, not a stale pid, got %d", seen["anon"])
 	}
@@ -446,6 +502,7 @@ func TestPsReportsTheOwningSessionPID(t *testing.T) {
 func TestPsReportsOldestPending(t *testing.T) {
 	b := newTestBroker() // clock fixed at time.Unix(0,0)
 	b.Register("bob")
+
 	find := func() AgentInfo {
 		agents, _ := b.Ps("", false)
 		for _, a := range agents {
@@ -453,13 +510,17 @@ func TestPsReportsOldestPending(t *testing.T) {
 				return a
 			}
 		}
+
 		t.Fatal("bob not found")
+
 		return AgentInfo{}
 	}
 	if !find().Oldest.IsZero() {
 		t.Fatal("no pending -> Oldest should be zero")
 	}
+
 	b.Send("alice", "bob", "first")
+
 	got := find()
 	if got.Pending != 1 || got.Oldest.IsZero() || !got.Oldest.Equal(b.now()) {
 		t.Fatalf("expected Oldest = first message time, got %+v", got)
@@ -471,6 +532,7 @@ func TestBusyStatusAndExpiry(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 	b.Register("bob")
+
 	working := func() bool {
 		agents, _ := b.Ps("", false)
 		for _, a := range agents {
@@ -478,23 +540,28 @@ func TestBusyStatusAndExpiry(t *testing.T) {
 				return a.Working
 			}
 		}
+
 		return false
 	}
 	if working() {
 		t.Fatal("not busy initially")
 	}
+
 	b.SetBusy("bob", time.Minute)
+
 	if !working() {
 		t.Fatal("should be working after SetBusy")
 	}
 	// Clears explicitly.
 	b.ClearBusy("bob")
+
 	if working() {
 		t.Fatal("should not be working after ClearBusy")
 	}
 	// And expires on its own (crash backstop).
 	b.SetBusy("bob", time.Minute)
 	now = now.Add(2 * time.Minute)
+
 	if working() {
 		t.Fatal("busy should expire after its TTL")
 	}
@@ -505,8 +572,10 @@ func TestListenerTracking(t *testing.T) {
 	if b.IsListening("alice") {
 		t.Fatal("no listener yet")
 	}
+
 	b.AddListener("alice")
 	b.AddListener("alice") // two concurrent listeners
+
 	if !b.IsListening("alice") {
 		t.Fatal("expected listening after AddListener")
 	}
@@ -515,11 +584,15 @@ func TestListenerTracking(t *testing.T) {
 	if len(agents) != 1 || !agents[0].Listening {
 		t.Fatalf("ps should report alice listening: %+v", agents)
 	}
+
 	b.RemoveListener("alice")
+
 	if !b.IsListening("alice") {
 		t.Fatal("still one listener left")
 	}
+
 	b.RemoveListener("alice")
+
 	if b.IsListening("alice") {
 		t.Fatal("expected not listening after all removed")
 	}
@@ -530,16 +603,22 @@ func TestStatReportsPendingAndListening(t *testing.T) {
 	if p, l := b.Stat("bob"); p != 0 || l {
 		t.Fatalf("unknown agent: want 0/false, got %d/%v", p, l)
 	}
+
 	b.Send("alice", "bob", "one")
 	b.Send("alice", "bob", "two")
+
 	if p, l := b.Stat("bob"); p != 2 || l {
 		t.Fatalf("after 2 sends: want 2/false, got %d/%v", p, l)
 	}
+
 	b.AddListener("bob")
+
 	if p, l := b.Stat("bob"); p != 2 || !l {
 		t.Fatalf("with listener: want 2/true, got %d/%v", p, l)
 	}
+
 	b.RemoveListener("bob")
+
 	if _, l := b.Stat("bob"); l {
 		t.Fatal("listener removed: want false")
 	}
@@ -551,7 +630,9 @@ func TestCleanupPrunesIdleNotListening(t *testing.T) {
 	b.now = func() time.Time { return now }
 	b.Register("old")       // lastSeen = 1000
 	b.AddListener("parked") // listening; lastSeen = 1000
+
 	now = now.Add(48 * time.Hour)
+
 	b.Register("recent") // fresh: lastSeen = now
 
 	present := func(name string) bool {
@@ -563,6 +644,7 @@ func TestCleanupPrunesIdleNotListening(t *testing.T) {
 	if preview := b.Cleanup(24*time.Hour, true); len(preview) != 1 || preview[0] != "old" {
 		t.Fatalf("dry-run want [old], got %v", preview)
 	}
+
 	if !present("old") {
 		t.Fatal("dry-run must not remove anything")
 	}
@@ -573,9 +655,11 @@ func TestCleanupPrunesIdleNotListening(t *testing.T) {
 	if len(removed) != 1 || removed[0] != "old" {
 		t.Fatalf("want removed [old], got %v", removed)
 	}
+
 	if present("old") {
 		t.Fatal("'old' should be pruned")
 	}
+
 	if !present("parked") || !present("recent") {
 		t.Fatal("listening and recently-seen agents must be kept")
 	}
@@ -589,6 +673,7 @@ func TestRegisterOwnedGuard(t *testing.T) {
 	if ok, _ := b.RegisterOwned("arise", "sessA", 0, false); !ok {
 		t.Fatal("first claim of a free name should succeed")
 	}
+
 	if ok, _ := b.RegisterOwned("arise", "sessA", 0, false); !ok {
 		t.Fatal("same session re-registering its own name should succeed")
 	}
@@ -603,6 +688,7 @@ func TestRegisterOwnedGuard(t *testing.T) {
 	}
 	// Once the owner is no longer live, another session may take the name.
 	now = now.Add(3 * time.Minute)
+
 	if ok, _ := b.RegisterOwned("arise", "sessC", 0, false); !ok {
 		t.Fatal("takeover of a non-live owner should be allowed")
 	}
@@ -636,11 +722,13 @@ func TestClaimIdentityGuard(t *testing.T) {
 	if ok, _ := b.ClaimIdentity("bob", "sessB", 0); !ok {
 		t.Fatal("first live use of a free name should claim it")
 	}
+
 	if ok, msg := b.ClaimIdentity("bob", "sessA", 0); ok || msg == "" {
 		t.Fatalf("bob is now owned by sessB; sessA must be rejected, got ok=%v", ok)
 	}
 	// Once alice's owner goes stale, a new session may take over.
 	now = now.Add(3 * time.Minute)
+
 	if ok, _ := b.ClaimIdentity("alice", "sessB", 0); !ok {
 		t.Fatal("takeover of a non-live owner should be allowed")
 	}
@@ -650,6 +738,7 @@ func TestClaimIdentityGuard(t *testing.T) {
 	if ok, _ := b.ClaimIdentity("user", "sessA", 0); !ok {
 		t.Fatal("user mailbox should be claimable")
 	}
+
 	if ok, _ := b.ClaimIdentity("user", "sessB", 0); !ok {
 		t.Fatal("a different session must still reach the shared user mailbox")
 	}
@@ -664,6 +753,7 @@ func TestRenameMigratesInboxAndSubscriptions(t *testing.T) {
 	if ok, msg := b.Rename("old", "new", "sessX", 0, false); !ok {
 		t.Fatalf("rename should succeed: %s", msg)
 	}
+
 	if _, ok := b.agents["old"]; ok {
 		t.Fatal("old agent should be gone after rename")
 	}
@@ -680,6 +770,7 @@ func TestRenameMigratesInboxAndSubscriptions(t *testing.T) {
 	if b.owners["new"].session != "sessX" {
 		t.Fatal("owner not carried to new name")
 	}
+
 	if _, ok := b.owners["old"]; ok {
 		t.Fatal("old owner should be cleared")
 	}
@@ -695,9 +786,11 @@ func TestRenameHonorsCollisionGuard(t *testing.T) {
 	if ok, msg := b.Rename("me", "taken", "s1", 0, false); ok || msg == "" {
 		t.Fatalf("rename onto a live name should be refused, got ok=%v", ok)
 	}
+
 	if ok, _ := b.Rename("me", "taken", "s1", 0, true); !ok {
 		t.Fatal("--force rename should take the name over")
 	}
+
 	if _, ok := b.agents["me"]; ok {
 		t.Fatal("source name should be gone after a forced rename")
 	}
@@ -709,6 +802,7 @@ func TestPsReportsOnline(t *testing.T) {
 	b.now = func() time.Time { return now }
 	b.Register("stale")     // active now, but will go stale
 	b.AddListener("parked") // a live listener
+
 	online := func(name string) bool {
 		agents, _ := b.Ps("", false)
 		for _, a := range agents {
@@ -716,19 +810,25 @@ func TestPsReportsOnline(t *testing.T) {
 				return a.Online
 			}
 		}
+
 		return false
 	}
 	if !online("stale") {
 		t.Fatal("a just-active agent should be online")
 	}
+
 	now = now.Add(10 * time.Minute) // stale's last activity is now old
+
 	if online("stale") {
 		t.Fatal("an agent idle for 10m should be offline")
 	}
+
 	if !online("parked") {
 		t.Fatal("a listening agent should stay online")
 	}
+
 	b.SetBusy("stale", time.Minute) // working again -> back online
+
 	if !online("stale") {
 		t.Fatal("a working agent should be online")
 	}
@@ -739,6 +839,7 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 	b.Register("bob")
+
 	warn := func() string {
 		agents, _ := b.Ps("", false)
 		for _, a := range agents {
@@ -746,27 +847,32 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 				return a.Warning
 			}
 		}
+
 		return ""
 	}
 
 	b.SetWarn("bob", "API error", time.Minute)
+
 	if warn() != "API error" {
 		t.Fatalf("warning not reported, got %q", warn())
 	}
 	// Becoming active (a new turn) clears the stale warning.
 	b.SetBusy("bob", time.Minute)
+
 	if warn() != "" {
 		t.Fatalf("warning should clear on activity, got %q", warn())
 	}
 	// Re-registering (a resumed session) also clears it.
 	b.SetWarn("bob", "again", time.Minute)
 	b.RegisterOwned("bob", "s", 0, false)
+
 	if warn() != "" {
 		t.Fatalf("warning should clear on re-register, got %q", warn())
 	}
 	// And it self-expires even if the agent never recovers.
 	b.SetWarn("bob", "still down", time.Minute)
 	now = now.Add(2 * time.Minute)
+
 	if warn() != "" {
 		t.Fatalf("expired warning should not be reported, got %q", warn())
 	}
@@ -774,6 +880,7 @@ func TestWarningAutoClearsAndExpires(t *testing.T) {
 	now = now.Add(-2 * time.Minute) // back within TTL
 	b.SetWarn("bob", "x", time.Minute)
 	b.SetWarn("bob", "", time.Minute)
+
 	if warn() != "" {
 		t.Fatalf("empty SetWarn should clear, got %q", warn())
 	}
@@ -811,14 +918,17 @@ func TestCleanupPrunesByStaleMail(t *testing.T) {
 	b.now = func() time.Time { return now }
 	// "dead" never acts (no lastSeen) but has mail sitting in its inbox.
 	b.Send("peer", "dead", "old mail")
+
 	now = now.Add(48 * time.Hour) // the mail is now 48h old; dead is offline
 	removed := b.Cleanup(24*time.Hour, false)
 	found := false
+
 	for _, n := range removed {
 		if n == "dead" {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Fatalf("agent with 48h-old undrained mail should be pruned, got %v", removed)
 	}
@@ -835,12 +945,14 @@ func TestExpireInboxDropsOldMailEvenFromAliveAgent(t *testing.T) {
 	b.now = func() time.Time { return now }
 	b.Send("alice", "bob", "old mail")
 	b.AddListener("bob") // alive: Cleanup would skip this agent entirely
+
 	now = now.Add(15 * 24 * time.Hour)
 
 	expired := b.ExpireInbox(14*24*time.Hour, false)
 	if len(expired) != 1 || expired[0].Body != "old mail" {
 		t.Fatalf("expected the old message to expire despite bob being alive, got %+v", expired)
 	}
+
 	if got := b.Drain("bob", false, 0); len(got) != 0 {
 		t.Fatalf("expired message should be gone from the inbox, got %+v", got)
 	}
@@ -852,13 +964,16 @@ func TestExpireInboxKeepsRecentMessages(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 	b.Send("alice", "bob", "old")
+
 	now = now.Add(15 * 24 * time.Hour)
+
 	b.Send("alice", "bob", "recent")
 
 	expired := b.ExpireInbox(14*24*time.Hour, false)
 	if len(expired) != 1 || expired[0].Body != "old" {
 		t.Fatalf("expected only the old message to expire, got %+v", expired)
 	}
+
 	got := b.Drain("bob", false, 0)
 	if len(got) != 1 || got[0].Body != "recent" {
 		t.Fatalf("expected the recent message to remain queued, got %+v", got)
@@ -871,12 +986,14 @@ func TestExpireInboxDryRunLeavesInboxUntouched(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 	b.Send("alice", "bob", "old mail")
+
 	now = now.Add(15 * 24 * time.Hour)
 
 	expired := b.ExpireInbox(14*24*time.Hour, true)
 	if len(expired) != 1 {
 		t.Fatalf("expected 1 eligible message in the preview, got %+v", expired)
 	}
+
 	if got := b.Drain("bob", false, 0); len(got) != 1 {
 		t.Fatalf("dry-run must not mutate the inbox, got %+v", got)
 	}
@@ -888,12 +1005,14 @@ func TestExpireInboxNeverDropsUserHandle(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 	b.Send("alice", "user", "please look at this")
+
 	now = now.Add(365 * 24 * time.Hour)
 
 	expired := b.ExpireInbox(14*24*time.Hour, false)
 	if len(expired) != 0 {
 		t.Fatalf("the human's mailbox must never auto-expire, got %+v", expired)
 	}
+
 	if got := b.Drain("user", false, 0); len(got) != 1 {
 		t.Fatalf("expected the message to remain queued for the human, got %+v", got)
 	}
@@ -910,17 +1029,20 @@ func TestReplayReturnsConsumedHistory(t *testing.T) {
 	}
 	// Consume them (like a recv / wake) -> they enter history.
 	b.Drain("bob", false, 0)
+
 	if got := b.Replay("bob", 0); len(got) != 3 || got[0].Body != "one" || got[2].Body != "three" {
 		t.Fatalf("replay should return the 3 consumed in order, got %+v", got)
 	}
 	// A peek must NOT add to history.
 	b.Send("peer", "bob", "four")
 	b.Drain("bob", true, 0) // peek
+
 	if got := b.Replay("bob", 0); len(got) != 3 {
 		t.Fatalf("peek should not extend history, got %d", len(got))
 	}
 	// Last-N.
 	b.Drain("bob", false, 0) // consumes "four"
+
 	if got := b.Replay("bob", 2); len(got) != 2 || got[0].Body != "three" || got[1].Body != "four" {
 		t.Fatalf("replay 2 should return the last two, got %+v", got)
 	}
@@ -936,6 +1058,7 @@ func TestHistoryCapsAtMaxHistory(t *testing.T) {
 	for i := range maxHistory + 20 {
 		b.Send("peer", "bob", fmt.Sprintf("msg-%d", i))
 	}
+
 	b.Drain("bob", false, 0) // consume everything at once -> history
 
 	got := b.Replay("bob", 0)
@@ -946,6 +1069,7 @@ func TestHistoryCapsAtMaxHistory(t *testing.T) {
 	if got[0].Body != fmt.Sprintf("msg-%d", 20) {
 		t.Fatalf("expected history to have dropped the oldest entries, first is %q", got[0].Body)
 	}
+
 	if got[len(got)-1].Body != fmt.Sprintf("msg-%d", maxHistory+19) {
 		t.Fatalf("expected the newest entry retained, last is %q", got[len(got)-1].Body)
 	}
@@ -961,10 +1085,12 @@ func TestHistoryCapsAtMaxHistoryIncrementally(t *testing.T) {
 		b.Send("peer", "bob", fmt.Sprintf("msg-%d", i))
 		b.Drain("bob", false, 0)
 	}
+
 	got := b.Replay("bob", 0)
 	if len(got) != maxHistory {
 		t.Fatalf("expected history capped at %d after incremental drains, got %d", maxHistory, len(got))
 	}
+
 	if got[len(got)-1].Body != fmt.Sprintf("msg-%d", maxHistory+19) {
 		t.Fatalf("expected the newest entry retained, last is %q", got[len(got)-1].Body)
 	}
@@ -973,8 +1099,10 @@ func TestHistoryCapsAtMaxHistoryIncrementally(t *testing.T) {
 func TestLastSeenPersists(t *testing.T) {
 	b := newTestBroker() // now fixed at Unix(0,0)
 	b.Register("bob")
+
 	b2 := newTestBroker()
 	b2.load(b.snapshot())
+
 	if got, ok := b2.lastSeen["bob"]; !ok || !got.Equal(time.Unix(0, 0)) {
 		t.Fatalf("lastSeen not restored: got %v ok=%v", got, ok)
 	}
@@ -988,6 +1116,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 
 	b2 := newTestBroker()
 	b2.load(snap)
+
 	if got := b2.Drain("bob", false, 0); len(got) != 1 || got[0].Body != "keep me" {
 		t.Fatalf("inbox not restored: %+v", got)
 	}
@@ -995,6 +1124,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if b2.seq != b.seq {
 		t.Fatalf("seq not restored: %d vs %d", b2.seq, b.seq)
 	}
+
 	_, topics := b2.Ps("", false)
 	if len(topics) != 1 || topics[0].Name != "builds" {
 		t.Fatalf("topics not restored: %+v", topics)
@@ -1007,6 +1137,7 @@ func TestOnChangeFires(t *testing.T) {
 	b.onChange = func(snapshot) { calls++ }
 	b.Send("a", "b", "x")
 	b.Drain("b", false, 0)
+
 	if calls < 2 { // one for send, one for consuming drain
 		t.Fatalf("expected onChange to fire on mutations, got %d", calls)
 	}
@@ -1018,11 +1149,14 @@ func TestAgentKeyRoundTrip(t *testing.T) {
 	if got := agentKey("", "alice"); got != "alice" {
 		t.Fatalf("empty room should collapse to the bare name, got %q", got)
 	}
+
 	key := agentKey("teamA", "alice")
+
 	room, name := splitAgentKey(key)
 	if room != "teamA" || name != "alice" {
 		t.Fatalf("round trip failed: room=%q name=%q", room, name)
 	}
+
 	if room, name := splitAgentKey("alice"); room != "" || name != "alice" {
 		t.Fatalf("bare key should split to empty room: room=%q name=%q", room, name)
 	}
@@ -1036,6 +1170,7 @@ func TestRoomedIdentitiesDontCollide(t *testing.T) {
 	if ok, msg := b.RegisterOwned(agentKey("A", "admin"), "sessA", 0, false); !ok {
 		t.Fatalf("first room's admin should register: %s", msg)
 	}
+
 	if ok, msg := b.RegisterOwned(agentKey("B", "admin"), "sessB", 0, false); !ok {
 		t.Fatalf("second room's admin should register independently: %s", msg)
 	}
@@ -1048,9 +1183,11 @@ func TestRoomedIdentitiesDontCollide(t *testing.T) {
 	b.Send(agentKey("B", "admin"), agentKey("B", "bob"), "hi from room B")
 	gotA := b.Drain(agentKey("A", "bob"), false, 0)
 	gotB := b.Drain(agentKey("B", "bob"), false, 0)
+
 	if len(gotA) != 1 || gotA[0].From != "admin" || gotA[0].Body != "hi from room A" {
 		t.Fatalf("room A delivery wrong: %+v", gotA)
 	}
+
 	if len(gotB) != 1 || gotB[0].From != "admin" || gotB[0].Body != "hi from room B" {
 		t.Fatalf("room B delivery wrong: %+v", gotB)
 	}
@@ -1066,9 +1203,11 @@ func TestBroadcastScopedToRoom(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("expected 1 same-room recipient, got %d", n)
 	}
+
 	if got := b.Drain(agentKey("A", "bob"), false, 0); len(got) != 1 {
 		t.Fatalf("room A's bob should receive the broadcast: %+v", got)
 	}
+
 	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
 		t.Fatalf("a different room must not leak the broadcast: %+v", got)
 	}
@@ -1086,6 +1225,7 @@ func TestLoudHostWideBroadcastCrossesRooms(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("expected 2 host-wide recipients (bob + carol), got %d", n)
 	}
+
 	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 1 || !got[0].Loud {
 		t.Fatalf("carol in a different room should still receive a host-wide loud broadcast: %+v", got)
 	}
@@ -1102,6 +1242,7 @@ func TestLoudRoomBroadcastStaysRoomScoped(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("expected 1 same-room recipient, got %d", n)
 	}
+
 	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
 		t.Fatalf("--loud-room must not leak across rooms: %+v", got)
 	}
@@ -1116,9 +1257,11 @@ func TestPubTopicScopedToRoom(t *testing.T) {
 	if delivered != 1 {
 		t.Fatalf("expected 1 delivery within room A, got %d", delivered)
 	}
+
 	if got := b.Drain(agentKey("A", "bob"), false, 0); len(got) != 1 || got[0].Topic != "deploy" {
 		t.Fatalf("room A's bob should get the publish: %+v", got)
 	}
+
 	if got := b.Drain(agentKey("B", "carol"), false, 0); len(got) != 0 {
 		t.Fatalf("room B's carol (same topic name, different room) must not receive it: %+v", got)
 	}
@@ -1134,6 +1277,7 @@ func TestPsDefaultScopesToCallerRoom(t *testing.T) {
 	if len(agents) != 1 || agents[0].Name != "alice" || agents[0].Room != "A" {
 		t.Fatalf("expected only room A's alice, got %+v", agents)
 	}
+
 	agents, _ = b.Ps("", false) // the global/default room
 	if len(agents) != 1 || agents[0].Name != "global-carol" {
 		t.Fatalf("expected only the global room's carol, got %+v", agents)
@@ -1150,6 +1294,7 @@ func TestPsAllShowsEveryRoomWithRoomField(t *testing.T) {
 	if len(agents) != 2 {
 		t.Fatalf("expected both rooms' agents, got %+v", agents)
 	}
+
 	if len(topics) != 1 || topics[0].Room != "A" || topics[0].Name != "deploy" {
 		t.Fatalf("expected room A's deploy topic, got %+v", topics)
 	}
@@ -1169,6 +1314,7 @@ func TestPsUnjoinedAgentSeesFullGlobalFleetUnchanged(t *testing.T) {
 	if len(agents) != 3 {
 		t.Fatalf("expected exactly the 3 global agents, got %+v", agents)
 	}
+
 	for _, a := range agents {
 		if a.Room != "" {
 			t.Fatalf("global-room ps leaked a room field: %+v", a)
@@ -1187,10 +1333,12 @@ func TestPsSurfacesUserHandleAcrossRooms(t *testing.T) {
 	b.Register("user") // the human's global mailbox
 
 	agents, _ := b.Ps("A", false)
+
 	names := map[string]bool{}
 	for _, a := range agents {
 		names[a.Name] = true
 	}
+
 	if !names["alice"] || !names["user"] {
 		t.Fatalf("expected both alice and the user mailbox in room A's ps, got %+v", agents)
 	}
@@ -1198,10 +1346,12 @@ func TestPsSurfacesUserHandleAcrossRooms(t *testing.T) {
 	// A different, unrelated room must also see the human mailbox.
 	b.Register(agentKey("B", "bob"))
 	agents, _ = b.Ps("B", false)
+
 	names = map[string]bool{}
 	for _, a := range agents {
 		names[a.Name] = true
 	}
+
 	if !names["bob"] || !names["user"] {
 		t.Fatalf("expected both bob and the user mailbox in room B's ps, got %+v", agents)
 	}
@@ -1216,12 +1366,14 @@ func TestCleanupNeverPrunesUserHandleInAnyRoom(t *testing.T) {
 	b := NewBroker()
 	b.now = func() time.Time { return now }
 	b.Register(agentKey("A", "user"))
+
 	now = now.Add(48 * time.Hour) // long past any maxAge, and never "alive"
 
 	removed := b.Cleanup(time.Hour, false)
 	if len(removed) != 0 {
 		t.Fatalf("the human mailbox must never be pruned, even room-scoped: %+v", removed)
 	}
+
 	if _, ok := b.agents[agentKey("A", "user")]; !ok {
 		t.Fatal("room-scoped user handle should still be present")
 	}
@@ -1236,9 +1388,11 @@ func TestRenameStaysWithinRoom(t *testing.T) {
 	if ok, msg := b.Rename(agentKey("A", "old"), agentKey("A", "new"), "sessX", 0, false); !ok {
 		t.Fatalf("rename should succeed: %s", msg)
 	}
+
 	if got := b.Drain(agentKey("A", "new"), false, 0); len(got) != 1 || got[0].Body != "queued for old" {
 		t.Fatalf("inbox not migrated within room: %+v", got)
 	}
+
 	tk := topicKey("A", "builds")
 	if !b.topics[tk][agentKey("A", "new")] || b.topics[tk][agentKey("A", "old")] {
 		t.Fatalf("subscription not migrated to the room-scoped topic key: %+v", b.topics[tk])
@@ -1304,12 +1458,15 @@ func TestJoinRoomMigratesFromBareGlobal(t *testing.T) {
 	if ok, msg := b.JoinRoom("bob", agentKey("frontend", "bob"), "sess1", 0, false); !ok {
 		t.Fatalf("join should succeed: %s", msg)
 	}
+
 	if _, ok := b.agents["bob"]; ok {
 		t.Fatal("stale bare-global agent should be gone after joining a room")
 	}
+
 	if _, ok := b.owners["bob"]; ok {
 		t.Fatal("stale bare-global owner should be gone after joining a room")
 	}
+
 	got := b.Drain(agentKey("frontend", "bob"), false, 0)
 	if len(got) != 1 || got[0].Body != "queued before joining" {
 		t.Fatalf("inbox not migrated into the room-scoped identity: %+v", got)
@@ -1364,10 +1521,12 @@ func TestSnapshotRoundTripsRooms(t *testing.T) {
 
 	b2 := newTestBroker()
 	b2.load(snap)
+
 	agents, topics := b2.Ps("", true)
 	if len(agents) != 2 {
 		t.Fatalf("expected both agents restored, got %+v", agents)
 	}
+
 	if len(topics) != 1 || topics[0].Room != "A" || topics[0].Name != "deploy" {
 		t.Fatalf("expected room A's topic restored, got %+v", topics)
 	}
@@ -1397,9 +1556,11 @@ func TestSnapshotRoundTripsOwnership(t *testing.T) {
 	if !b2.IsRegistered("alice") {
 		t.Fatal("alice's registration should survive a snapshot round trip")
 	}
+
 	if !b2.IsRegistered(agentKey("frontend", "bob")) {
 		t.Fatal("bob's room-scoped registration should survive a snapshot round trip")
 	}
+
 	if b2.IsRegistered("carol") {
 		t.Fatal("carol was never registered — must not become registered via the round trip")
 	}
@@ -1416,23 +1577,28 @@ func TestLoadLegacySnapshotTopicsMapMigrates(t *testing.T) {
 		"agents": [{"name": "bob", "topics": ["builds"]}],
 		"topics": {"builds": ["bob"]}
 	}`)
+
 	var s snapshot
 	if err := json.Unmarshal(legacy, &s); err != nil {
 		t.Fatalf("legacy snapshot failed to parse: %v", err)
 	}
+
 	if len(s.Topics) != 1 || s.Topics[0].Room != "" || s.Topics[0].Name != "builds" {
 		t.Fatalf("legacy topic did not migrate to the global room: %+v", s.Topics)
 	}
+
 	if len(s.Agents) != 1 || s.Agents[0].Room != "" || s.Agents[0].Name != "bob" {
 		t.Fatalf("legacy agent should default to the global room: %+v", s.Agents)
 	}
 
 	b := newTestBroker()
 	b.load(s)
+
 	agents, topics := b.Ps("", false)
 	if len(agents) != 1 || agents[0].Name != "bob" {
 		t.Fatalf("legacy agent not loaded: %+v", agents)
 	}
+
 	if len(topics) != 1 || topics[0].Name != "builds" || len(topics[0].Subscribers) != 1 || topics[0].Subscribers[0] != "bob" {
 		t.Fatalf("legacy topic not loaded: %+v", topics)
 	}
@@ -1448,10 +1614,12 @@ func TestBridgeRelaysToOtherRoomTopic(t *testing.T) {
 	if _, err := b.Bridge("A", "deploy", "B", "ops", bridgeBoth, "alice", 0, false); err != nil {
 		t.Fatalf("bridge creation failed: %v", err)
 	}
+
 	_, delivered, _ := b.Pub(agentKey("A", "alice"), topicKey("A", "deploy"), "shipping v2")
 	if delivered != 0 {
 		t.Fatalf("no other local subscriber in room A, expected 0 direct deliveries, got %d", delivered)
 	}
+
 	got := b.Drain(agentKey("B", "bob"), false, 0)
 	if len(got) != 1 || got[0].Body != "shipping v2" || got[0].OriginRoom != "A" || got[0].OriginTopic != "deploy" {
 		t.Fatalf("bridge did not relay correctly: %+v", got)
@@ -1470,12 +1638,15 @@ func TestBridgeDirectionRespected(t *testing.T) {
 	}
 	// A -> B: bob should get it.
 	b.Pub(agentKey("A", "someone"), topicKey("A", "x"), "a to b")
+
 	if got := b.Drain(agentKey("B", "bob"), false, 0); len(got) != 1 {
 		t.Fatalf("out-direction bridge should relay A->B: %+v", got)
 	}
+
 	b.Drain(agentKey("A", "alice"), false, 0) // clear alice's own direct copy of that first publish
 	// B -> A: alice should NOT get a relayed copy (direction disallows this way).
 	b.Pub(agentKey("B", "someone"), topicKey("B", "y"), "b to a, should not relay")
+
 	if got := b.Drain(agentKey("A", "alice"), false, 0); len(got) != 0 {
 		t.Fatalf("out-direction bridge must not relay B->A: %+v", got)
 	}
@@ -1494,6 +1665,7 @@ func TestBridgeLoopPreventionOnCycle(t *testing.T) {
 	if _, err := b.Bridge("A", "x", "B", "y", bridgeBoth, "alice", 0, false); err != nil {
 		t.Fatalf("first bridge failed: %v", err)
 	}
+
 	if _, err := b.Bridge("B", "y", "A", "x", bridgeBoth, "alice", 0, true); err != nil {
 		t.Fatalf("second (cycle-forming) bridge failed: %v", err)
 	}
@@ -1502,6 +1674,7 @@ func TestBridgeLoopPreventionOnCycle(t *testing.T) {
 	if delivered != 0 { // alice is the sender, no other local subscriber
 		t.Fatalf("unexpected direct delivery count: %d", delivered)
 	}
+
 	got := b.Drain(agentKey("B", "bob"), false, 0)
 	if len(got) != 1 {
 		t.Fatalf("bob should receive exactly one relayed copy, not a duplicate from the cycle: %+v", got)
@@ -1516,6 +1689,7 @@ func TestBridgeRelayIsQuietUnlessMentioned(t *testing.T) {
 	b := newTestBroker()
 	b.Sub(agentKey("B", "bob"), topicKey("B", "y"))
 	b.Sub(agentKey("B", "carol"), topicKey("B", "y"))
+
 	if _, err := b.Bridge("A", "x", "B", "y", bridgeBoth, "alice", 0, false); err != nil {
 		t.Fatalf("bridge creation failed: %v", err)
 	}
@@ -1524,16 +1698,19 @@ func TestBridgeRelayIsQuietUnlessMentioned(t *testing.T) {
 	bobCh := b.waitChan(agentKey("B", "bob"), nil)
 	carolCh := b.waitChan(agentKey("B", "carol"), nil)
 	b.Pub(agentKey("A", "alice"), topicKey("A", "x"), "no mention, relayed")
+
 	select {
 	case <-bobCh:
 		t.Fatal("an unmentioned relay recipient must not be woken")
 	default:
 	}
+
 	select {
 	case <-carolCh:
 		t.Fatal("an unmentioned relay recipient must not be woken")
 	default:
 	}
+
 	got := b.Drain(agentKey("B", "bob"), false, 0)
 	if len(got) != 1 || !got[0].Quiet {
 		t.Fatalf("bob should still receive the relayed message, quietly: %+v", got)
@@ -1543,17 +1720,20 @@ func TestBridgeRelayIsQuietUnlessMentioned(t *testing.T) {
 	bobCh = b.waitChan(agentKey("B", "bob"), nil)
 	carolCh = b.waitChan(agentKey("B", "carol"), nil)
 	b.Pub(agentKey("A", "alice"), topicKey("A", "x"), "@bob check this out (relayed)")
+
 	select {
 	case <-bobCh:
 		// expected: an explicit mention wakes, even across a bridge
 	default:
 		t.Fatal("a mentioned relay recipient should be woken")
 	}
+
 	select {
 	case <-carolCh:
 		t.Fatal("unmentioned carol must not be woken by a relay that mentions someone else")
 	default:
 	}
+
 	got = b.Drain(agentKey("B", "bob"), false, 0)
 	if len(got) != 1 || got[0].Quiet {
 		t.Fatalf("mentioned bob's copy should NOT be quiet: %+v", got)
@@ -1562,16 +1742,20 @@ func TestBridgeRelayIsQuietUnlessMentioned(t *testing.T) {
 
 func TestUnbridgeIsIdempotent(t *testing.T) {
 	b := newTestBroker()
+
 	br, err := b.Bridge("A", "x", "B", "y", bridgeBoth, "alice", 0, false)
 	if err != nil {
 		t.Fatalf("bridge creation failed: %v", err)
 	}
+
 	if ok, _ := b.Unbridge(br.id); !ok {
 		t.Fatal("first unbridge should succeed")
 	}
+
 	if ok, desc := b.Unbridge(br.id); ok || desc != "" {
 		t.Fatalf("second unbridge of the same id should be a no-op, got ok=%v desc=%q", ok, desc)
 	}
+
 	if len(b.bridgesByTopic[topicKey("A", "x")]) != 0 || len(b.bridgesByTopic[topicKey("B", "y")]) != 0 {
 		t.Fatal("bridgesByTopic should be cleaned up after unbridge")
 	}
@@ -1582,14 +1766,17 @@ func TestBridgeSnapshotRoundTrip(t *testing.T) {
 	if _, err := b.Bridge("A", "x", "B", "y", bridgeAToB, "alice", time.Hour, false); err != nil {
 		t.Fatalf("bridge creation failed: %v", err)
 	}
+
 	snap := b.snapshot()
 
 	b2 := newTestBroker()
 	b2.load(snap)
+
 	list := b2.ListBridges()
 	if len(list) != 1 {
 		t.Fatalf("expected 1 bridge restored, got %+v", list)
 	}
+
 	br := list[0]
 	if br.ARoom != "A" || br.ATopic != "x" || br.BRoom != "B" || br.BTopic != "y" || br.Direction != "out" || br.Creator != "alice" {
 		t.Fatalf("bridge fields not restored correctly: %+v", br)
@@ -1597,6 +1784,7 @@ func TestBridgeSnapshotRoundTrip(t *testing.T) {
 	// The relay mechanism must also work post-restore (bridgesByTopic rebuilt).
 	b2.Sub(agentKey("B", "bob"), topicKey("B", "y"))
 	b2.Pub(agentKey("A", "alice"), topicKey("A", "x"), "still relays after restore")
+
 	if got := b2.Drain(agentKey("B", "bob"), false, 0); len(got) != 1 {
 		t.Fatalf("restored bridge should still relay: %+v", got)
 	}
@@ -1635,15 +1823,18 @@ func TestThreadedReplyWakesParticipantsNotBystanders(t *testing.T) {
 	default:
 		t.Fatal("bob (thread participant) should be woken by a threaded reply")
 	}
+
 	select {
 	case <-carolCh:
 		t.Fatal("carol (never posted in the thread) should not be woken")
 	default:
 	}
+
 	got := b.Drain("carol", false, 0)
 	if len(got) != 1 || !got[0].Quiet {
 		t.Fatalf("carol should still receive the threaded reply, quietly: %+v", got)
 	}
+
 	got = b.Drain("bob", false, 0)
 	if len(got) != 1 || got[0].Quiet {
 		t.Fatalf("bob's copy should NOT be quiet (he's a participant): %+v", got)
@@ -1658,13 +1849,16 @@ func TestSendThreadedAttachRecordsFields(t *testing.T) {
 	b := newTestBroker()
 	mtime := time.Unix(1000, 0)
 	attach := &Attachment{Path: "/tmp/cfg.yaml", Hash: "sha256:abcd", Size: 42, MTime: mtime}
+
 	m, err := b.SendThreadedAttach("alice", "bob", "see this", "", attach)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if m.AttachPath != "/tmp/cfg.yaml" || m.AttachHash != "sha256:abcd" || m.AttachSize != 42 || !m.AttachMTime.Equal(mtime) {
 		t.Fatalf("attachment fields not recorded on the sent message: %+v", m)
 	}
+
 	got := b.Drain("bob", false, 0)
 	if len(got) != 1 || got[0].AttachPath != "/tmp/cfg.yaml" {
 		t.Fatalf("attachment fields not delivered to the recipient: %+v", got)
@@ -1673,10 +1867,12 @@ func TestSendThreadedAttachRecordsFields(t *testing.T) {
 
 func TestSendThreadedWithoutAttachLeavesFieldsEmpty(t *testing.T) {
 	b := newTestBroker()
+
 	m, err := b.SendThreaded("alice", "bob", "no attachment here", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if m.AttachPath != "" || m.AttachHash != "" {
 		t.Fatalf("expected no attachment fields, got %+v", m)
 	}
@@ -1685,11 +1881,14 @@ func TestSendThreadedWithoutAttachLeavesFieldsEmpty(t *testing.T) {
 func TestPubThreadedAttachRecordsFields(t *testing.T) {
 	b := newTestBroker()
 	b.Sub("bob", "eng")
+
 	attach := &Attachment{Path: "/tmp/note.txt", Hash: "sha256:ef01", Size: 7}
+
 	m, _, _ := b.PubThreadedAttach("alice", "eng", "check this", "", attach)
 	if m.AttachPath != "/tmp/note.txt" || m.AttachHash != "sha256:ef01" || m.AttachSize != 7 {
 		t.Fatalf("attachment fields not recorded on the published message: %+v", m)
 	}
+
 	got := b.Drain("bob", false, 0)
 	if len(got) != 1 || got[0].AttachHash != "sha256:ef01" {
 		t.Fatalf("attachment fields not delivered to the subscriber: %+v", got)
@@ -1702,13 +1901,16 @@ func TestPubThreadedAttachRecordsFields(t *testing.T) {
 // asker's wait (only a threaded one does).
 func TestSendAskFlagsMessage(t *testing.T) {
 	b := newTestBroker()
+
 	m, err := b.SendAsk("alice", "bob", "status?")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !m.Ask {
 		t.Fatalf("expected the sent message to be flagged Ask, got %+v", m)
 	}
+
 	got := b.Drain("bob", false, 0)
 	if len(got) != 1 || !got[0].Ask {
 		t.Fatalf("expected the delivered message to carry Ask, got %+v", got)
@@ -1717,10 +1919,12 @@ func TestSendAskFlagsMessage(t *testing.T) {
 
 func TestSendThreadedIsNotFlaggedAsk(t *testing.T) {
 	b := newTestBroker()
+
 	m, err := b.SendThreaded("alice", "bob", "just a reply", "m1")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if m.Ask {
 		t.Fatalf("a plain threaded send/reply must not be flagged Ask, got %+v", m)
 	}
@@ -1728,16 +1932,20 @@ func TestSendThreadedIsNotFlaggedAsk(t *testing.T) {
 
 func TestSendThreadedTagsMessageAndTracksParticipant(t *testing.T) {
 	b := newTestBroker()
+
 	m, err := b.SendThreaded("alice", "bob", "starting a DM thread", "root123")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if m.ThreadID != "root123" {
 		t.Fatalf("expected ThreadID stamped on the message, got %q", m.ThreadID)
 	}
+
 	if !b.threadParticipants["root123"]["alice"] {
 		t.Fatal("sender should be tracked as a thread participant")
 	}
+
 	got := b.Drain("bob", false, 0)
 	if len(got) != 1 || got[0].Quiet {
 		t.Fatalf("a direct threaded send should still wake normally (only one recipient): %+v", got)
@@ -1757,13 +1965,16 @@ func TestDrainThreadFiltersToRootAndReplies(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("expected root + 2 replies (3 messages), got %d: %+v", len(got), got)
 	}
+
 	bodies := map[string]bool{}
 	for _, m := range got {
 		bodies[m.Body] = true
 	}
+
 	if !bodies["root message"] || !bodies["reply one"] || !bodies["reply two"] {
 		t.Fatalf("missing expected thread messages: %+v", got)
 	}
+
 	if bodies["unrelated message"] {
 		t.Fatal("an unrelated (non-thread) message leaked into the thread view")
 	}
@@ -1787,6 +1998,7 @@ func TestDrainIfIdleStandsDownWhenBusy(t *testing.T) {
 	if idle {
 		t.Fatal("expected idle=false while busy")
 	}
+
 	if msgs != nil {
 		t.Fatalf("expected no messages while busy, got %+v", msgs)
 	}
@@ -1805,6 +2017,7 @@ func TestDrainIfIdleDrainsWhenNotBusy(t *testing.T) {
 	if !idle {
 		t.Fatal("expected idle=true when not busy")
 	}
+
 	if len(msgs) != 1 || msgs[0].Body != "hello" {
 		t.Fatalf("expected the queued message, got %+v", msgs)
 	}
@@ -1853,6 +2066,7 @@ func TestExportTopicRespectsMax(t *testing.T) {
 	for _, body := range []string{"1", "2", "3"} {
 		b.Pub("alice", "eng", body)
 	}
+
 	got := b.ExportTopic("eng", 2)
 	if len(got) != 2 || got[0].Body != "2" || got[1].Body != "3" {
 		t.Fatalf("expected the most recent 2, got %+v", got)
@@ -1878,6 +2092,7 @@ func TestExportThreadAndDirectArePeekOnly(t *testing.T) {
 	}
 
 	b.Send("carol", "bob", "a DM")
+
 	direct := b.ExportDirect("bob", "carol", 0)
 	if len(direct) != 1 || direct[0].Body != "a DM" {
 		t.Fatalf("expected the DM from carol: %+v", direct)
@@ -1893,6 +2108,7 @@ func TestExportTopicSnapshotRoundTripSurvivesNoSubscribers(t *testing.T) {
 
 	b2 := newTestBroker()
 	b2.load(snap)
+
 	got := b2.ExportTopic("eng", 0)
 	if len(got) != 1 || got[0].Body != "hello" {
 		t.Fatalf("topic history should survive a restart even with no subscribers: %+v", got)
@@ -1921,10 +2137,12 @@ func TestListThreadsSummarizesTopicThread(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected exactly 1 thread, got %d: %+v", len(got), got)
 	}
+
 	th := got[0]
 	if th.ID != root.ID || th.Kind != KindTopic || th.Topic != "eng" || th.RootBody != "root message" {
 		t.Fatalf("unexpected thread summary: %+v", th)
 	}
+
 	if th.Replies != 2 {
 		t.Fatalf("expected 2 replies, got %d: %+v", th.Replies, th)
 	}
@@ -1932,6 +2150,7 @@ func TestListThreadsSummarizesTopicThread(t *testing.T) {
 
 func TestListThreadsSummarizesDirectThread(t *testing.T) {
 	b := newTestBroker()
+
 	root, err := b.Send("alice", "bob", "root dm")
 	if err != nil {
 		t.Fatal(err)
@@ -1946,6 +2165,7 @@ func TestListThreadsSummarizesDirectThread(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected exactly 1 thread, got %d: %+v", len(got), got)
 	}
+
 	th := got[0]
 	if th.Kind != KindDirect || th.Peer != "alice" || th.Replies != 1 {
 		t.Fatalf("unexpected direct thread summary: %+v", th)
@@ -1978,6 +2198,7 @@ func TestListThreadsOrdersByMostRecentActivity(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 threads, got %d: %+v", len(got), got)
 	}
+
 	if got[0].ID != rootNew.ID {
 		t.Fatalf("expected most-recently-active thread first, got %+v", got)
 	}
@@ -1996,15 +2217,19 @@ func TestDeadSessionIsNotOnlineOrWorking(t *testing.T) {
 	if ok, _ := b.RegisterOwned("alice", "sessA", 4242, false); !ok {
 		t.Fatal("register failed")
 	}
+
 	b.SetBusy("alice", time.Hour) // the default backstop
+
 	if !b.IsOnline("alice") || !b.IsWorking("alice") {
 		t.Fatal("a live busy session should read online and working")
 	}
 
 	delete(live, 4242) // the session's process is gone; busyUntil is still an hour out
+
 	if b.IsWorking("alice") {
 		t.Fatal("a dead session must not read `working` just because busy hasn't expired")
 	}
+
 	if b.IsOnline("alice") {
 		t.Fatal("a dead session must not read online")
 	}
@@ -2023,7 +2248,9 @@ func TestDeadSessionWithAParkedListenerIsNotOnline(t *testing.T) {
 	if !b.IsOnline("ghost") {
 		t.Fatal("a live session with a listener should read online")
 	}
+
 	delete(live, 99)
+
 	if b.IsOnline("ghost") {
 		t.Fatal("an orphaned listener must not keep a dead session online")
 	}
@@ -2053,6 +2280,7 @@ func TestRecycledPIDIsNotTheSameSession(t *testing.T) {
 	b.SetBusy("alice", time.Hour)
 
 	live[777] = "sshd" // same pid, different program
+
 	if b.IsOnline("alice") {
 		t.Fatal("a reused pid running something else must not count as the original session")
 	}
@@ -2072,7 +2300,9 @@ func TestDeadOwnerReleasesTheNameToARelaunch(t *testing.T) {
 	if ok, _ := b.ClaimIdentity("agent", "new-session", 2); ok {
 		t.Fatal("setup: a genuinely live owner should still be protected")
 	}
+
 	delete(live, 1) // the old session dies without cleaning up
+
 	if ok, msg := b.ClaimIdentity("agent", "new-session", 2); !ok {
 		t.Fatalf("a relaunch must be able to reclaim its own name from a dead session: %s", msg)
 	}
@@ -2093,14 +2323,17 @@ func TestEndSessionDropsPresenceButKeepsIdentityAndMail(t *testing.T) {
 	if b.IsWorking("alice") {
 		t.Fatal("session-end must clear the in-a-turn flag")
 	}
+
 	select {
 	case <-evicted:
 	default:
 		t.Fatal("session-end must evict the parked waiter, so it releases its listener and lock")
 	}
+
 	if !b.IsRegistered("alice") {
 		t.Fatal("session-end must not unregister — the same name usually comes right back")
 	}
+
 	if got := b.Drain("alice", false, 0); len(got) != 1 {
 		t.Fatalf("session-end must not discard delivered mail, got %d messages", len(got))
 	}
@@ -2115,6 +2348,7 @@ func TestBroadcastMentionWakesOnlyTheMentioned(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
 	b.Register("carol")
+
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true} // the auto-wake hook's filter
 
 	b.Broadcast("alice", "", "@bob can you look at the deploy?", false, false)
@@ -2122,6 +2356,7 @@ func TestBroadcastMentionWakesOnlyTheMentioned(t *testing.T) {
 	if !b.HasPending("bob", noBroadcast) {
 		t.Fatal("an @mentioned agent must be woken by a broadcast")
 	}
+
 	if b.HasPending("carol", noBroadcast) {
 		t.Fatal("an unmentioned agent must NOT be woken — that would make every mention a wake storm")
 	}
@@ -2141,18 +2376,22 @@ func TestBroadcastMentionWakesOnlyTheMentioned(t *testing.T) {
 func TestBroadcastMentionDoesNotCrossRooms(t *testing.T) {
 	b := newTestBroker()
 	b.Register(agentKey("coord", "bob"))
+
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true}
 
 	b.Broadcast("alice", "", "@bob urgent", false, false) // alice is in the global room
+
 	if b.HasPending(agentKey("coord", "bob"), noBroadcast) {
 		t.Fatal("an @mention must not carry a broadcast across a room boundary")
 	}
+
 	if got := b.Drain(agentKey("coord", "bob"), false, 0); len(got) != 0 {
 		t.Fatalf("a room-scoped broadcast must not reach another room at all, got %+v", got)
 	}
 
 	// Host-wide is the explicit opt-in, and the mention still wakes.
 	b.Broadcast("alice", "", "@bob urgent", false, true)
+
 	if !b.HasPending(agentKey("coord", "bob"), noBroadcast) {
 		t.Fatal("a host-wide broadcast's @mention should wake across rooms")
 	}
@@ -2162,10 +2401,12 @@ func TestBroadcastMentionDoesNotCrossRooms(t *testing.T) {
 func TestBroadcastMentionOfAnUnknownNameIsHarmless(t *testing.T) {
 	b := newTestBroker()
 	b.Register("bob")
+
 	_, n := b.Broadcast("alice", "", "@nobody-here ping", false, false)
 	if n != 1 {
 		t.Fatalf("want delivery to the one real agent, got %d", n)
 	}
+
 	if b.IsRegistered("nobody-here") {
 		t.Fatal("mentioning a name must not conjure an agent")
 	}
@@ -2185,10 +2426,12 @@ func askSetup(t *testing.T, b *Broker, asker, askee, question string) string {
 	t.Helper()
 	b.Register(asker)
 	b.Register(askee)
+
 	m, err := b.SendAsk(asker, askee, question)
 	if err != nil {
 		t.Fatalf("ask failed: %v", err)
 	}
+
 	return m.ID
 }
 
@@ -2202,6 +2445,7 @@ func TestMentionFromTheAskeeAnswersAnAsk(t *testing.T) {
 	if !b.HasPendingAnswer("alice", token) {
 		t.Fatal("an @mention from the agent asked should count as an answer")
 	}
+
 	got := b.DrainAnswers("alice", token, false, 0)
 	if len(got) != 1 || got[0].Body != "@alice yes, ready" {
 		t.Fatalf("the answer should be handed to the asker, got %+v", got)
@@ -2218,6 +2462,7 @@ func TestThreadedReplyStillAnswersAnAsk(t *testing.T) {
 	if !b.HasPendingAnswer("alice", token) {
 		t.Fatal("a threaded reply must still answer")
 	}
+
 	if got := b.DrainAnswers("alice", token, false, 0); len(got) != 1 {
 		t.Fatalf("want the threaded reply, got %+v", got)
 	}
@@ -2263,8 +2508,10 @@ func TestAnAmbiguousMentionIsReportedToItsSender(t *testing.T) {
 	if asker != "alice" {
 		t.Errorf("the warning must name the asker, got %q", asker)
 	}
+
 	want := []string{first, second}
 	sort.Strings(want)
+
 	if !slices.Equal(tokens, want) {
 		t.Fatalf("both open asks should be reported, sorted: got %v want %v", tokens, want)
 	}
@@ -2284,6 +2531,7 @@ func TestASingleOpenAskIsNotReportedAsAmbiguous(t *testing.T) {
 	if _, tokens := b.AmbiguousMentionTokens(m); len(tokens) != 0 {
 		t.Fatalf("one open ask is unambiguous, got %v", tokens)
 	}
+
 	if !b.HasPendingAnswer("alice", token) {
 		t.Fatal("and it must still answer, which is the whole point of the mention rule")
 	}
@@ -2301,9 +2549,11 @@ func TestAThreadedReplyStillAnswersWithTwoAsksOutstanding(t *testing.T) {
 	if b.HasPendingAnswer("alice", first) {
 		t.Error("a reply threaded under the second ask must not answer the first")
 	}
+
 	if !b.HasPendingAnswer("alice", second) {
 		t.Fatal("a threaded reply must answer its own ask even with another outstanding")
 	}
+
 	if got := b.DrainAnswers("alice", second, false, 0); len(got) != 1 || got[0].Body != "yes to the second" {
 		t.Fatalf("want the threaded reply, got %+v", got)
 	}
@@ -2332,6 +2582,7 @@ func TestUnqualifiedMessagesDoNotAnswerAnAsk(t *testing.T) {
 			b := newTestBroker()
 			token := askSetup(t, b, "alice", "bob", "ready?")
 			tc.send(b)
+
 			if b.HasPendingAnswer("alice", token) {
 				t.Fatalf("%s must not satisfy an ask", tc.name)
 			}
@@ -2351,6 +2602,7 @@ func TestAMentionOlderThanTheAskDoesNotAnswerIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if b.HasPendingAnswer("alice", m.ID) {
 		t.Fatal("a message that predates the question must not answer it")
 	}
@@ -2366,6 +2618,7 @@ func TestRecvThreadStaysThreadScoped(t *testing.T) {
 	if got := b.DrainThread("alice", token, true, 0); len(got) != 0 {
 		t.Fatalf("recv --thread must not pull in a mention, got %+v", got)
 	}
+
 	if got := b.DrainAnswers("alice", token, true, 0); len(got) != 1 {
 		t.Fatalf("...but the ask itself should still see it, got %+v", got)
 	}
@@ -2377,14 +2630,17 @@ func TestPendingAskTableIsBounded(t *testing.T) {
 	b := newTestBroker()
 	b.Register("alice")
 	b.Register("bob")
+
 	for range maxPendingAsks + 50 {
 		if _, err := b.SendAsk("alice", "bob", "q"); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	b.mu.Lock()
 	n := len(b.asks)
 	b.mu.Unlock()
+
 	if n > maxPendingAsks {
 		t.Fatalf("asks table grew to %d, past the %d cap", n, maxPendingAsks)
 	}
@@ -2452,10 +2708,12 @@ func TestAnAmbiguousMentionStaysRefusedAfterTheOtherAskResolves(t *testing.T) {
 	b := newTestBroker()
 	b.Register("alice")
 	b.Register("bob")
+
 	one, err := b.SendAsk("alice", "bob", "question one")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	two, err := b.SendAsk("alice", "bob", "question two")
 	if err != nil {
 		t.Fatal(err)
@@ -2465,12 +2723,14 @@ func TestAnAmbiguousMentionStaysRefusedAfterTheOtherAskResolves(t *testing.T) {
 	if _, tokens := b.AmbiguousMentionTokens(m); len(tokens) != 2 {
 		t.Fatalf("a mention with two open asks should be ambiguous across both, got %v", tokens)
 	}
+
 	if b.HasPendingAnswer("alice", one.ID) || b.HasPendingAnswer("alice", two.ID) {
 		t.Fatal("an ambiguous mention must answer neither ask")
 	}
 
 	// Resolve one the unambiguous way, which removes it from the open set.
 	b.SendThreaded("bob", "alice", "answer to one", one.ID)
+
 	if got := b.DrainAnswers("alice", one.ID, false, 0); len(got) != 1 {
 		t.Fatalf("the threaded reply should answer its own ask, got %+v", got)
 	}
@@ -2481,6 +2741,7 @@ func TestAnAmbiguousMentionStaysRefusedAfterTheOtherAskResolves(t *testing.T) {
 	}
 	// ...but a genuinely new mention, now unambiguous, still answers it.
 	b.Send("bob", "alice", "@alice yes to the remaining one")
+
 	if !b.HasPendingAnswer("alice", two.ID) {
 		t.Fatal("a fresh mention with only one ask open should answer it")
 	}
@@ -2509,6 +2770,7 @@ func TestInviteIsAMessageAndAcceptJoins(t *testing.T) {
 	if m.Invite != "#peri" {
 		t.Fatalf("the delivered message must carry what it invites to, got %q", m.Invite)
 	}
+
 	if got := b.Drain("fable", true, 0); len(got) != 1 || got[0].Invite != "#peri" {
 		t.Fatalf("the invitation should arrive as an ordinary inbox message, got %+v", got)
 	}
@@ -2517,7 +2779,9 @@ func TestInviteIsAMessageAndAcceptJoins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	b.Sub("fable", topicKey(inv.room, inv.topic))
+
 	if !b.IsSubscribed("fable", topicKey("", "peri")) {
 		t.Fatal("accepting should subscribe the invitee")
 	}
@@ -2529,7 +2793,9 @@ func TestOnlyTheInviteeCanAccept(t *testing.T) {
 	for _, n := range []string{"trail", "fable", "nosy"} {
 		b.Register(n)
 	}
+
 	b.Sub("trail", topicKey("", "peri"))
+
 	m, err := b.Invite("trail", "fable", "peri", "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -2538,14 +2804,17 @@ func TestOnlyTheInviteeCanAccept(t *testing.T) {
 	if _, err := b.LookupInvite("nosy", m.ID); err == nil {
 		t.Fatal("a third party must not be able to redeem someone else's invitation")
 	}
+
 	if _, err := b.LookupInvite("trail", m.ID); err == nil {
 		t.Fatal("not even the sender may accept on the invitee's behalf")
 	}
+
 	if _, err := b.LookupInvite("fable", m.ID); err != nil {
 		t.Fatalf("the invitee must be able to redeem it: %v", err)
 	}
 	// Spent once redeemed.
 	b.ClearInvite(m.ID)
+
 	if _, err := b.LookupInvite("fable", m.ID); err == nil {
 		t.Fatal("a redeemed invitation must not be reusable")
 	}
@@ -2561,6 +2830,7 @@ func TestCannotInviteIntoSomethingYouAreNotIn(t *testing.T) {
 	if _, err := b.Invite("nosy", "fable", "builds", "", ""); err == nil {
 		t.Fatal("inviting into an unfollowed topic should be refused")
 	}
+
 	if _, err := b.Invite("nosy", "fable", "", "someroom", ""); err == nil {
 		t.Fatal("inviting into a room you are not in should be refused")
 	}
@@ -2581,9 +2851,11 @@ func TestTopicInviteAcrossRoomsIsRefusedWithTypeableAdvice(t *testing.T) {
 	if err == nil {
 		t.Fatal("a topic invitation across rooms should be refused")
 	}
+
 	if strings.Contains(err.Error(), "invite coord/away (global)") {
 		t.Fatalf("advice must be typeable, not a display label: %v", err)
 	}
+
 	if !strings.Contains(err.Error(), "room leave") {
 		t.Fatalf("from the global room the honest advice is the command that works: %v", err)
 	}
@@ -2592,6 +2864,7 @@ func TestTopicInviteAcrossRoomsIsRefusedWithTypeableAdvice(t *testing.T) {
 	b.Register(agentKey("team", "host"))
 	b.Register(agentKey("coord", "other"))
 	b.Sub(agentKey("team", "host"), topicKey("team", "work"))
+
 	_, err = b.Invite(agentKey("team", "host"), agentKey("coord", "other"), "work", "", "")
 	if err == nil || !strings.Contains(err.Error(), "mess invite coord/other team") {
 		t.Fatalf("want a runnable room invitation to offer, got %v", err)
@@ -2604,14 +2877,17 @@ func TestPendingInviteTableIsBounded(t *testing.T) {
 	b.Register("trail")
 	b.Register("fable")
 	b.Sub("trail", topicKey("", "peri"))
+
 	for range maxPendingInvites + 25 {
 		if _, err := b.Invite("trail", "fable", "peri", "", "x"); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	b.mu.Lock()
 	n := len(b.invites)
 	b.mu.Unlock()
+
 	if n > maxPendingInvites {
 		t.Fatalf("invites table grew to %d, past the %d cap", n, maxPendingInvites)
 	}
@@ -2626,19 +2902,23 @@ func TestDeclineTellsTheInviter(t *testing.T) {
 	b.Register("trail")
 	b.Register("fable")
 	b.Sub("trail", topicKey("", "peri"))
+
 	m, err := b.Invite("trail", "fable", "peri", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	b.Drain("trail", false, 0) // clear the inviter's inbox first
 
 	inv, note, err := b.Decline("fable", m.ID, "already tracking it elsewhere")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if inv.what() != "#peri" {
 		t.Fatalf("decline should report what was turned down, got %q", inv.what())
 	}
+
 	if note.To != "trail" || !strings.Contains(note.Body, "declined") ||
 		!strings.Contains(note.Body, "#peri") || !strings.Contains(note.Body, "already tracking it") {
 		t.Fatalf("the inviter must be told, with the reason: %+v", note)
@@ -2655,12 +2935,14 @@ func TestOnlyTheInviteeCanDecline(t *testing.T) {
 	for _, n := range []string{"trail", "fable", "nosy"} {
 		b.Register(n)
 	}
+
 	b.Sub("trail", topicKey("", "peri"))
 	m, _ := b.Invite("trail", "fable", "peri", "", "")
 
 	if _, _, err := b.Decline("nosy", m.ID, ""); err == nil {
 		t.Fatal("a third party must not be able to decline someone else's invitation")
 	}
+
 	if _, _, err := b.Decline("trail", m.ID, ""); err == nil {
 		t.Fatal("the sender may not decline on the invitee's behalf either")
 	}
@@ -2673,6 +2955,7 @@ func TestPendingInvitesListsBothDirectionsInOrder(t *testing.T) {
 	for _, n := range []string{"trail", "fable"} {
 		b.Register(n)
 	}
+
 	b.Sub("trail", topicKey("", "peri"))
 	b.Sub("trail", topicKey("", "builds"))
 	b.Sub("fable", topicKey("", "docs"))
@@ -2685,6 +2968,7 @@ func TestPendingInvitesListsBothDirectionsInOrder(t *testing.T) {
 		if len(received) != 2 || received[0].Token != one.ID || received[1].Token != two.ID {
 			t.Fatalf("received should be oldest-first, got %+v", received)
 		}
+
 		if len(sent) != 1 || sent[0].Token != back.ID || sent[0].To != "trail" {
 			t.Fatalf("sent should list what fable is waiting on, got %+v", sent)
 		}
@@ -2696,6 +2980,7 @@ func TestPendingInvitesListsBothDirectionsInOrder(t *testing.T) {
 	}
 	// Answering one drops it from both views.
 	b.ClearInvite(one.ID)
+
 	if r, _ := b.PendingInvites("fable"); len(r) != 1 {
 		t.Fatalf("an answered invitation must leave the list, got %+v", r)
 	}
@@ -2725,6 +3010,7 @@ func TestWhoIsNamesTheAgentBehindASessionPID(t *testing.T) {
 	// A session that has since exited still attributes — the agent really did
 	// own it — but says so, because a recycled pid looks identical.
 	delete(live, 4242)
+
 	if names, alive := b.WhoIs(4242); len(names) != 1 || alive {
 		t.Fatalf("a dead session should still name the owner, flagged not-live; got %v alive=%v", names, alive)
 	}
@@ -2732,9 +3018,11 @@ func TestWhoIsNamesTheAgentBehindASessionPID(t *testing.T) {
 	// Absence of evidence: an agent registered without a session id has no pid
 	// on record and must not be attributed to pid 0.
 	b.RegisterOwned("nopid", "sessN", 0, false)
+
 	if names, _ := b.WhoIs(0); len(names) != 0 {
 		t.Fatalf("pid 0 means 'not recorded' and must match nobody, got %v", names)
 	}
+
 	if names, _ := b.WhoIs(9999); len(names) != 0 {
 		t.Fatalf("an unknown pid must match nobody, got %v", names)
 	}

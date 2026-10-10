@@ -14,8 +14,10 @@ import (
 // (×N) count, and writes distinct messages verbatim.
 func TestEventLogDeduplicates(t *testing.T) {
 	var buf bytes.Buffer
+
 	origOut, origFlags := log.Writer(), log.Flags()
 	defer func() { log.SetOutput(origOut); log.SetFlags(origFlags) }()
+
 	log.SetOutput(&buf)
 	log.SetFlags(0)
 
@@ -47,6 +49,7 @@ func TestRecvReleasesListenerOnDisconnect(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("recv never registered as listening")
 		}
+
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -58,6 +61,7 @@ func TestRecvReleasesListenerOnDisconnect(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("recv did not return after client disconnect")
 	}
+
 	if d.broker.IsListening("bob") {
 		t.Fatal("listener leaked after client disconnect (false 'listening')")
 	}
@@ -77,6 +81,7 @@ func TestRecvEvictedOnRemove(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("recv never registered as listening")
 		}
+
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -91,6 +96,7 @@ func TestRecvEvictedOnRemove(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("parked recv did not stop after its agent was removed (ghost listener)")
 	}
+
 	if d.broker.IsListening("ghost") {
 		t.Fatal("listener still present after eviction")
 	}
@@ -119,19 +125,23 @@ func TestTwoParkedWaitersOnSameAgentNoDoubleDeliveryNoLoss(t *testing.T) {
 		req := Request{Op: "recv", As: "bob", Wait: true, Timeout: "300ms"}
 		doneA := make(chan Response, 1)
 		doneB := make(chan Response, 1)
+
 		go func() { doneA <- d.recv(serverA, req) }()
 		go func() { doneB <- d.recv(serverB, req) }()
 
 		listenerCount := func() int {
 			d.broker.mu.Lock()
 			defer d.broker.mu.Unlock()
+
 			return d.broker.listeners["bob"]
 		}
+
 		deadline := time.Now().Add(time.Second)
 		for listenerCount() < 2 {
 			if time.Now().After(deadline) {
 				t.Fatalf("iter %d: both waiters never registered as listening (count=%d)", iter, listenerCount())
 			}
+
 			time.Sleep(time.Millisecond)
 		}
 
@@ -143,6 +153,7 @@ func TestTwoParkedWaitersOnSameAgentNoDoubleDeliveryNoLoss(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("iter %d: waiter A never returned (deadlock?)", iter)
 		}
+
 		select {
 		case respB = <-doneB:
 		case <-time.After(2 * time.Second):
@@ -166,10 +177,12 @@ func TestDispatchStripsLeadingHashFromTopic(t *testing.T) {
 	if resp := d.dispatch(Request{Op: "sub", As: "bob", Topic: "#trail"}); !resp.OK {
 		t.Fatalf("sub failed: %+v", resp)
 	}
+
 	resp := d.dispatch(Request{Op: "pub", As: "alice", Topic: "trail", Body: "hi"})
 	if !resp.OK {
 		t.Fatalf("pub failed: %+v", resp)
 	}
+
 	if resp.Count != 1 {
 		t.Fatalf("got %d subscriber(s), want 1 (sub #trail and pub trail should be the same topic)", resp.Count)
 	}
@@ -178,6 +191,7 @@ func TestDispatchStripsLeadingHashFromTopic(t *testing.T) {
 	if resp := d.dispatch(Request{Op: "sub", As: "carol", Room: "A", Topic: "#deploy"}); !resp.OK {
 		t.Fatalf("sub failed: %+v", resp)
 	}
+
 	resp = d.dispatch(Request{Op: "pub", As: "dave", Room: "A", Topic: "deploy", Body: "ship"})
 	if resp.Count != 1 {
 		t.Fatalf("got %d subscriber(s), want 1 (room-scoped #-strip should still unify)", resp.Count)
@@ -197,13 +211,16 @@ func TestDispatchRoomScopesSend(t *testing.T) {
 	if resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "A", Body: "for room A's bob"}); !resp.OK {
 		t.Fatalf("send failed: %+v", resp)
 	}
+
 	if resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Room: "B", Body: "for room B's bob"}); !resp.OK {
 		t.Fatalf("send failed: %+v", resp)
 	}
+
 	gotA := d.recv(nil, Request{Op: "recv", As: "bob", Room: "A"})
 	if len(gotA.Messages) != 1 || gotA.Messages[0].Body != "for room A's bob" {
 		t.Fatalf("room A's bob got wrong mail: %+v", gotA.Messages)
 	}
+
 	gotB := d.recv(nil, Request{Op: "recv", As: "bob", Room: "B"})
 	if len(gotB.Messages) != 1 || gotB.Messages[0].Body != "for room B's bob" {
 		t.Fatalf("room B's bob got wrong mail: %+v", gotB.Messages)
@@ -233,10 +250,12 @@ func TestRoomJoinRejectsCollisionUnlessForced(t *testing.T) {
 	if resp := d.dispatch(Request{Op: "room-join", As: "admin", Room: "A", Session: "sess1"}); !resp.OK {
 		t.Fatalf("first join should succeed: %+v", resp)
 	}
+
 	resp := d.dispatch(Request{Op: "room-join", As: "admin", Room: "A", Session: "sess2"})
 	if resp.Error == "" {
 		t.Fatal("a different live session joining the same room's name should collide")
 	}
+
 	if resp := d.dispatch(Request{Op: "room-join", As: "admin", Room: "A", Session: "sess2", Force: true}); !resp.OK {
 		t.Fatalf("--force should take it over: %+v", resp)
 	}
@@ -250,9 +269,11 @@ func TestRoomLeaveRevertsToGlobal(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 
 	d.dispatch(Request{Op: "room-join", As: "alice", Room: "A"})
+
 	if resp := d.dispatch(Request{Op: "room-leave", As: "alice", Room: "A"}); resp.Count != 1 {
 		t.Fatalf("leave should remove the room-scoped registration: %+v", resp)
 	}
+
 	agents, _ := d.broker.Ps("A", false)
 	if len(agents) != 0 {
 		t.Fatalf("room A should be empty after leave: %+v", agents)
@@ -270,15 +291,18 @@ func TestDispatchBridgeUsesCallerRoomAsLocalSide(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 
 	d.dispatch(Request{Op: "sub", As: "bob", Room: "B", Topic: "ops"})
+
 	resp := d.dispatch(Request{Op: "bridge", As: "alice", Room: "A", Topic: "deploy", RemoteRoom: "B", RemoteTopic: "ops"})
 	if !resp.OK || len(resp.Bridges) != 1 {
 		t.Fatalf("bridge creation failed: %+v", resp)
 	}
+
 	if resp.Bridges[0].ARoom != "A" || resp.Bridges[0].ATopic != "deploy" {
 		t.Fatalf("local side should resolve from req.Room: %+v", resp.Bridges[0])
 	}
 
 	d.dispatch(Request{Op: "pub", As: "alice", Room: "A", Topic: "deploy", Body: "ship it"})
+
 	got := d.recv(nil, Request{Op: "recv", As: "bob", Room: "B"})
 	if len(got.Messages) != 1 || got.Messages[0].Body != "ship it" {
 		t.Fatalf("bridge did not relay through dispatch: %+v", got.Messages)
@@ -294,6 +318,7 @@ func TestDispatchBridgeLocalRoomOverrideRequiresForce(t *testing.T) {
 	if resp.Error == "" {
 		t.Fatal("overriding local-room without --force should be refused")
 	}
+
 	resp = d.dispatch(Request{Op: "bridge", As: "alice", Room: "A", LocalRoom: "C", Topic: "deploy", RemoteRoom: "B", RemoteTopic: "ops", Force: true})
 	if !resp.OK || resp.Bridges[0].ARoom != "C" {
 		t.Fatalf("--force should allow the override: %+v", resp)
@@ -315,10 +340,12 @@ func TestDispatchUnbridgeAndBridgesList(t *testing.T) {
 	if unb.Count != 1 {
 		t.Fatalf("unbridge should succeed: %+v", unb)
 	}
+
 	unb = d.dispatch(Request{Op: "unbridge", As: "alice", BridgeID: id})
 	if unb.Count != 0 {
 		t.Fatalf("second unbridge should be a no-op: %+v", unb)
 	}
+
 	list = d.dispatch(Request{Op: "bridges"})
 	if len(list.Bridges) != 0 {
 		t.Fatalf("bridge should be gone from the list: %+v", list.Bridges)
@@ -331,6 +358,7 @@ func TestDispatchThreadIDFlowsThroughPubAndRecv(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 
 	d.dispatch(Request{Op: "sub", As: "bob", Topic: "eng"})
+
 	root := d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "root"})
 	if !root.OK {
 		t.Fatalf("pub failed: %+v", root)
@@ -340,6 +368,7 @@ func TestDispatchThreadIDFlowsThroughPubAndRecv(t *testing.T) {
 	if len(got.Messages) != 1 {
 		t.Fatalf("expected the root message, got %+v", got.Messages)
 	}
+
 	rootID := got.Messages[0].ID
 
 	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "reply", ThreadID: rootID})
@@ -358,21 +387,27 @@ func TestDispatchBroadcastLoudWakesAndNotifies(t *testing.T) {
 	calls := mockNotifySend(t)
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.Register("bob")
+
 	noBroadcast := map[string]bool{KindDirect: true, KindTopic: true}
 
 	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "quiet one"})
+
 	if d.broker.HasPending("bob", noBroadcast) {
 		t.Fatal("a plain broadcast must not satisfy a --no-broadcast wake trigger")
 	}
+
 	if len(*calls) != 0 {
 		t.Fatalf("a plain, unmentioning broadcast must not notify the human: %v", *calls)
 	}
+
 	d.broker.DrainKinds("bob", false, 0, nil)
 
 	d.dispatch(Request{Op: "broadcast", As: "alice", Body: "loud one", Loud: true})
+
 	if !d.broker.HasPending("bob", noBroadcast) {
 		t.Fatal("a --loud broadcast should satisfy the wake trigger even under --no-broadcast")
 	}
+
 	if len(*calls) != 1 {
 		t.Fatalf("a --loud broadcast should notify the human unconditionally, got %v", *calls)
 	}
@@ -405,6 +440,7 @@ func TestDispatchThreadList(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected bob to have received the root, got %+v", msgs)
 	}
+
 	rootID := msgs[0].ID
 	d.dispatch(Request{Op: "pub", As: "alice", Topic: "eng", Body: "a reply", ThreadID: rootID})
 
@@ -412,6 +448,7 @@ func TestDispatchThreadList(t *testing.T) {
 	if !resp.OK || len(resp.Threads) != 1 {
 		t.Fatalf("expected exactly 1 thread, got %+v", resp)
 	}
+
 	th := resp.Threads[0]
 	if th.ID != rootID || th.Topic != "eng" || th.Replies != 1 {
 		t.Fatalf("unexpected thread summary: %+v", th)
@@ -432,6 +469,7 @@ func TestDispatchRecvIfIdleStandsDownWhenBusy(t *testing.T) {
 	}
 
 	d.broker.ClearBusy("bob")
+
 	resp = d.recv(nil, Request{Op: "recv", As: "bob", IfIdle: true})
 	if !resp.OK || resp.Busy || len(resp.Messages) != 1 {
 		t.Fatalf("expected the message once idle, got %+v", resp)
@@ -446,12 +484,14 @@ func TestDispatchRecvIfIdleStandsDownWhenBusy(t *testing.T) {
 func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.RegisterOwned("bob", "", 0, false)
+
 	_, server := net.Pipe()
 
 	askResp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
 	if !askResp.OK || askResp.ID == "" || len(askResp.Messages) != 0 {
 		t.Fatalf("expected an async ask to return a token with no messages, got %+v", askResp)
 	}
+
 	token := askResp.ID
 
 	done := make(chan Response, 1)
@@ -463,8 +503,10 @@ func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("await never registered as listening")
 		}
+
 		time.Sleep(5 * time.Millisecond)
 	}
+
 	if _, err := d.broker.SendThreaded("bob", "alice", "all green", token); err != nil {
 		t.Fatal(err)
 	}
@@ -474,6 +516,7 @@ func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
 		if !resp.OK || len(resp.Messages) != 1 || resp.Messages[0].Body != "all green" {
 			t.Fatalf("expected the threaded reply, got %+v", resp)
 		}
+
 		if resp.ID != token {
 			t.Fatalf("expected Response.ID to echo the token, got %q", resp.ID)
 		}
@@ -486,10 +529,12 @@ func TestDispatchAskAsyncThenAwaitBlocks(t *testing.T) {
 // without parking (mirrors recv's own non-blocking-vs-wait split).
 func TestDispatchAwaitNonBlockingReturnsAlreadyAnsweredToken(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	root, err := d.broker.Send("alice", "bob", "question")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := d.broker.SendThreaded("bob", "alice", "answer", root.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -503,6 +548,7 @@ func TestDispatchAwaitNonBlockingReturnsAlreadyAnsweredToken(t *testing.T) {
 // await with no token at all is a clear error, not a silent no-op.
 func TestDispatchAwaitRequiresToken(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.askOrAwait(nil, Request{Op: "await", As: "alice", Wait: false})
 	if resp.Error == "" {
 		t.Fatal("expected an error for await with no token")
@@ -516,13 +562,16 @@ func TestDispatchAwaitRequiresToken(t *testing.T) {
 // ever send) and not show up as a ghost in `mess ps`.
 func TestDispatchAskRejectsUnregisteredRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "ghost-bob", Body: "are you there?", Wait: false})
 	if resp.Error == "" {
 		t.Fatal("expected an error for asking a never-registered name")
 	}
+
 	if d.broker.IsRegistered("ghost-bob") {
 		t.Fatal("asking an unregistered name must not register it")
 	}
+
 	agents, _ := d.broker.Ps("", false)
 	for _, a := range agents {
 		if a.Name == "ghost-bob" {
@@ -540,6 +589,7 @@ func TestDispatchAskRejectsRegisteredButOfflineRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.now = func() time.Time { return now }
 	d.broker.RegisterOwned("bob", "", 0, false)
+
 	now = now.Add(3 * time.Minute) // past the 2-minute "recently active" window
 
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
@@ -554,6 +604,7 @@ func TestDispatchAskAllowsRegisteredAndOnlineRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.RegisterOwned("bob", "", 0, false)
 	d.broker.AddListener("bob") // genuinely online: has a live listener
+
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "bob", Body: "status?", Wait: false})
 	if !resp.OK || resp.ID == "" {
 		t.Fatalf("expected ask to succeed for a registered, online recipient, got %+v", resp)
@@ -564,6 +615,7 @@ func TestDispatchAskAllowsRegisteredAndOnlineRecipient(t *testing.T) {
 // is never registered via RegisterOwned — it's a reserved handle.
 func TestDispatchAskAllowsUserHandleWithoutRegistration(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.askOrAwait(nil, Request{Op: "ask", As: "alice", To: "user", Body: "need your input", Wait: false})
 	if !resp.OK || resp.ID == "" {
 		t.Fatalf("expected ask to the human's mailbox to succeed, got %+v", resp)
@@ -580,13 +632,16 @@ func TestDispatchAskAllowsUserHandleWithoutRegistration(t *testing.T) {
 
 func TestDispatchSendRejectsNeverRegisteredRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.dispatch(Request{Op: "send", As: "alice", To: "ghost-bob", Body: "hi"})
 	if resp.Error == "" {
 		t.Fatal("expected an error for sending to a never-registered name")
 	}
+
 	if d.broker.IsRegistered("ghost-bob") {
 		t.Fatal("sending to an unregistered name must not register it")
 	}
+
 	agents, _ := d.broker.Ps("", false)
 	for _, a := range agents {
 		if a.Name == "ghost-bob" {
@@ -606,9 +661,11 @@ func TestDispatchSendRejectsCrossRoomGhost(t *testing.T) {
 	if resp.Error == "" {
 		t.Fatal("expected an error for a name registered in a different room")
 	}
+
 	if !strings.Contains(resp.Error, "frontend") {
 		t.Fatalf("expected the error to name the other room, got %q", resp.Error)
 	}
+
 	if _, ok := d.broker.agents["bob"]; ok {
 		t.Fatal("must not create a same-named ghost in the sender's own (global) room")
 	}
@@ -624,6 +681,7 @@ func TestDispatchSendAllowsExplicitRoomTargeting(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("explicit --room targeting should succeed, got %+v", resp)
 	}
+
 	got := d.broker.Drain(agentKey("frontend", "bob"), false, 0)
 	if len(got) != 1 || got[0].Body != "hi" {
 		t.Fatalf("message should have reached the real frontend-room bob, got %+v", got)
@@ -636,6 +694,7 @@ func TestDispatchSendAllowsExplicitRoomTargeting(t *testing.T) {
 func TestDispatchSendAllowsRegisteredButOfflineRecipient(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.RegisterOwned("bob", "", 0, false)
+
 	resp := d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "hi"})
 	if !resp.OK {
 		t.Fatalf("expected send to a registered-but-offline recipient to succeed, got %+v", resp)
@@ -646,6 +705,7 @@ func TestDispatchSendAllowsRegisteredButOfflineRecipient(t *testing.T) {
 // or not — it's a reserved handle, exempt from the registration guard.
 func TestDispatchSendAllowsUserHandleWithoutRegistration(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.dispatch(Request{Op: "send", As: "alice", To: "user", Body: "hi"})
 	if !resp.OK {
 		t.Fatalf("expected send to the human's mailbox to succeed, got %+v", resp)
@@ -662,6 +722,7 @@ func TestDispatchAskCrossRoomHint(t *testing.T) {
 	if resp.Error == "" {
 		t.Fatal("expected an error for a name registered in a different room")
 	}
+
 	if !strings.Contains(resp.Error, "frontend") {
 		t.Fatalf("expected the error to name the other room, got %q", resp.Error)
 	}
@@ -671,10 +732,12 @@ func TestDispatchAskCrossRoomHint(t *testing.T) {
 
 func TestDispatchRegisterRejectsSlashName(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.dispatch(Request{Op: "register", As: "game/grok-game"})
 	if resp.Error == "" {
 		t.Fatal("expected an error registering a name containing '/'")
 	}
+
 	if d.broker.IsRegistered("game/grok-game") {
 		t.Fatal("a slash-containing name must not be registered")
 	}
@@ -682,6 +745,7 @@ func TestDispatchRegisterRejectsSlashName(t *testing.T) {
 
 func TestDispatchRoomJoinRejectsSlashName(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
+
 	resp := d.dispatch(Request{Op: "room-join", As: "game/grok-game", Room: "game"})
 	if resp.Error == "" {
 		t.Fatal("expected an error room-joining a name containing '/'")
@@ -691,6 +755,7 @@ func TestDispatchRoomJoinRejectsSlashName(t *testing.T) {
 func TestDispatchRenameRejectsSlashName(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	d.broker.RegisterOwned("alice", "", 0, false)
+
 	resp := d.dispatch(Request{Op: "rename", As: "alice", To: "room/alice"})
 	if resp.Error == "" {
 		t.Fatal("expected an error renaming to a name containing '/'")
@@ -708,9 +773,11 @@ func TestDispatchRoomJoinMigratesFromPreviousRoom(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("room-join should succeed: %+v", resp)
 	}
+
 	if _, ok := d.broker.agents["bob"]; ok {
 		t.Fatal("stale bare-global agent should be gone after joining a room")
 	}
+
 	got := d.broker.Drain(agentKey("frontend", "bob"), false, 0)
 	if len(got) != 1 || got[0].Body != "queued before joining" {
 		t.Fatalf("inbox should have migrated into the room-scoped identity, got %+v", got)
@@ -722,11 +789,14 @@ func TestDispatchRoomJoinMigratesFromPreviousRoom(t *testing.T) {
 func newTestDaemonWithJournal(t *testing.T) *daemon {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "journal.jsonl")
+
 	jw, err := openJournal(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { jw.close() })
+
 	return &daemon{broker: NewBroker(), journal: jw, paths: paths{journal: path}, stop: make(chan struct{})}
 }
 
@@ -744,10 +814,12 @@ func TestDispatchSendBroadcastPubAllJournal(t *testing.T) {
 	if !resp.OK || len(resp.Messages) != 3 {
 		t.Fatalf("expected all 3 journaled messages, got %+v", resp)
 	}
+
 	bodies := map[string]bool{}
 	for _, m := range resp.Messages {
 		bodies[m.Body] = true
 	}
+
 	for _, want := range []string{"direct hello", "broadcast hello", "pub hello"} {
 		if !bodies[want] {
 			t.Fatalf("expected %q in the journal, got %+v", want, resp.Messages)
@@ -777,6 +849,7 @@ func TestDispatchLogScopesToCallerRoomByDefault(t *testing.T) {
 // An invalid --since is a clear error, not a silently-empty result.
 func TestDispatchLogRejectsInvalidSince(t *testing.T) {
 	d := newTestDaemonWithJournal(t)
+
 	resp := d.dispatch(Request{Op: "log", As: "alice", Since: "nonsense"})
 	if resp.Error == "" {
 		t.Fatal("expected an error for an invalid --since")
@@ -815,12 +888,14 @@ func TestDispatchExpireJournalsBeforeDropping(t *testing.T) {
 	now := time.Unix(0, 0)
 	d.broker.now = func() time.Time { return now }
 	d.broker.Send("alice", "bob", "ancient mail")
+
 	now = now.Add(15 * 24 * time.Hour)
 
 	resp := d.dispatch(Request{Op: "expire", Timeout: (14 * 24 * time.Hour).String()})
 	if !resp.OK || resp.Expired != 1 {
 		t.Fatalf("expected 1 expired message, got %+v", resp)
 	}
+
 	if got := d.broker.Drain("bob", false, 0); len(got) != 0 {
 		t.Fatalf("expected the inbox to be empty after expiry, got %+v", got)
 	}
@@ -837,15 +912,18 @@ func TestDispatchExpireDryRunDoesNotJournalOrDrop(t *testing.T) {
 	now := time.Unix(0, 0)
 	d.broker.now = func() time.Time { return now }
 	d.broker.Send("alice", "bob", "ancient mail")
+
 	now = now.Add(15 * 24 * time.Hour)
 
 	resp := d.dispatch(Request{Op: "expire", Timeout: (14 * 24 * time.Hour).String(), Peek: true})
 	if !resp.OK || resp.Expired != 1 {
 		t.Fatalf("expected a preview count of 1, got %+v", resp)
 	}
+
 	if got := d.broker.Drain("bob", false, 0); len(got) != 1 {
 		t.Fatalf("dry-run must not drop anything, got %+v", got)
 	}
+
 	logResp := d.dispatch(Request{Op: "log", As: "alice", All: true})
 	if !logResp.OK || len(logResp.Messages) != 0 {
 		t.Fatalf("dry-run must not journal anything, got %+v", logResp)
@@ -859,6 +937,7 @@ func TestExpireDurablySkipsCommitOnJournalFailure(t *testing.T) {
 	now := time.Unix(0, 0)
 	d.broker.now = func() time.Time { return now }
 	d.broker.Send("alice", "bob", "ancient mail")
+
 	now = now.Add(15 * 24 * time.Hour)
 
 	if err := d.journal.close(); err != nil { // force the next append to fail
@@ -869,6 +948,7 @@ func TestExpireDurablySkipsCommitOnJournalFailure(t *testing.T) {
 	if expired != nil {
 		t.Fatalf("expected no commit when journaling fails, got %+v", expired)
 	}
+
 	if got := d.broker.Drain("bob", false, 0); len(got) != 1 {
 		t.Fatalf("message must remain queued when the journal write failed, got %+v", got)
 	}
@@ -887,6 +967,7 @@ func TestExpireDurablySkipsCommitOnJournalFailure(t *testing.T) {
 func TestBlockingRecvReportsRacedWhenAnotherConsumerDrainsFirst(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	_, server := net.Pipe()
+
 	d.broker.Send("alice", "bob", "hello")
 
 	// Mail is already pending, so the park returns via finish() — which waits
@@ -895,7 +976,9 @@ func TestBlockingRecvReportsRacedWhenAnotherConsumerDrainsFirst(t *testing.T) {
 	go func() {
 		done <- d.recv(server, Request{Op: "recv", As: "bob", Wait: true, Batch: "300ms"})
 	}()
+
 	time.Sleep(50 * time.Millisecond)
+
 	if got := d.broker.Drain("bob", false, 0); len(got) != 1 {
 		t.Fatalf("setup: the racing consumer should have taken the message, got %d", len(got))
 	}
@@ -905,6 +988,7 @@ func TestBlockingRecvReportsRacedWhenAnotherConsumerDrainsFirst(t *testing.T) {
 		if len(resp.Messages) != 0 {
 			t.Fatalf("expected an empty return, got %d messages", len(resp.Messages))
 		}
+
 		if resp.Reason != ReasonRaced {
 			t.Fatalf("an empty wake caused by a racing consumer must report %q so the caller re-parks; got %q", ReasonRaced, resp.Reason)
 		}
@@ -939,8 +1023,10 @@ func TestBlockingRecvReportsEvicted(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("recv never registered as listening")
 		}
+
 		time.Sleep(5 * time.Millisecond)
 	}
+
 	d.broker.RemoveAgent("ghost")
 
 	select {
@@ -959,6 +1045,7 @@ func TestBlockingRecvReportsEvicted(t *testing.T) {
 func TestBlockingRecvHasNoReasonWhenItDelivers(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	_, server := net.Pipe()
+
 	d.broker.Send("alice", "bob", "hello")
 
 	resp := d.recv(server, Request{Op: "recv", As: "bob", Wait: true})
@@ -983,6 +1070,7 @@ func TestPubResponseReportsHowManyItWoke(t *testing.T) {
 	if resp.Count != 2 {
 		t.Fatalf("want delivery to both non-senders, got %d", resp.Count)
 	}
+
 	if resp.Woke != 1 {
 		t.Fatalf("want woke=1 (only the @mentioned bob), got %d — the publisher can't see that carol was quieted", resp.Woke)
 	}
@@ -1002,6 +1090,7 @@ func TestPubResponseReportsHowManyItWoke(t *testing.T) {
 func TestCrossRoomSendDeliversToTheNamedRoom(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	global := ""
+
 	d.broker.RegisterOwned("alice", "sess-a", 0, false)                    // global room
 	d.broker.RegisterOwned(agentKey("coord", "carol"), "sess-c", 0, false) // room coord
 
@@ -1009,6 +1098,7 @@ func TestCrossRoomSendDeliversToTheNamedRoom(t *testing.T) {
 	if resp.Error != "" {
 		t.Fatalf("cross-room send failed: %s", resp.Error)
 	}
+
 	if got, _ := d.broker.Stat(agentKey("coord", "carol")); got != 1 {
 		t.Fatalf("the real recipient should have the message, got %d pending", got)
 	}
@@ -1017,10 +1107,12 @@ func TestCrossRoomSendDeliversToTheNamedRoom(t *testing.T) {
 	// ghost it is refused, naming the real room — an error the caller can act
 	// on instead of silence.
 	coord := "coord"
+
 	reply := d.dispatch(Request{Op: "send", As: "carol", To: "alice", Body: "answer", Room: "coord", SelfRoom: &coord})
 	if reply.Error == "" {
 		t.Fatal("a reply to a name that lives in another room should be refused, not delivered to a ghost")
 	}
+
 	if !strings.Contains(reply.Error, "--global") {
 		t.Fatalf("the refusal should name the flag that reaches the global room, got %q", reply.Error)
 	}
@@ -1031,6 +1123,7 @@ func TestCrossRoomSendDeliversToTheNamedRoom(t *testing.T) {
 func TestCrossRoomBroadcastAndPubReachTheNamedRoom(t *testing.T) {
 	d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 	global := ""
+
 	d.broker.RegisterOwned("alice", "sess-a", 0, false)
 	d.broker.RegisterOwned(agentKey("coord", "carol"), "sess-c", 0, false)
 	d.broker.Sub(agentKey("coord", "carol"), topicKey("coord", "builds"))
@@ -1038,9 +1131,11 @@ func TestCrossRoomBroadcastAndPubReachTheNamedRoom(t *testing.T) {
 	if resp := d.dispatch(Request{Op: "broadcast", As: "alice", Body: "into coord", Room: "coord", SelfRoom: &global}); resp.Count != 1 {
 		t.Fatalf("cross-room broadcast should reach the one agent there, got %d", resp.Count)
 	}
+
 	if resp := d.dispatch(Request{Op: "pub", As: "alice", Topic: "builds", Body: "into coord", Room: "coord", SelfRoom: &global}); resp.Count != 1 {
 		t.Fatalf("cross-room pub should reach the one subscriber there, got %d", resp.Count)
 	}
+
 	if got, _ := d.broker.Stat(agentKey("coord", "carol")); got != 2 {
 		t.Fatalf("the real subscriber should have both messages, got %d", got)
 	}
@@ -1052,6 +1147,7 @@ func TestCallerRoomFallsBackForAClientWithoutSelfRoom(t *testing.T) {
 	if got := callerRoom(Request{Room: "coord"}); got != "coord" {
 		t.Fatalf("with no SelfRoom, Room is the caller's room; got %q", got)
 	}
+
 	self := ""
 	if got := callerRoom(Request{Room: "coord", SelfRoom: &self}); got != "" {
 		t.Fatalf("SelfRoom must win over Room; got %q", got)

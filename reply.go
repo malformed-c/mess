@@ -32,22 +32,27 @@ func lastMsgPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
+
 	return filepath.Join(p.dir, "lastmsg", stateKey(sid))
 }
 
 func readLastMsg(p paths) (lastMsgInfo, bool) {
 	var info lastMsgInfo
+
 	path := lastMsgPath(p)
 	if path == "" {
 		return info, false
 	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return info, false
 	}
+
 	if err := json.Unmarshal(data, &info); err != nil {
 		return info, false
 	}
+
 	return info, true
 }
 
@@ -60,13 +65,16 @@ func writeLastMsg(p paths, info lastMsgInfo) {
 	if path == "" {
 		return
 	}
+
 	data, err := json.Marshal(info)
 	if err != nil {
 		return
 	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return
 	}
+
 	_ = os.WriteFile(path, data, 0o600)
 }
 
@@ -75,22 +83,27 @@ func openThreadPath(p paths) string {
 	if sid == "" {
 		return ""
 	}
+
 	return filepath.Join(p.dir, "openthread", stateKey(sid))
 }
 
 func readOpenThread(p paths) (openThreadInfo, bool) {
 	var info openThreadInfo
+
 	path := openThreadPath(p)
 	if path == "" {
 		return info, false
 	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return info, false
 	}
+
 	if err := json.Unmarshal(data, &info); err != nil {
 		return info, false
 	}
+
 	return info, true
 }
 
@@ -99,13 +112,16 @@ func writeOpenThread(p paths, info openThreadInfo) error {
 	if path == "" {
 		return fmt.Errorf("no session id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID / GROK_SESSION_ID / MESS_SESSION_ID); cannot track an open thread")
 	}
+
 	data, err := json.Marshal(info)
 	if err != nil {
 		return err
 	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+
 	return os.WriteFile(path, data, 0o600)
 }
 
@@ -116,9 +132,11 @@ func clearOpenThread(p paths) error {
 	if path == "" {
 		return nil
 	}
+
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	return nil
 }
 
@@ -140,6 +158,7 @@ func ambiguousReplyTarget(open openThreadInfo, last lastMsgInfo, hasLast bool) s
 	if !hasLast || last.ID == open.ThreadID {
 		return ""
 	}
+
 	return fmt.Sprintf(
 		"ambiguous reply target — mess will not guess which you meant.\n"+
 			"  open thread %s: %s (continued by your last `mess reply`)\n"+
@@ -155,6 +174,7 @@ func describeOpenThread(open openThreadInfo) string {
 	if open.Kind == KindTopic {
 		return "#" + open.Topic
 	}
+
 	return "to " + open.To
 }
 
@@ -162,5 +182,6 @@ func describeLastMsg(last lastMsgInfo) string {
 	if last.Kind == KindTopic {
 		return fmt.Sprintf("a message in #%s", last.Topic)
 	}
+
 	return fmt.Sprintf("a direct message from %s", last.From)
 }

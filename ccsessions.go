@@ -49,10 +49,12 @@ func ccSessionsDir() string {
 	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return filepath.Join(dir, "sessions")
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
+
 	return filepath.Join(home, ".claude", "sessions")
 }
 
@@ -65,27 +67,34 @@ func ccSessions() []ccSession {
 	if dir == "" {
 		return nil
 	}
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
+
 	var out []ccSession
+
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".json") {
 			continue
 		}
+
 		pid, err := strconv.Atoi(strings.TrimSuffix(name, ".json"))
 		if err != nil || pid <= 0 {
 			continue
 		}
+
 		if !hostSessionComms[ccProcessComm(pid)] {
 			continue // exited, or the pid was recycled by something else
 		}
+
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}
+
 		var rec struct {
 			PID                 int    `json:"pid"`
 			Name                string `json:"name"`
@@ -96,6 +105,7 @@ func ccSessions() []ccSession {
 		if json.Unmarshal(b, &rec) != nil {
 			continue
 		}
+
 		s := ccSession{PID: pid, Name: rec.Name, Status: rec.Status, CWD: rec.CWD}
 		// The path is recorded at startup; the socket is what actually exists.
 		if rec.MessagingSocketPath != "" {
@@ -103,14 +113,18 @@ func ccSessions() []ccSession {
 				s.Socket = rec.MessagingSocketPath
 			}
 		}
+
 		out = append(out, s)
 	}
+
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Name != out[j].Name {
 			return out[i].Name < out[j].Name
 		}
+
 		return out[i].PID < out[j].PID
 	})
+
 	return out
 }
 
@@ -140,12 +154,15 @@ func compactHome(path string) string {
 	if err != nil || home == "" {
 		return path
 	}
+
 	if path == home {
 		return "~"
 	}
+
 	if rest, ok := strings.CutPrefix(path, home+string(filepath.Separator)); ok {
 		return "~/" + rest
 	}
+
 	return path
 }
 
@@ -155,5 +172,6 @@ func ccByPID(sessions []ccSession) map[int]ccSession {
 	for _, s := range sessions {
 		m[s.PID] = s
 	}
+
 	return m
 }

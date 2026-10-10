@@ -231,15 +231,18 @@ Common flags:
 func main() {
 	log.SetFlags(log.LstdFlags)
 	log.SetPrefix("mess: ")
+
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+
 	p := resolvePaths()
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
 	var err error
+
 	switch cmd {
 	// Identity
 	case "register":
@@ -339,6 +342,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "mess: unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
 	}
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -350,12 +354,15 @@ func agentName(p paths, flagVal string) (string, error) {
 	if flagVal != "" {
 		return flagVal, nil
 	}
+
 	if id := readIdentity(p); id != "" {
 		return id, nil
 	}
+
 	if env := os.Getenv("MESS_AGENT"); env != "" {
 		return env, nil
 	}
+
 	return "", fmt.Errorf("no identity: run `mess register <name>`, pass --as NAME, or set MESS_AGENT")
 }
 
@@ -366,12 +373,15 @@ func resolveRoom(p paths, flagVal string) string {
 	if flagVal != "" {
 		return flagVal
 	}
+
 	if r := readRoom(p); r != "" {
 		return r
 	}
+
 	if env := os.Getenv("MESS_ROOM"); env != "" {
 		return env
 	}
+
 	return ""
 }
 
@@ -405,9 +415,11 @@ func bodyFrom(args []string, filePath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	if strings.TrimSpace(body) == "" {
 		return "", errEmptyBody
 	}
+
 	return body, nil
 }
 
@@ -426,22 +438,28 @@ func bodyOrEmpty(args []string, filePath string) (string, error) {
 	if filePath == "-" {
 		return readStdinBody()
 	}
+
 	if filePath != "" {
 		if len(args) > 0 {
 			return "", fmt.Errorf("--file conflicts with a body given on the command line — use one or the other")
 		}
+
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			return "", fmt.Errorf("--file %s: %w", filePath, err)
 		}
+
 		return strings.TrimRight(string(data), "\n"), nil
 	}
+
 	if len(args) == 1 && args[0] == "-" {
 		return readStdinBody()
 	}
+
 	if len(args) > 0 {
 		return strings.Join(args, " "), nil
 	}
+
 	return readStdinBody()
 }
 
@@ -454,10 +472,12 @@ func warnUnreached(resp Response, where string) {
 	if len(resp.Unreached) == 0 {
 		return
 	}
+
 	msg := fmt.Sprintf("mess: warning: @%s reached nobody — not %s", strings.Join(resp.Unreached, ", @"), where)
 	if len(resp.Members) > 0 {
 		msg += fmt.Sprintf(" (there: %s)", strings.Join(resp.Members, ", "))
 	}
+
 	fmt.Fprintln(os.Stderr, msg+". They received nothing.")
 }
 
@@ -470,6 +490,7 @@ func warnAmbiguousAnswer(resp Response) {
 	if len(resp.AmbiguousTokens) < 2 {
 		return
 	}
+
 	fmt.Fprintf(os.Stderr,
 		"mess: warning: @%s has %d open questions for you, so the mention could not say which it answered — it answered NONE of them. Pick one: mess reply --thread %s\n",
 		resp.AmbiguousAsker, len(resp.AmbiguousTokens), strings.Join(resp.AmbiguousTokens, " | "))
@@ -492,11 +513,14 @@ func bodyEcho(body string) string {
 	if !strings.Contains(body, "\n") && len([]rune(body)) <= inline {
 		return fmt.Sprintf("%q", body)
 	}
+
 	lines := strings.Count(body, "\n") + 1
+
 	unit := "lines"
 	if lines == 1 {
 		unit = "line"
 	}
+
 	return fmt.Sprintf("%d bytes, %d %s", len(body), lines, unit)
 }
 
@@ -507,6 +531,7 @@ func readStdinBody() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	return strings.TrimRight(string(data), "\n"), nil
 }
 
@@ -514,6 +539,7 @@ func readStdinBody() (string, error) {
 func newFlags(name string) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	as := fs.String("as", "", "identity of the calling agent")
+
 	return fs, as
 }
 
@@ -534,12 +560,14 @@ func (rt roomTarget) checkTarget(target string) error {
 	if !ok {
 		return nil
 	}
+
 	switch {
 	case rt.global:
 		return fmt.Errorf("%q names room %q, but --global says the global room — drop one", target, room)
 	case rt.room != "" && rt.room != room:
 		return fmt.Errorf("%q names room %q, but --room says %q — drop one", target, room, rt.room)
 	}
+
 	return nil
 }
 
@@ -559,10 +587,12 @@ func (rt roomTarget) apply(req Request) Request {
 func roomFlags(fs *flag.FlagSet, what string) func() (roomTarget, error) {
 	room := fs.String("room", "", "target a "+what+" in this room instead of your own (explicit cross-room)")
 	global := fs.Bool("global", false, "target a "+what+" in the global room, even if you're in one — an empty --room can't distinguish \"target global\" from \"no override\"")
+
 	return func() (roomTarget, error) {
 		if *room != "" && *global {
 			return roomTarget{}, fmt.Errorf("--room and --global are mutually exclusive")
 		}
+
 		return roomTarget{room: *room, global: *global}, nil
 	}
 }
@@ -607,7 +637,9 @@ func parseFlags(fs *flag.FlagSet, args []string, strict bool) error {
 		printCommandUsage(fs)
 		os.Exit(0)
 	}
+
 	valueFlags, boolFlags := map[string]bool{}, map[string]bool{}
+
 	fs.VisitAll(func(f *flag.Flag) {
 		if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
 			boolFlags[f.Name] = true
@@ -615,6 +647,7 @@ func parseFlags(fs *flag.FlagSet, args []string, strict bool) error {
 			valueFlags[f.Name] = true
 		}
 	})
+
 	hoisted, scanned := hoistFlags(args, valueFlags, boolFlags)
 	if strict {
 		for _, a := range scanned {
@@ -628,6 +661,7 @@ func parseFlags(fs *flag.FlagSet, args []string, strict bool) error {
 	// ExitOnError: fs.Parse prints and exits on a bad flag, so its error
 	// return is unreachable — the strict check above is the only failure.
 	_ = fs.Parse(hoisted)
+
 	return nil
 }
 
@@ -639,10 +673,12 @@ func wantsHelp(args []string) bool {
 		if a == "--" {
 			return false
 		}
+
 		if a == "-h" || a == "--help" {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -656,6 +692,7 @@ func printCommandUsage(fs *flag.FlagSet) {
 	} else {
 		fmt.Printf("  mess %s\n", fs.Name())
 	}
+
 	fs.SetOutput(os.Stdout)
 	fmt.Println("\nflags:")
 	fs.PrintDefaults()
@@ -668,20 +705,24 @@ func printCommandUsage(fs *flag.FlagSet) {
 // listing flags.
 func usageFor(cmd string) string {
 	var out []string
+
 	lines := strings.Split(usage, "\n")
 	for i := 0; i < len(lines); i++ {
 		if !isUsageEntryFor(lines[i], cmd) {
 			continue
 		}
+
 		out = append(out, lines[i])
 		for i+1 < len(lines) && strings.HasPrefix(lines[i+1], "   ") {
 			i++
 			out = append(out, lines[i])
 		}
 	}
+
 	if len(out) == 0 {
 		return ""
 	}
+
 	return strings.Join(out, "\n") + "\n"
 }
 
@@ -695,11 +736,13 @@ func isUsageEntryFor(line, cmd string) bool {
 		if i < 0 || (prefix[0] == ' ' && i != 0) {
 			continue
 		}
+
 		rest := line[i+len(prefix):]
 		if rest == "" || rest[0] == ' ' {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -716,11 +759,14 @@ func warnUnknownLongFlag(scanned []string, valueFlags, boolFlags map[string]bool
 		if !strings.HasPrefix(a, "--") {
 			continue
 		}
+
 		name, ok := flagToken(a)
 		if !ok || valueFlags[name] || boolFlags[name] {
 			continue
 		}
+
 		fmt.Fprintf(os.Stderr, "mess: warning: %s is not a flag of this command, so it is being sent as message text — put `--` before the body if that is intended, or see `-h`\n", a)
+
 		return
 	}
 }
@@ -733,23 +779,28 @@ func warnUnknownLongFlag(scanned []string, valueFlags, boolFlags map[string]bool
 // declaration, so it is excluded from the typo warning below.
 func hoistFlags(args []string, valueFlags, boolFlags map[string]bool) (hoisted, scanned []string) {
 	var flags, pos []string
+
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
 			pos = append(pos, args[i+1:]...)
 			return append(append(flags, "--"), pos...), scanned
 		}
+
 		if name, ok := flagToken(a); ok && (valueFlags[name] || boolFlags[name]) {
 			flags = append(flags, a)
 			if valueFlags[name] && !strings.Contains(a, "=") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
+
 			continue
 		}
+
 		pos = append(pos, a)
 		scanned = append(scanned, a)
 	}
+
 	return append(append(flags, "--"), pos...), scanned
 }
 
@@ -758,13 +809,16 @@ func flagToken(a string) (string, bool) {
 	if len(a) < 2 || a[0] != '-' {
 		return "", false
 	}
+
 	s := strings.TrimLeft(a, "-")
 	if s == "" {
 		return "", false
 	}
+
 	if i := strings.IndexByte(s, '='); i >= 0 {
 		s = s[:i]
 	}
+
 	return s, true
 }
 
@@ -780,23 +834,28 @@ func setAttach(req *Request, path string) error {
 	if err != nil {
 		return fmt.Errorf("--attach %s: %w", path, err)
 	}
+
 	f, err := os.Open(abs)
 	if err != nil {
 		return fmt.Errorf("--attach %s: %w", path, err)
 	}
 	defer f.Close()
+
 	info, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("--attach %s: %w", path, err)
 	}
+
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return fmt.Errorf("--attach %s: %w", path, err)
 	}
+
 	req.AttachPath = abs
 	req.AttachHash = "sha256:" + hex.EncodeToString(h.Sum(nil))
 	req.AttachSize = info.Size()
 	req.AttachMTime = info.ModTime()
+
 	return nil
 }
 
@@ -809,44 +868,55 @@ func cmdSend(p paths, args []string) error {
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	target := roomFlags(fs, "agent")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
 	}
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess send [--ack [--timeout DUR]] [--thread ID] [--attach PATH] [--file PATH] [--room NAME | --global] <to> [body...]")
 	}
+
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	to := rest[0]
 	if err := rt.checkTarget(to); err != nil {
 		return err
 	}
+
 	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
 	}
+
 	req := rt.apply(Request{Op: "send", As: from, To: to, Body: body, Ack: *ack, Timeout: *timeout, ThreadID: *thread})
 	if *attach != "" {
 		if err := setAttach(&req, *attach); err != nil {
 			return err
 		}
 	}
+
 	resp, err := call(p, req)
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("sent to %s — %s\n", to, bodyEcho(body))
 	warnAmbiguousAnswer(resp)
+
 	if *ack {
 		if !resp.Acked {
 			return fmt.Errorf("not read by %s (ack timeout)", to)
 		}
+
 		fmt.Printf("read by %s\n", to)
 	}
+
 	return nil
 }
 
@@ -861,22 +931,27 @@ func cmdAsk(p paths, args []string) error {
 	file := fs.String("file", "", "read the question from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	target := roomFlags(fs, "agent")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
 	}
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess ask [--timeout DUR] [--async] [--file PATH] [--room NAME | --global] <agent> [question...]")
 	}
+
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	to := rest[0]
 	if err := rt.checkTarget(to); err != nil {
 		return err
 	}
+
 	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
@@ -895,25 +970,32 @@ func cmdAsk(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	token := resp.ID
 	if *async {
 		fmt.Printf("asked %s (token %s) — run `mess await %s` for the reply\n", to, token, token)
 		return nil
 	}
+
 	fmt.Printf("asked %s (token %s) — if this is interrupted, `mess await %s` picks up the reply\n", to, token, token)
+
 	if len(resp.Messages) > 0 {
 		printMessages(resp.Messages, false)
 		return nil
 	}
+
 	resp, err = callWait(p, Request{Op: "await", As: from, ThreadID: token, Wait: true, Timeout: *timeout})
 	if err != nil {
 		return err
 	}
+
 	if len(resp.Messages) == 0 {
 		fmt.Printf("no reply yet (token %s) — run `mess await %s` to keep waiting\n", token, token)
 		return nil
 	}
+
 	printMessages(resp.Messages, false)
+
 	return nil
 }
 
@@ -924,23 +1006,29 @@ func cmdAwait(p paths, args []string) error {
 	peek := fs.Bool("peek", false, "do not consume the reply")
 	asJSON := fs.Bool("json", false, "print the reply as JSON")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess await [--timeout DUR] [--peek] <token>")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := callWait(p, Request{Op: "await", As: name, ThreadID: rest[0], Wait: true, Peek: *peek, Timeout: *timeout})
 	if err != nil {
 		return err
 	}
+
 	if len(resp.Messages) == 0 {
 		fmt.Printf("no reply yet (token %s)\n", rest[0])
 		return nil
 	}
+
 	printMessages(resp.Messages, *asJSON)
+
 	return nil
 }
 
@@ -951,13 +1039,16 @@ func cmdBroadcast(p paths, args []string) error {
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	target := roomFlags(fs, "room's agents")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
 	}
+
 	if *loud && *loudRoom {
 		return fmt.Errorf("--loud and --loud-room are mutually exclusive")
 	}
+
 	if *loud || *loudRoom {
 		// Kept working rather than removed: an agent still passing --loud would
 		// otherwise have it silently become message text (unknown dash-tokens
@@ -965,20 +1056,25 @@ func cmdBroadcast(p paths, args []string) error {
 		// this tool has been burned by before.
 		fmt.Fprintln(os.Stderr, "mess: note: `broadcast --loud`/`--loud-room` is superseded by `mess shout` — note the default differs: shout stays in your room unless you pass --host-wide")
 	}
+
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	body, err := bodyFrom(fs.Args(), *file)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, rt.apply(Request{Op: "broadcast", As: from, Body: body, Loud: *loud || *loudRoom, HostWide: *loud}))
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("delivered to %d agent(s) — %s\n", resp.Count, bodyEcho(body))
 	warnUnreached(resp, "in this room")
+
 	return nil
 }
 
@@ -994,26 +1090,33 @@ func cmdShout(p paths, args []string) error {
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	target := roomFlags(fs, "room's agents")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
 	}
+
 	if *hostWide && (rt.room != "" || rt.global) {
 		return fmt.Errorf("--host-wide already reaches every room; drop --room/--global")
 	}
+
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	body, err := bodyFrom(fs.Args(), *file)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, rt.apply(Request{Op: "broadcast", As: from, Body: body, Loud: true, HostWide: *hostWide}))
 	if err != nil {
 		return err
 	}
+
 	scope := "your room"
+
 	switch {
 	case *hostWide:
 		scope = "every room on the host"
@@ -1022,8 +1125,10 @@ func cmdShout(p paths, args []string) error {
 	case rt.global:
 		scope = "the global room"
 	}
+
 	fmt.Printf("shouted to %d agent(s) in %s, all woken — %s\n", resp.Count, scope, bodyEcho(body))
 	warnUnreached(resp, "in that room")
+
 	return nil
 }
 
@@ -1034,31 +1139,38 @@ func cmdPub(p paths, args []string) error {
 	file := fs.String("file", "", "read the body from this file instead of args/stdin (avoids the calling shell's own backtick/$()/etc. expansion of a quoted arg)")
 	target := roomFlags(fs, "topic")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
 	}
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess pub [--thread ID] [--attach PATH] [--file PATH] [--room NAME | --global] <topic> [body...]")
 	}
+
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	if err := rt.checkTarget(rest[0]); err != nil {
 		return err
 	}
+
 	body, err := bodyFrom(rest[1:], *file)
 	if err != nil {
 		return err
 	}
+
 	req := rt.apply(Request{Op: "pub", As: from, Topic: rest[0], Body: body, ThreadID: *thread})
 	if *attach != "" {
 		if err := setAttach(&req, *attach); err != nil {
 			return err
 		}
 	}
+
 	resp, err := call(p, req)
 	if err != nil {
 		return err
@@ -1073,7 +1185,9 @@ func cmdPub(p paths, args []string) error {
 	} else {
 		fmt.Printf("delivered to %d subscriber(s) — %s\n", resp.Count, bodyEcho(body))
 	}
+
 	warnUnreached(resp, "subscribed to #"+rest[0])
+
 	return nil
 }
 
@@ -1086,33 +1200,41 @@ func cmdInvite(p paths, args []string) error {
 	file := fs.String("file", "", "read the invitation note from this file instead of args/stdin")
 	target := roomFlags(fs, "agent")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
 	}
+
 	rest := fs.Args()
 	if len(rest) < 2 {
 		return fmt.Errorf("usage: mess invite [--room NAME | --global] <agent> <#topic | room> [note...]")
 	}
+
 	to, what := rest[0], rest[1]
 	if err := rt.checkTarget(to); err != nil {
 		return err
 	}
+
 	from, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	note := ""
 	if len(rest) > 2 || *file != "" {
 		if note, err = bodyFrom(rest[2:], *file); err != nil {
 			return err
 		}
 	}
+
 	resp, err := call(p, rt.apply(Request{Op: "invite", As: from, To: to, Invite: what, Body: note}))
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("invited %s to %s — they accept with `mess accept %s`\n", to, what, resp.ID)
+
 	return nil
 }
 
@@ -1122,19 +1244,24 @@ func cmdAccept(p paths, args []string) error {
 	fs, as := newFlags("accept")
 	force := fs.Bool("force", false, "accept a room invitation even though it moves you out of the room you are in now")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess accept <invite-id> [--force]")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "accept", As: name, ThreadID: rest[0], Force: *force})
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("joined %s\n", resp.Invite)
+
 	return nil
 }
 
@@ -1145,23 +1272,29 @@ func cmdAccept(p paths, args []string) error {
 func cmdDecline(p paths, args []string) error {
 	fs, as := newFlags("decline")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess decline <invite-id> [reason...]")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	reason := ""
 	if len(rest) > 1 {
 		reason = strings.Join(rest[1:], " ")
 	}
+
 	resp, err := call(p, Request{Op: "decline", As: name, ThreadID: rest[0], Body: reason})
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("declined %s — %s has been told\n", resp.Invite, resp.Notified)
+
 	return nil
 }
 
@@ -1171,50 +1304,63 @@ func cmdInvites(p paths, args []string) error {
 	fs, as := newFlags("invites")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "invites", As: name})
 	if err != nil {
 		return err
 	}
+
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"received": resp.Received, "sent": resp.Sent})
 	}
+
 	if len(resp.Received) == 0 && len(resp.Sent) == 0 {
 		fmt.Println("no open invitations")
 		return nil
 	}
+
 	if len(resp.Received) > 0 {
 		fmt.Println("invited to:")
+
 		for _, i := range resp.Received {
 			fmt.Printf("  %-8s %-20s from %-14s %s ago — `mess accept %s` / `mess decline %s`\n",
 				i.Token, i.What, i.From, compactDur(time.Since(i.Time)), i.Token, i.Token)
 		}
 	}
+
 	if len(resp.Sent) > 0 {
 		fmt.Println("waiting on:")
+
 		for _, i := range resp.Sent {
 			fmt.Printf("  %-8s %-20s to   %-14s %s ago — not answered yet\n",
 				i.Token, i.What, i.To, compactDur(time.Since(i.Time)))
 		}
 	}
+
 	return nil
 }
 
 func cmdSubUnsub(p paths, op string, args []string) error {
 	fs, as := newFlags(op)
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess %s <topic>", op)
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	_, err = call(p, Request{Op: op, As: name, Topic: rest[0]})
+
 	return err
 }
 
@@ -1227,8 +1373,10 @@ func cmdRoom(p paths, args []string) error {
 		} else {
 			fmt.Println("(global)")
 		}
+
 		return nil
 	}
+
 	switch args[0] {
 	case "join", "leave":
 		return cmdRoomJoinLeave(p, args[0], args[1:])
@@ -1251,15 +1399,18 @@ func cmdRoomJoinLeave(p paths, op string, args []string) error {
 	fs, as := newFlags("room " + op)
 	force := fs.Bool("force", false, "take over a name already held in that room by another live session")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	if op == "join" {
 		rest := fs.Args()
 		if len(rest) != 1 {
 			return fmt.Errorf("usage: mess room join [--force] <room>")
 		}
+
 		newRoom := rest[0]
 		// The caller's PREVIOUS room, so the daemon migrates the existing
 		// identity (inbox/subscriptions/owner) into the new room instead of
@@ -1268,6 +1419,7 @@ func cmdRoomJoinLeave(p paths, op string, args []string) error {
 		if _, err := call(p, Request{Op: "room-join", As: name, Room: newRoom, FromRoom: oldRoom, Force: *force}); err != nil {
 			return err
 		}
+
 		if err := writeRoom(p, newRoom); err != nil {
 			return err
 		}
@@ -1278,7 +1430,9 @@ func cmdRoomJoinLeave(p paths, op string, args []string) error {
 		if err := writeIdentity(p, name); err != nil {
 			return err
 		}
+
 		fmt.Printf("joined room %q as %s\n", newRoom, name)
+
 		return nil
 	}
 	// leave: unregister from the current room, then revert to global.
@@ -1287,13 +1441,17 @@ func cmdRoomJoinLeave(p paths, op string, args []string) error {
 		fmt.Println("already in the global room")
 		return nil
 	}
+
 	if _, err := call(p, Request{Op: "room-leave", As: name, Room: cur}); err != nil {
 		return err
 	}
+
 	if err := clearRoom(p); err != nil {
 		return err
 	}
+
 	fmt.Printf("left room %q; back in the global room\n", cur)
+
 	return nil
 }
 
@@ -1304,6 +1462,7 @@ func splitRoomTopic(s string) (room, topic string, err error) {
 	if i < 0 {
 		return "", "", fmt.Errorf("expected <room>/<topic>, got %q", s)
 	}
+
 	return s[:i], strings.TrimPrefix(s[i+1:], "#"), nil
 }
 
@@ -1320,21 +1479,26 @@ func cmdRoomBridge(p paths, args []string) error {
 	ttl := fs.String("ttl", "", "auto-expire after this long (default: never)")
 	force := fs.Bool("force", false, "override the local-room guard, a duplicate bridge, or the bridge cap")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) != 2 {
 		return fmt.Errorf("usage: mess room bridge [--direction both|out|in] [--local-room NAME] [--ttl DUR] [--force] <local-topic> <room>/<remote-topic>")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	if *direction != "both" && *direction != "out" && *direction != "in" {
 		return fmt.Errorf("--direction must be both, out, or in")
 	}
+
 	remoteRoom, remoteTopic, err := splitRoomTopic(rest[1])
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{
 		Op: "bridge", As: name, Topic: rest[0], RemoteRoom: remoteRoom, RemoteTopic: remoteTopic,
 		Direction: *direction, LocalRoom: *localRoom, Timeout: *ttl, Force: *force,
@@ -1342,10 +1506,12 @@ func cmdRoomBridge(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
+
 	if len(resp.Bridges) == 1 {
 		br := resp.Bridges[0]
 		fmt.Printf("bridge %s: %s <-%s-> %s\n", br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic))
 	}
+
 	return nil
 }
 
@@ -1353,23 +1519,28 @@ func cmdRoomBridge(p paths, args []string) error {
 func cmdRoomUnbridge(p paths, args []string) error {
 	fs, as := newFlags("room unbridge")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) != 1 {
 		return fmt.Errorf("usage: mess room unbridge <id>")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "unbridge", As: name, BridgeID: rest[0]})
 	if err != nil {
 		return err
 	}
+
 	if resp.Count == 0 {
 		fmt.Printf("no such bridge %q\n", rest[0])
 	} else {
 		fmt.Printf("removed bridge %s\n", rest[0])
 	}
+
 	return nil
 }
 
@@ -1378,27 +1549,34 @@ func cmdRoomBridges(p paths, args []string) error {
 	fs := flag.NewFlagSet("room bridges", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "print bridges as JSON")
 	parseAnywhere(fs, args)
+
 	resp, err := call(p, Request{Op: "bridges"})
 	if err != nil {
 		return err
 	}
+
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
+
 		return enc.Encode(resp.Bridges)
 	}
+
 	if len(resp.Bridges) == 0 {
 		fmt.Println("no bridges")
 		return nil
 	}
+
 	for _, br := range resp.Bridges {
 		expiry := "never"
 		if !br.ExpiresAt.IsZero() {
 			expiry = br.ExpiresAt.Format(time.RFC3339)
 		}
+
 		fmt.Printf("%-6s %s <-%s-> %s  creator=%s expires=%s\n",
 			br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
 	}
+
 	return nil
 }
 
@@ -1421,19 +1599,23 @@ func detectRepoRoom(dir string) string {
 	if os.Getenv("MESS_NO_AUTO_ROOM") != "" {
 		return ""
 	}
+
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return ""
 	}
+
 	top := strings.TrimSpace(string(out))
 	if top == "" {
 		return ""
 	}
+
 	cfg, err := readRepoConfig(filepath.Join(top, "mess.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mess: warning: %v (auto-join staying dormant for this repo)\n", err)
 		return ""
 	}
+
 	return cfg.Room
 }
 
@@ -1448,16 +1630,20 @@ type repoConfig struct {
 // ignored the same way as "no config at all".
 func readRepoConfig(path string) (repoConfig, error) {
 	var cfg repoConfig
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, nil
 		}
+
 		return cfg, err
 	}
+
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("mess.json: %w", err)
 	}
+
 	return cfg, nil
 }
 
@@ -1472,6 +1658,7 @@ func cmdRegister(p paths, args []string) error {
 	if rest := fs.Args(); len(rest) > 0 {
 		newName = rest[0]
 	}
+
 	name := newName
 	if name == "" {
 		var err error
@@ -1515,23 +1702,29 @@ func cmdRegister(p paths, args []string) error {
 	if autoRoom != "" {
 		req.Room = autoRoom
 	}
+
 	if _, err := call(p, req); err != nil {
 		return err // includes the collision message + the --force hint
 	}
+
 	if newName != "" {
 		if err := writeIdentity(p, newName); err != nil {
 			return err
 		}
 	}
+
 	if autoRoom != "" {
 		if err := writeRoom(p, autoRoom); err != nil {
 			return err
 		}
+
 		fmt.Printf("registered as %s (auto-joined room %q — detected from this git repo)\n", name, autoRoom)
+
 		return nil
 	}
 
 	fmt.Printf("registered as %s\n", name)
+
 	return nil
 }
 
@@ -1540,10 +1733,12 @@ func cmdRegister(p paths, args []string) error {
 func cmdUnregister(p paths, args []string) error {
 	fs, as := newFlags("unregister")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	if _, err := call(p, Request{Op: "unregister", As: name}); err != nil {
 		return err
 	}
@@ -1554,10 +1749,13 @@ func cmdUnregister(p paths, args []string) error {
 			return err
 		}
 	}
+
 	fmt.Printf("unregistered %s\n", name)
+
 	if env := os.Getenv("MESS_AGENT"); env != "" {
 		fmt.Printf("note: MESS_AGENT=%s is still set; this session will re-register as %q on its next action\n", env, env)
 	}
+
 	return nil
 }
 
@@ -1567,22 +1765,29 @@ func cmdRename(p paths, args []string) error {
 	fs, as := newFlags("rename")
 	force := fs.Bool("force", false, "take over the new name if held by another live session")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess rename [--force] <new-name>")
 	}
+
 	newName := rest[0]
+
 	old, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	if _, err := call(p, Request{Op: "rename", As: old, To: newName, Force: *force}); err != nil {
 		return err // includes the collision message + the --force hint
 	}
+
 	if err := writeIdentity(p, newName); err != nil {
 		return err
 	}
+
 	fmt.Printf("renamed %s -> %s\n", old, newName)
+
 	return nil
 }
 
@@ -1592,26 +1797,34 @@ func cmdCleanup(p paths, args []string) error {
 	fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would be removed without removing")
 	parseAnywhere(fs, args)
+
 	maxAge := ""
+
 	if rest := fs.Args(); len(rest) > 0 {
 		if _, derr := time.ParseDuration(rest[0]); derr != nil {
 			return fmt.Errorf("invalid duration %q", rest[0])
 		}
+
 		maxAge = rest[0]
 	}
+
 	resp, err := call(p, Request{Op: "cleanup", Timeout: maxAge, Peek: *dryRun})
 	if err != nil {
 		return err
 	}
+
 	if len(resp.Removed) == 0 {
 		fmt.Println("nothing to clean up")
 		return nil
 	}
+
 	verb := "removed"
 	if *dryRun {
 		verb = "would remove"
 	}
+
 	fmt.Printf("%s %d agent(s): %s\n", verb, len(resp.Removed), strings.Join(resp.Removed, ", "))
+
 	return nil
 }
 
@@ -1625,26 +1838,34 @@ func cmdExpire(p paths, args []string) error {
 	fs := flag.NewFlagSet("expire", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "list what would be dropped without dropping")
 	parseAnywhere(fs, args)
+
 	maxAge := ""
+
 	if rest := fs.Args(); len(rest) > 0 {
 		if _, derr := time.ParseDuration(rest[0]); derr != nil {
 			return fmt.Errorf("invalid duration %q", rest[0])
 		}
+
 		maxAge = rest[0]
 	}
+
 	resp, err := call(p, Request{Op: "expire", Timeout: maxAge, Peek: *dryRun})
 	if err != nil {
 		return err
 	}
+
 	if resp.Expired == 0 {
 		fmt.Println("nothing to expire")
 		return nil
 	}
+
 	verb := "dropped"
 	if *dryRun {
 		verb = "would drop"
 	}
+
 	fmt.Printf("%s %d unread message(s)\n", verb, resp.Expired)
+
 	return nil
 }
 
@@ -1654,24 +1875,29 @@ func cmdState(p paths, args []string) error {
 	fs, as := newFlags("state")
 	clear := fs.Bool("clear", false, "clear your working state")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	state := ""
 	if !*clear {
 		if state, err = bodyOrEmpty(fs.Args(), ""); err != nil {
 			return err
 		}
 	}
+
 	if _, err := call(p, Request{Op: "state", As: name, Body: state}); err != nil {
 		return err
 	}
+
 	if state == "" {
 		fmt.Println("state cleared")
 	} else {
 		fmt.Printf("state: %s\n", state)
 	}
+
 	return nil
 }
 
@@ -1683,24 +1909,29 @@ func cmdWarn(p paths, args []string) error {
 	ttl := fs.String("ttl", "", "auto-clear after this long (default 15m)")
 	clear := fs.Bool("clear", false, "clear your warning")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	text := ""
 	if !*clear {
 		if text, err = bodyOrEmpty(fs.Args(), ""); err != nil {
 			return err
 		}
 	}
+
 	if _, err := call(p, Request{Op: "warn", As: name, Body: text, Timeout: *ttl}); err != nil {
 		return err
 	}
+
 	if text == "" {
 		fmt.Println("warning cleared")
 	} else {
 		fmt.Printf("⚠ %s\n", text)
 	}
+
 	return nil
 }
 
@@ -1710,15 +1941,19 @@ func cmdBusy(p paths, op string, args []string) error {
 	fs, as := newFlags(op)
 	ttl := fs.String("ttl", "", "busy auto-clears after this long (default 1h backstop)")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	req := Request{Op: op, As: name}
 	if op == "busy" {
 		req.Timeout = *ttl
 	}
+
 	_, err = call(p, req)
+
 	return err
 }
 
@@ -1730,11 +1965,14 @@ func cmdBusy(p paths, op string, args []string) error {
 func cmdSessionEnd(p paths, args []string) error {
 	fs, as := newFlags("session-end")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	_, err = call(p, Request{Op: "session-end", As: name})
+
 	return err
 }
 
@@ -1746,19 +1984,25 @@ func cmdDrain(p paths, args []string) error {
 	asJSON := fs.Bool("json", false, "print messages as JSON lines")
 	room := fs.String("room", "", "room the target agent is in (default: your own room)")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess drain <agent>")
 	}
+
 	target := rest[0]
+
 	resp, err := call(p, Request{Op: "drain", As: target, Room: *room}) // clear target's inbox (no touch, no ack)
 	if err != nil {
 		return err
 	}
+
 	printMessages(resp.Messages, *asJSON)
+
 	if !*asJSON {
 		fmt.Printf("drained %d message(s) from %s\n", resp.Count, target)
 	}
+
 	return nil
 }
 
@@ -1775,12 +2019,14 @@ func parseReplayCount(rest []string) (int, error) {
 	if len(rest) == 0 {
 		return 0, nil
 	}
+
 	n, err := strconv.Atoi(rest[0])
 	if err != nil {
 		return 0, fmt.Errorf("mess replay takes a plain count (e.g. `mess replay 20`), not %q — "+
 			"it only ever shows a bounded recent window, with no query filters; "+
 			"for a time range (e.g. --since 3d) or other filters, use `mess log` instead", rest[0])
 	}
+
 	return n, nil
 }
 
@@ -1791,19 +2037,24 @@ func cmdReplay(p paths, args []string) error {
 	fs, as := newFlags("replay")
 	asJSON := fs.Bool("json", false, "print messages as JSON lines")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	n, err := parseReplayCount(fs.Args())
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "replay", As: name, Max: n})
 	if err != nil {
 		return err
 	}
+
 	printMessages(resp.Messages, *asJSON)
+
 	return nil
 }
 
@@ -1826,6 +2077,7 @@ func cmdReply(p paths, args []string) error {
 	// it reads your own received view of the thread.
 	target := roomFlags(fs, "peer or topic")
 	parseAnywhere(fs, args)
+
 	rt, err := target()
 	if err != nil {
 		return err
@@ -1839,10 +2091,12 @@ func cmdReply(p paths, args []string) error {
 	if rest := fs.Args(); *thread == "" && len(rest) == 1 && looksLikeMessageID(rest[0]) {
 		return fmt.Errorf("%q looks like a message id, not a reply body — use `mess reply --thread %s \"your reply\"` to reply within that thread (or pipe the body in on stdin to send that text literally)", rest[0], rest[0])
 	}
+
 	body, err := bodyFrom(fs.Args(), *file)
 	if err != nil {
 		return err
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
@@ -1853,9 +2107,11 @@ func cmdReply(p paths, args []string) error {
 		if err != nil {
 			return err
 		}
+
 		if err := writeOpenThread(p, openThreadInfo{ThreadID: *thread, Kind: kind, Topic: topic, To: to}); err != nil {
 			return err
 		}
+
 		return sendReply(p, name, kind, topic, to, *thread, body, rt)
 	}
 
@@ -1864,6 +2120,7 @@ func cmdReply(p paths, args []string) error {
 		if amb := ambiguousReplyTarget(open, last, hasLast); amb != "" {
 			return errors.New(amb)
 		}
+
 		return sendReply(p, name, open.Kind, open.Topic, open.To, open.ThreadID, body, rt)
 	}
 
@@ -1871,9 +2128,11 @@ func cmdReply(p paths, args []string) error {
 	if !ok {
 		return fmt.Errorf("nothing to reply to yet — run `mess recv` first, or use `mess send`/`mess pub --thread ID` directly")
 	}
+
 	if err := writeOpenThread(p, openThreadInfo{ThreadID: last.ID, Kind: last.Kind, Topic: last.Topic, To: last.From}); err != nil {
 		return err
 	}
+
 	return sendReply(p, name, last.Kind, last.Topic, last.From, last.ID, body, rt)
 }
 
@@ -1893,6 +2152,7 @@ func resolveThreadRoute(p paths, name, threadID string) (kind, topic, to string,
 	if err != nil {
 		return "", "", "", err
 	}
+
 	return routeFromThreadMessages(name, threadID, resp.Messages)
 }
 
@@ -1904,13 +2164,16 @@ func routeFromThreadMessages(name, threadID string, msgs []Message) (kind, topic
 	if len(msgs) == 0 {
 		return "", "", "", fmt.Errorf("no such thread %q in your received view — check the id, or use `mess send`/`mess pub --thread %s` directly if you sent the root yourself", threadID, threadID)
 	}
+
 	for _, m := range msgs {
 		if m.ID != threadID {
 			continue // prefer the root itself when it's present
 		}
+
 		if m.Kind == KindDirect {
 			return m.Kind, "", m.From, nil
 		}
+
 		return m.Kind, m.Topic, "", nil
 	}
 	// Root itself isn't in our view (e.g. scrolled out of history) — fall
@@ -1920,8 +2183,10 @@ func routeFromThreadMessages(name, threadID string, msgs []Message) (kind, topic
 		if m.From != name {
 			return m.Kind, "", m.From, nil
 		}
+
 		return m.Kind, "", m.To, nil
 	}
+
 	return m.Kind, m.Topic, "", nil
 }
 
@@ -1934,15 +2199,18 @@ func sendReply(p paths, from, kind, topic, to, threadID, body string, rt roomTar
 		if err != nil {
 			return err
 		}
+
 		fmt.Printf("replied in #%s (thread %s) — delivered to %d subscriber(s) — %s\n", topic, threadID, resp.Count, bodyEcho(body))
 	case KindDirect:
 		if _, err := call(p, rt.apply(Request{Op: "send", As: from, To: to, Body: body, ThreadID: threadID})); err != nil {
 			return err
 		}
+
 		fmt.Printf("replied to %s (thread %s) — %s\n", to, threadID, bodyEcho(body))
 	default:
 		return fmt.Errorf("unsupported reply target kind %q", kind)
 	}
+
 	return nil
 }
 
@@ -1953,12 +2221,15 @@ func cmdThread(p paths, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: mess thread close | mess thread list")
 	}
+
 	switch args[0] {
 	case "close":
 		if err := clearOpenThread(p); err != nil {
 			return err
 		}
+
 		fmt.Println("thread closed; next `mess reply` starts a new one")
+
 		return nil
 	case "list":
 		return cmdThreadList(p, args[1:])
@@ -1970,34 +2241,43 @@ func cmdThread(p paths, args []string) error {
 func cmdThreadList(p paths, args []string) error {
 	fs, as := newFlags("thread list")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "thread-list", As: name})
 	if err != nil {
 		return err
 	}
+
 	if len(resp.Threads) == 0 {
 		fmt.Println("no threads seen yet")
 		return nil
 	}
+
 	open, hasOpen := readOpenThread(p)
+
 	for _, th := range resp.Threads {
 		where := "#" + th.Topic
 		if th.Kind == KindDirect {
 			where = th.Peer
 		}
+
 		marker := ""
 		if hasOpen && open.ThreadID == th.ID {
 			marker = " (open)"
 		}
+
 		fmt.Printf("%s  %-12s %d repl(y/ies), %d participant(s), last %s%s\n",
 			th.ID, where, th.Replies, th.Participants, th.LastActivity.Format("15:04:05"), marker)
+
 		if th.RootBody != "" {
 			fmt.Printf("    %s\n", truncate(th.RootBody, 100))
 		}
 	}
+
 	return nil
 }
 
@@ -2010,36 +2290,45 @@ func cmdExport(p paths, args []string) error {
 	out := fs.String("out", "", "write to this file instead of stdout")
 	max := fs.Int("max", 0, "limit to the most recent N messages (0 = all)")
 	parseAnywhere(fs, args)
+
 	targets := 0
+
 	for _, v := range []string{*topic, *thread, *to} {
 		if v != "" {
 			targets++
 		}
 	}
+
 	if targets != 1 {
 		return fmt.Errorf("usage: mess export --topic NAME | --thread ID | --to AGENT [--format text|json] [--out FILE] [--max N]")
 	}
+
 	if *format != "text" && *format != "json" {
 		return fmt.Errorf("--format must be text or json")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "export", As: name, Topic: *topic, ThreadID: *thread, To: *to, Max: *max})
 	if err != nil {
 		return err
 	}
 
 	var w io.Writer = os.Stdout
+
 	if *out != "" {
 		f, err := os.Create(*out)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
+
 		w = f
 	}
+
 	if *format == "json" {
 		enc := json.NewEncoder(w)
 		for _, m := range resp.Messages {
@@ -2047,14 +2336,18 @@ func cmdExport(p paths, args []string) error {
 				return err
 			}
 		}
+
 		return nil
 	}
+
 	for _, m := range resp.Messages {
 		fmt.Fprintln(w, formatMessageLine(m.Time.Format("2006-01-02 15:04:05"), m))
 	}
+
 	if *out != "" {
 		fmt.Printf("exported %d message(s) to %s\n", len(resp.Messages), *out)
 	}
+
 	return nil
 }
 
@@ -2077,27 +2370,33 @@ func cmdLog(p paths, args []string) error {
 	if err := parseStrict(fs, args); err != nil {
 		return err
 	}
+
 	if *format != "text" && *format != "json" {
 		return fmt.Errorf("--format must be text or json")
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "log", As: name, From: *from, To: *to, Topic: *topic, Grep: *grep, Since: *since, All: *all, Max: *max})
 	if err != nil {
 		return err
 	}
 
 	var w io.Writer = os.Stdout
+
 	if *out != "" {
 		f, err := os.Create(*out)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
+
 		w = f
 	}
+
 	if *format == "json" {
 		enc := json.NewEncoder(w)
 		for _, m := range resp.Messages {
@@ -2105,14 +2404,18 @@ func cmdLog(p paths, args []string) error {
 				return err
 			}
 		}
+
 		return nil
 	}
+
 	for _, m := range resp.Messages {
 		fmt.Fprintln(w, formatMessageLine(m.Time.Format("2006-01-02 15:04:05"), m))
 	}
+
 	if *out != "" {
 		fmt.Printf("logged %d message(s) to %s\n", len(resp.Messages), *out)
 	}
+
 	return nil
 }
 
@@ -2121,19 +2424,23 @@ func cmdRm(p paths, args []string) error {
 	fs, _ := newFlags("rm")
 	room := fs.String("room", "", "room the target agent is in (default: your own room)")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) < 1 {
 		return fmt.Errorf("usage: mess rm <agent>")
 	}
+
 	resp, err := call(p, Request{Op: "rm", To: rest[0], Room: *room})
 	if err != nil {
 		return err
 	}
+
 	if resp.Count == 0 {
 		fmt.Printf("no such agent %q\n", rest[0])
 	} else {
 		fmt.Printf("removed %s\n", rest[0])
 	}
+
 	return nil
 }
 
@@ -2143,6 +2450,7 @@ func cmdWhoami(p paths) error {
 	if name, _ := agentName(p, ""); name != "" {
 		fmt.Println(name)
 	}
+
 	return nil
 }
 
@@ -2158,14 +2466,18 @@ func cmdSessionPID(args []string) error {
 	// being the one command that never went through parseAnywhere.
 	fs := flag.NewFlagSet("session-pid", flag.ExitOnError)
 	parseAnywhere(fs, args)
+
 	if rest := fs.Args(); len(rest) > 0 {
 		return fmt.Errorf("session-pid takes no arguments and reports YOUR OWN session's pid — %q was ignored, which answered a different question than the one asked. To attribute someone else's process, use `mess whois <pid>`", strings.Join(rest, " "))
 	}
+
 	pid := hostSessionPID()
 	if pid == 0 {
 		os.Exit(1)
 	}
+
 	fmt.Println(pid)
+
 	return nil
 }
 
@@ -2174,28 +2486,35 @@ func cmdWhoIs(p paths, args []string) error {
 	fs := flag.NewFlagSet("whois", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	parseAnywhere(fs, args)
+
 	rest := fs.Args()
 	if len(rest) != 1 {
 		return fmt.Errorf("usage: mess whois <pid>  — names the agent whose session owns that process")
 	}
+
 	pid, err := strconv.Atoi(rest[0])
 	if err != nil || pid <= 0 {
 		return fmt.Errorf("%q is not a pid", rest[0])
 	}
+
 	resp, err := call(p, Request{Op: "whois", SessionPID: pid})
 	if err != nil {
 		return err
 	}
+
 	if *asJSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"pid": pid, "sessionPid": resp.SessionPID, "agents": resp.Agents})
 	}
+
 	for _, a := range resp.Agents {
 		state := "session has since exited — a pid can be reused, so treat this as historical"
 		if a.Online {
 			state = "still that session"
 		}
+
 		fmt.Printf("%s (session pid %d, %s)\n", displayName(a.Room, a.Name), resp.SessionPID, state)
 	}
+
 	return nil
 }
 
@@ -2208,20 +2527,25 @@ func cmdIsListening(p paths, args []string) error {
 	if err := parseStrict(fs, args); err != nil {
 		return err
 	}
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "ps"})
 	if err != nil {
 		return err
 	}
+
 	for _, a := range resp.Agents {
 		if a.Name == name && a.Listening {
 			return nil // exit 0: listening
 		}
 	}
+
 	os.Exit(1) // not listening (silent, no error message)
+
 	return nil
 }
 
@@ -2238,10 +2562,12 @@ func cmdRecv(p paths, args []string) error {
 	thread := fs.String("thread", "", "show only this thread's messages (root + replies), not combined with --wait")
 	ifIdle := fs.Bool("if-idle", false, "drain only if not currently busy, checked atomically with the drain (not combined with --wait/--follow) — for a caller that must not steal mail out from under a turn that just started")
 	parseAnywhere(fs, args)
+
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
 	}
+
 	kinds, err := resolveKinds(*kind, *noBroadcast)
 	if err != nil {
 		return err
@@ -2249,6 +2575,7 @@ func cmdRecv(p paths, args []string) error {
 	// A trailing duration is the wait/idle timeout (e.g. "mess recv 30s",
 	// "mess listen 5m"). For a one-shot recv it also implies --wait.
 	timeout := ""
+
 	if rest := fs.Args(); len(rest) > 0 {
 		if d, derr := time.ParseDuration(rest[0]); derr == nil {
 			timeout = d.String()
@@ -2257,6 +2584,7 @@ func cmdRecv(p paths, args []string) error {
 			return fmt.Errorf("invalid duration %q", rest[0])
 		}
 	}
+
 	if *ifIdle && (*wait || *follow) {
 		return fmt.Errorf("--if-idle can't be combined with --wait/--follow")
 	}
@@ -2279,22 +2607,28 @@ func cmdRecv(p paths, args []string) error {
 	if *wait {
 		dispatch = callWait
 	}
+
 	resp, err := dispatch(p, req)
 	if err != nil {
 		return err
 	}
+
 	if resp.Busy {
 		if *asJSON {
 			fmt.Println(`{"busy":true}`)
 		} else {
 			fmt.Println("busy — not drained")
 		}
+
 		return nil
 	}
+
 	if *thread == "" { // a --thread query is browsing history, not "new mail"
 		updateLastMsg(p, resp.Messages)
 	}
+
 	printMessages(resp.Messages, *asJSON)
+
 	if *wait && len(resp.Messages) == 0 {
 		// Classify an empty blocking wait by exit code so a shell caller (the
 		// auto-wake hook) can act on it without parsing output. Only reached
@@ -2309,6 +2643,7 @@ func cmdRecv(p paths, args []string) error {
 			os.Exit(exitEvicted)
 		}
 	}
+
 	return nil
 }
 
@@ -2335,6 +2670,7 @@ func updateLastMsg(p paths, msgs []Message) {
 		if m.ThreadID != "" {
 			root = m.ThreadID
 		}
+
 		switch m.Kind {
 		case KindTopic:
 			writeLastMsg(p, lastMsgInfo{ID: root, Kind: m.Kind, Topic: m.Topic, From: m.From})
@@ -2351,6 +2687,7 @@ func updateLastMsg(p paths, msgs []Message) {
 func resolveKinds(kind string, noBroadcast bool) ([]string, error) {
 	all := []string{KindDirect, KindBroadcast, KindTopic}
 	set := map[string]bool{}
+
 	if kind == "" {
 		for _, k := range all {
 			set[k] = true
@@ -2361,24 +2698,31 @@ func resolveKinds(kind string, noBroadcast bool) ([]string, error) {
 			if k == "" {
 				continue
 			}
+
 			if k != KindDirect && k != KindBroadcast && k != KindTopic {
 				return nil, fmt.Errorf("unknown kind %q (want direct, broadcast, or topic)", k)
 			}
+
 			set[k] = true
 		}
 	}
+
 	if noBroadcast {
 		delete(set, KindBroadcast)
 	}
+
 	if len(set) == len(all) { // all kinds allowed: no filter
 		return nil, nil
 	}
+
 	var out []string
+
 	for _, k := range all {
 		if set[k] {
 			out = append(out, k)
 		}
 	}
+
 	return out, nil
 }
 
@@ -2390,6 +2734,7 @@ func warnIfAlreadyListening(p paths, name string) {
 	if err != nil {
 		return
 	}
+
 	for _, a := range resp.Agents {
 		if a.Name == name && a.Listening {
 			fmt.Fprintf(os.Stderr, "mess: warning: %q already has an active listener; a second one makes each message wake only one of them. Prefer a single receiver (the auto-wake Stop hook).\n", name)
@@ -2405,6 +2750,7 @@ func followRecv(p paths, name, timeout string, max int, asJSON bool, kinds []str
 	return callStream(p, Request{Op: "listen", As: name, Timeout: timeout, Max: max, Kinds: kinds, Batch: batch}, func(resp Response) error {
 		updateLastMsg(p, resp.Messages)
 		printMessages(resp.Messages, asJSON)
+
 		return nil
 	})
 }
@@ -2426,23 +2772,28 @@ func cmdPs(p paths, args []string) error {
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	room := fs.String("room", "", "show this room instead of your own")
 	all := fs.Bool("all", false, "show every room")
+
 	noCC := fs.Bool("no-cc", false, "omit Claude Code session info")
 	if err := parseStrict(fs, args); err != nil {
 		return err
 	}
+
 	resp, err := call(p, Request{Op: "ps", Room: *room, All: *all})
 	if err != nil {
 		return err
 	}
+
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
+
 		return enc.Encode(resp)
 	}
 	// displayAgent/displayTopic render "name" scoped to one room (the common
 	// case: identical to pre-rooms mess) or "room/name" when --all mixes rooms.
 	displayAgent := func(a AgentInfo) string { return a.Name }
 	displayTopic := func(t TopicInfo) string { return t.Name }
+
 	if *all {
 		displayAgent = func(a AgentInfo) string { return displayName(a.Room, a.Name) }
 		displayTopic = func(t TopicInfo) string { return displayName(t.Room, t.Name) }
@@ -2450,23 +2801,28 @@ func cmdPs(p paths, args []string) error {
 	// Join against Claude Code's own session registry so one machine reads as one
 	// roster. Empty when it isn't installed or --no-cc is set, in which case
 	// every annotation below simply doesn't render.
-	var cc map[int]ccSession
-	var ccAll []ccSession
+	var (
+		cc    map[int]ccSession
+		ccAll []ccSession
+	)
 	if !*noCC {
 		ccAll = ccSessions()
 		cc = ccByPID(ccAll)
 	}
+
 	claimed := make(map[int]bool, len(cc))
 
 	if len(resp.Agents) == 0 {
 		fmt.Println("no agents")
 	} else {
 		fmt.Println("agents:")
+
 		for _, a := range resp.Agents {
 			// "working" = actively in a turn (busy, set by lifecycle hooks);
 			// "listening" = idle but parked on recv --wait, reachable now;
 			// "idle" = neither (between turns / not parked).
 			status := "idle"
+
 			switch {
 			case a.Working:
 				status = "working"
@@ -2479,10 +2835,12 @@ func cmdPs(p paths, args []string) error {
 			if a.Online {
 				presence = "online"
 			}
+
 			line := fmt.Sprintf("  %-16s %-7s %-9s %d pending", displayAgent(a), presence, status, a.Pending)
 			if a.Pending > 0 && !a.Oldest.IsZero() {
 				line += fmt.Sprintf(" (oldest %s)", compactDur(time.Since(a.Oldest)))
 			}
+
 			if len(a.Topics) > 0 {
 				line += "  [" + strings.Join(a.Topics, ", ") + "]"
 			}
@@ -2494,67 +2852,86 @@ func cmdPs(p paths, args []string) error {
 				claimed[a.SessionPID] = true
 				line += ccAnnotation(a.Name, s)
 			}
+
 			if a.State != "" {
 				line += "  — " + a.State
 			}
+
 			if a.Warning != "" {
 				line += "  ⚠ " + a.Warning
 			}
+
 			fmt.Println(line)
 		}
 	}
+
 	printOrphanCC := func() {
 		// Claude Code sessions with no mess identity: reachable by SendMessage
 		// but invisible to every mess command, which is precisely the gap worth
 		// showing.
 		var orphans []ccSession
+
 		for _, s := range ccAll {
 			if !claimed[s.PID] {
 				orphans = append(orphans, s)
 			}
 		}
+
 		if len(orphans) == 0 {
 			return
 		}
+
 		width := 0
 		for _, s := range orphans {
 			width = max(width, len(s.Name))
 		}
+
 		fmt.Println("claude code sessions (no mess identity):")
+
 		for _, s := range orphans {
 			reach := "unreachable"
 			if s.Addressable() {
 				reach = "addressable"
 			}
+
 			line := fmt.Sprintf("  %-*s %-11s %-6s pid %d", width, s.Name, reach, s.Status, s.PID)
 			if s.CWD != "" {
 				line += "  " + compactHome(s.CWD)
 			}
+
 			fmt.Println(line)
 		}
 	}
+
 	if len(resp.Topics) > 0 {
 		fmt.Println("topics:")
+
 		for _, t := range resp.Topics {
 			line := fmt.Sprintf("  #%-15s %s", displayTopic(t), strings.Join(t.Subscribers, ", "))
 			if len(t.Bridged) > 0 {
 				line += "  <-> " + strings.Join(t.Bridged, ", ")
 			}
+
 			fmt.Println(line)
 		}
 	}
+
 	if len(resp.Bridges) > 0 {
 		fmt.Println("bridges:")
+
 		for _, br := range resp.Bridges {
 			expiry := "never"
 			if !br.ExpiresAt.IsZero() {
 				expiry = br.ExpiresAt.Format(time.RFC3339)
 			}
+
 			fmt.Printf("  %-6s %s <-%s-> %s  creator=%s expires=%s\n",
 				br.ID, displayName(br.ARoom, "#"+br.ATopic), br.Direction, displayName(br.BRoom, "#"+br.BTopic), br.Creator, expiry)
 		}
 	}
+
 	printOrphanCC()
+
 	return nil
 }
 
@@ -2562,7 +2939,9 @@ func cmdPing(p paths) error {
 	if _, err := call(p, Request{Op: "ping"}); err != nil {
 		return err
 	}
+
 	fmt.Println("ok")
+
 	return nil
 }
 
@@ -2570,7 +2949,9 @@ func cmdStop(p paths) error {
 	if _, err := call(p, Request{Op: "stop"}); err != nil {
 		return err
 	}
+
 	fmt.Println("stopped")
+
 	return nil
 }
 
@@ -2588,6 +2969,7 @@ func cmdStop(p paths) error {
 // place the recipient can learn that before answering the "normal" way.
 func formatMessageLine(ts string, m Message) string {
 	var line string
+
 	switch m.Kind {
 	case KindTopic:
 		line = fmt.Sprintf("%s %s #%s: %s", ts, m.From, m.Topic, m.Body)
@@ -2596,19 +2978,24 @@ func formatMessageLine(ts string, m Message) string {
 	default:
 		line = fmt.Sprintf("%s %s: %s", ts, m.From, m.Body)
 	}
+
 	if m.AttachPath != "" {
 		hash := m.AttachHash
 		if i := strings.IndexByte(hash, ':'); i >= 0 && len(hash) > i+13 {
 			hash = hash[:i+13] // "sha256:" + 12 hex chars
 		}
+
 		line += fmt.Sprintf(" [attached: %s (%s, %s)]", m.AttachPath, hash, humanBytes(m.AttachSize))
 	}
+
 	if m.Ask {
 		line = fmt.Sprintf("[question %s — answer with `mess reply`, or @mention the asker] %s", m.ID, line)
 	}
+
 	if m.Invite != "" {
 		line = fmt.Sprintf("[invite %s — join %s with `mess accept %s`] %s", m.ID, m.Invite, m.ID, line)
 	}
+
 	return line
 }
 
@@ -2618,11 +3005,13 @@ func humanBytes(n int64) string {
 	if n < unit {
 		return fmt.Sprintf("%dB", n)
 	}
+
 	div, exp := int64(unit), 0
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
+
 	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
@@ -2632,8 +3021,10 @@ func printMessages(msgs []Message, asJSON bool) {
 		for _, m := range msgs {
 			_ = enc.Encode(m)
 		}
+
 		return
 	}
+
 	for _, m := range msgs {
 		line := formatMessageLine(m.Time.Format("15:04:05"), m)
 		// Only tag actual thread replies with their id — a plain message
@@ -2642,6 +3033,7 @@ func printMessages(msgs []Message, asJSON bool) {
 		if m.ThreadID != "" {
 			line = fmt.Sprintf("[thread %s] %s", m.ThreadID, line)
 		}
+
 		fmt.Println(line)
 	}
 }
@@ -2652,10 +3044,12 @@ func looksLikeMessageID(s string) bool {
 	if len(s) < 2 || s[0] != 'm' {
 		return false
 	}
+
 	for _, r := range s[1:] {
 		if r < '0' || r > '9' {
 			return false
 		}
 	}
+
 	return true
 }

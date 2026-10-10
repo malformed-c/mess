@@ -20,9 +20,11 @@ func withSession(req Request) Request {
 	if req.Session == "" {
 		req.Session = sessionID()
 	}
+
 	if req.SessionPID == 0 {
 		req.SessionPID = hostSessionPID()
 	}
+
 	return req
 }
 
@@ -43,9 +45,11 @@ func withRoom(p paths, req Request) Request {
 		self := resolveRoom(p, "")
 		req.SelfRoom = &self
 	}
+
 	if req.Room == "" && !req.Global {
 		req.Room = resolveRoom(p, "")
 	}
+
 	return req
 }
 
@@ -53,21 +57,26 @@ func withRoom(p paths, req Request) Request {
 func call(p paths, req Request) (Response, error) {
 	req = withSession(req)
 	req = withRoom(p, req)
+
 	conn, err := dialOrStart(p)
 	if err != nil {
 		return Response{}, err
 	}
 	defer conn.Close()
+
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return Response{}, err
 	}
+
 	var resp Response
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return Response{}, err
 	}
+
 	if !resp.OK && resp.Error != "" {
 		return resp, daemonError(resp.Error)
 	}
+
 	return resp, nil
 }
 
@@ -77,6 +86,7 @@ func daemonError(msg string) error {
 	if strings.Contains(msg, "unknown op") {
 		return fmt.Errorf("%s — the running mess daemon is older than this CLI; run `mess stop` and retry (it auto-restarts on the current binary)", msg)
 	}
+
 	return fmt.Errorf("%s", msg)
 }
 
@@ -90,43 +100,59 @@ func callWait(p paths, req Request) (Response, error) {
 	req = withSession(req)
 	req = withRoom(p, req)
 	first := true
+
 	for {
-		var conn net.Conn
-		var err error
+		var (
+			conn net.Conn
+			err  error
+		)
 		if first {
 			conn, err = dialOrStart(p) // initial attempt may start the daemon
 			first = false
 		} else {
 			conn, err = net.Dial("unix", p.sock) // reconnect: don't resurrect a stopped daemon
 		}
+
 		if err != nil {
 			if waitForDaemon(p) {
 				continue
 			}
+
 			return Response{}, err
 		}
+
 		encErr := json.NewEncoder(conn).Encode(req)
-		var resp Response
-		var decErr error
+
+		var (
+			resp   Response
+			decErr error
+		)
 		if encErr == nil {
 			decErr = json.NewDecoder(conn).Decode(&resp)
 		}
+
 		conn.Close()
+
 		if encErr != nil || decErr != nil { // connection dropped mid-wait (daemon bounced)
 			if waitForDaemon(p) {
 				continue
 			}
+
 			return Response{}, fmt.Errorf("lost connection to daemon")
 		}
+
 		if resp.Error == "daemon shutting down" { // restart in progress
 			if waitForDaemon(p) {
 				continue
 			}
+
 			return Response{}, fmt.Errorf("daemon stopped")
 		}
+
 		if !resp.OK && resp.Error != "" {
 			return resp, daemonError(resp.Error)
 		}
+
 		return resp, nil
 	}
 }
@@ -140,8 +166,10 @@ func waitForDaemon(p paths) bool {
 			c.Close()
 			return true
 		}
+
 		time.Sleep(150 * time.Millisecond)
 	}
+
 	return false
 }
 
@@ -150,26 +178,33 @@ func waitForDaemon(p paths) bool {
 func callStream(p paths, req Request, onResp func(Response) error) error {
 	req = withSession(req)
 	req = withRoom(p, req)
+
 	conn, err := dialOrStart(p)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return err
 	}
+
 	dec := json.NewDecoder(conn)
+
 	for {
 		var resp Response
 		if err := dec.Decode(&resp); err != nil {
 			if err == io.EOF {
 				return nil
 			}
+
 			return err
 		}
+
 		if !resp.OK && resp.Error != "" {
 			return daemonError(resp.Error)
 		}
+
 		if err := onResp(resp); err != nil {
 			return err
 		}
@@ -181,6 +216,7 @@ func dialOrStart(p paths) (net.Conn, error) {
 	if conn, err := net.Dial("unix", p.sock); err == nil {
 		return conn, nil
 	}
+
 	if err := startDaemon(p); err != nil {
 		return nil, err
 	}
@@ -190,8 +226,10 @@ func dialOrStart(p paths) (net.Conn, error) {
 		if conn, err := net.Dial("unix", p.sock); err == nil {
 			return conn, nil
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
+
 	return nil, fmt.Errorf("daemon did not start (see %s)", p.log)
 }
 
@@ -200,10 +238,12 @@ func startDaemon(p paths) error {
 	if err := os.MkdirAll(p.dir, 0o700); err != nil {
 		return err
 	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
+
 	logf, err := os.OpenFile(p.log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -214,9 +254,11 @@ func startDaemon(p paths) error {
 	cmd.Env = os.Environ()
 	cmd.Stdout = logf
 	cmd.Stderr = logf
+
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from this process group
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+
 	return cmd.Process.Release()
 }

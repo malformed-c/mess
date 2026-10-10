@@ -45,29 +45,36 @@ func openJournal(path string) (*journalWriter, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
+
 	return &journalWriter{path: path, f: f, w: bufio.NewWriter(f), size: info.Size()}, nil
 }
 
 func (j *journalWriter) append(line journalLine) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+
 	data, err := json.Marshal(line)
 	if err != nil {
 		return err
 	}
+
 	data = append(data, '\n')
+
 	n, err := j.w.Write(data)
 	if err != nil {
 		return err
 	}
+
 	if err := j.w.Flush(); err != nil {
 		return err
 	}
+
 	j.size += int64(n)
 	if j.size >= journalRotateSize {
 		if err := j.rotateLocked(); err != nil {
@@ -76,6 +83,7 @@ func (j *journalWriter) append(line journalLine) error {
 			dlog("journal rotate failed: %v", err)
 		}
 	}
+
 	return nil
 }
 
@@ -86,33 +94,42 @@ func (j *journalWriter) rotateLocked() error {
 	if err := j.w.Flush(); err != nil {
 		return err
 	}
+
 	if err := j.f.Close(); err != nil {
 		return err
 	}
+
 	os.Remove(fmt.Sprintf("%s.%d", j.path, journalMaxGenerations))
+
 	for i := journalMaxGenerations - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", j.path, i)
 		if _, err := os.Stat(src); err == nil {
 			_ = os.Rename(src, fmt.Sprintf("%s.%d", j.path, i+1)) // old generations are best-effort; the current file's rename below is checked
 		}
 	}
+
 	if err := os.Rename(j.path, j.path+".1"); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+
 	f, err := os.OpenFile(j.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
+
 	j.f, j.w, j.size = f, bufio.NewWriter(f), 0
+
 	return nil
 }
 
 func (j *journalWriter) close() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+
 	if err := j.w.Flush(); err != nil {
 		return err
 	}
+
 	return j.f.Close()
 }
 
