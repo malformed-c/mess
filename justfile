@@ -11,10 +11,31 @@ default:
 build:
   go build -o mess .
 
+# In-place binary update: safe to run while the daemon is live. cp/truncate on
+# a running executable fails with ETXTBSY, but RENAMING it aside is always
+# legal — the running process keeps its inode, only the directory entry moves
+# — so the old binary becomes mess.prev and the new one takes the name. New
+# clients (strict parsing, log --to) are live the moment this returns; a
+# running daemon still executes the previous binary until its next restart.
 install: build
-  # The running daemon exec-holds ~/.local/bin/mess ("Text file busy" until it
-  # stops), so the daemon restart is part of every install.
-  go install . && cp "$(go env GOPATH)/bin/mess" ~/.local/bin/mess
+  #!/usr/bin/env bash
+  set -euo pipefail
+  go install .
+  new="$(go env GOPATH)/bin/mess"
+  tgt="$HOME/.local/bin/mess"
+  mkdir -p "$(dirname "$tgt")"
+  if [ -e "$tgt" ]; then
+      mv -f "$tgt" "$tgt.prev"
+  fi
+  if ! install -m 0755 "$new" "$tgt"; then
+      # Roll the old binary back into place rather than leave no `mess` at all.
+      [ ! -e "$tgt.prev" ] || mv -f "$tgt.prev" "$tgt"
+      exit 1
+  fi
+  echo "installed $tgt (previous binary at $tgt.prev)"
+  pgrep -f "$tgt daemon" >/dev/null 2>&1 \
+      && echo "note: the running daemon still executes the previous binary — restart it to load this one" \
+      || true
 
 fmt:
   test -z "$(gofmt -l .)"
