@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -341,7 +340,7 @@ func (d *daemon) handleListen(conn net.Conn, req Request) {
 
 	// Detect client disconnect by watching for EOF on the connection.
 	gone := make(chan struct{})
-	go func() { io.Copy(io.Discard, conn); close(gone) }()
+	go func() { _, _ = io.Copy(io.Discard, conn); close(gone) }() // copy error IS the EOF signal; best-effort
 
 	enc := json.NewEncoder(conn)
 	var timer *time.Timer
@@ -438,8 +437,8 @@ func parseBridgeDirection(s string) bridgeDirection {
 // the sigil is what keeps "invite bob builds" from being a coin-flip between a
 // topic and a room. A bare name is a room.
 func parseInviteTarget(target, callerRoom string) (topic, room string) {
-	if strings.HasPrefix(target, "#") {
-		return strings.TrimPrefix(target, "#"), callerRoom
+	if rest, found := strings.CutPrefix(target, "#"); found {
+		return rest, callerRoom
 	}
 	return "", target
 }
@@ -713,7 +712,7 @@ func (d *daemon) dispatch(req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		msgs, err := searchJournal(d.paths.journal, journalFilter{
-			Room: req.Room, All: req.All, From: req.From, Topic: req.Topic,
+			Room: req.Room, All: req.All, From: req.From, To: req.To, Topic: req.Topic,
 			Grep: req.Grep, Since: since, Max: req.Max, Now: d.broker.now(),
 		})
 		if err != nil {
@@ -966,7 +965,7 @@ func (d *daemon) parkAndDrain(conn net.Conn, who, timeoutStr, batchStr, waitLabe
 	// Watch for client disconnect, so a parked waiter whose client dies releases
 	// its listener count instead of leaking it (and showing a false "listening").
 	gone := make(chan struct{})
-	go func() { io.Copy(io.Discard, conn); close(gone) }()
+	go func() { _, _ = io.Copy(io.Discard, conn); close(gone) }() // copy error IS the EOF signal; best-effort
 
 	// finish drains everything and returns. With --batch it first waits a short
 	// window so a burst of messages coalesces into a single wake instead of one
@@ -1209,5 +1208,3 @@ func kindsLabel(kinds []string) string {
 	}
 	return strings.Join(kinds, ",")
 }
-
-var errNoDaemon = errors.New("no daemon running")

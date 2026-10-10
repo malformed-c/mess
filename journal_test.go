@@ -46,6 +46,7 @@ func TestSearchJournalFilters(t *testing.T) {
 		{Message: Message{ID: "m2", From: "bob", Topic: "eng", Kind: KindTopic, Body: "the license question", Time: now}, Room: "A", Event: "sent"},
 		{Message: Message{ID: "m3", From: "alice", Topic: "ops", Kind: KindTopic, Body: "unrelated", Time: old}, Room: "A", Event: "sent"},
 		{Message: Message{ID: "m4", From: "carol", Topic: "eng", Kind: KindTopic, Body: "in room B", Time: now}, Room: "B", Event: "sent"},
+		{Message: Message{ID: "m5", From: "alice", To: "bob", Kind: KindDirect, Body: "just for bob", Time: now}, Room: "A", Event: "sent"},
 	}
 	for _, l := range lines {
 		if err := jw.append(l); err != nil {
@@ -61,8 +62,8 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected 3 messages in room A, got %d: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 messages in room A, got %d: %+v", len(got), got)
 	}
 
 	// --all crosses rooms.
@@ -70,8 +71,8 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("expected all 4 messages with --all, got %d", len(got))
+	if len(got) != 5 {
+		t.Fatalf("expected all 5 messages with --all, got %d", len(got))
 	}
 
 	// --from (case-insensitive).
@@ -79,8 +80,19 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected alice's 2 messages, got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("expected alice's 3 messages, got %d: %+v", len(got), got)
+	}
+
+	// --to (case-insensitive); topic messages have no recipient, so they are
+	// excluded. This is the filter whose absence once made a room-wide query
+	// look recipient-filtered — see TestParseStrictRejectsUnknownFlag.
+	got, err = searchJournal(path, journalFilter{Room: "A", To: "BOB", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "m5" {
+		t.Fatalf("expected only bob's direct message, got %+v", got)
 	}
 
 	// --grep.
@@ -106,8 +118,8 @@ func TestSearchJournalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 recent messages (excluding the 48h-old one), got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 recent messages (excluding the 48h-old one), got %d: %+v", len(got), got)
 	}
 
 	// Invalid --grep pattern is a clear error, not a silent empty result.

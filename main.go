@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -148,7 +149,7 @@ Receiving and threads:
   mess export --topic NAME | --thread ID | --to AGENT
                                   dump a conversation's full history
                                   (--format text|json, --out FILE, --max N)
-  mess log [--from AGENT] [--grep PATTERN] [--since DUR] [--topic NAME] [--all]
+  mess log [--from AGENT] [--to AGENT] [--grep PATTERN] [--since DUR] [--topic NAME] [--all]
                                   search the durable, unbounded journal (unlike
                                   recv/replay/export, which only see a bounded
                                   recent window); same --format/--out/--max
@@ -571,7 +572,29 @@ func roomFlags(fs *flag.FlagSet, what string) func() (roomTarget, error) {
 // --as alice" would otherwise swallow "--as alice" into the body. Only flags the
 // command actually defines are hoisted; unknown dash-tokens (real message text
 // like "-1") are left untouched in the positionals.
-func parseAnywhere(fs *flag.FlagSet, args []string) error {
+// parseAnywhere parses args the lenient way: unknown dash-tokens stay in the
+// positionals (where a body-shaped command treats them as message text). It
+// has no error return because every FlagSet here is ExitOnError — fs.Parse
+// prints and exits rather than returning — so the only failure parseFlags can
+// surface is parseStrict's unknown-flag check.
+func parseAnywhere(fs *flag.FlagSet, args []string) {
+	_ = parseFlags(fs, args, false)
+}
+
+// parseStrict is parseAnywhere for commands that take no message body: an
+// unrecognized dash-token can only be a mistake, and demoting it to a
+// positional silently manufactures invalid instruments — a query that runs
+// with the flag missing from its filter yet exits 0, showing results the
+// caller reads as filtered. A real incident: `mess log --to apsis-sdk-glm`
+// (log had no --to) ran ROOM-WIDE wearing a filtered look, and the phantom
+// results turned a pair of sender-side content mix-ups into a days-long
+// "inbox crossing" investigation. Body-shaped commands (send/ask/reply/…)
+// keep parseAnywhere's demotion — there, a dash-token really can be text.
+func parseStrict(fs *flag.FlagSet, args []string) error {
+	return parseFlags(fs, args, true)
+}
+
+func parseFlags(fs *flag.FlagSet, args []string, strict bool) error {
 	// -h/--help used to be handled ONLY at top level (`mess --help`). Per
 	// subcommand it fell through to the rule below — unrecognized dash-tokens
 	// stay in the positionals — so bodyFrom turned it into message text and
@@ -592,9 +615,20 @@ func parseAnywhere(fs *flag.FlagSet, args []string) error {
 			valueFlags[f.Name] = true
 		}
 	})
-	hoisted, pos := hoistFlags(args, valueFlags, boolFlags)
-	warnUnknownLongFlag(pos, valueFlags, boolFlags)
-	return fs.Parse(hoisted)
+	hoisted, scanned := hoistFlags(args, valueFlags, boolFlags)
+	if strict {
+		for _, a := range scanned {
+			if name, ok := flagToken(a); ok && !valueFlags[name] && !boolFlags[name] {
+				return fmt.Errorf("unknown flag %s for %q — this command takes no message body, so it is not treated as text; see -h", a, fs.Name())
+			}
+		}
+	} else {
+		warnUnknownLongFlag(scanned, valueFlags, boolFlags)
+	}
+	// ExitOnError: fs.Parse prints and exits on a bad flag, so its error
+	// return is unreachable — the strict check above is the only failure.
+	_ = fs.Parse(hoisted)
+	return nil
 }
 
 // wantsHelp reports whether args is asking for this subcommand's usage.
@@ -2029,6 +2063,7 @@ func cmdExport(p paths, args []string) error {
 func cmdLog(p paths, args []string) error {
 	fs, as := newFlags("log")
 	from := fs.String("from", "", "only messages from this sender")
+	to := fs.String("to", "", "only messages to this recipient")
 	topic := fs.String("topic", "", "only messages on this topic")
 	grep := fs.String("grep", "", "only messages whose body matches this regexp")
 	since := fs.String("since", "", "only messages newer than this (e.g. 90s, 15m, 3h, 2d, 1w)")
@@ -2036,7 +2071,12 @@ func cmdLog(p paths, args []string) error {
 	format := fs.String("format", "text", "text | json")
 	out := fs.String("out", "", "write to this file instead of stdout")
 	max := fs.Int("max", 0, "limit to the most recent N messages (0 = all)")
-	parseAnywhere(fs, args)
+	// Strict, not lenient: log has no body, so an unknown dash-flag can only be
+	// a misaddressed filter (a real incident — see parseStrict), and a
+	// room-wide run wearing a filtered look is the worst way to fail.
+	if err := parseStrict(fs, args); err != nil {
+		return err
+	}
 	if *format != "text" && *format != "json" {
 		return fmt.Errorf("--format must be text or json")
 	}
@@ -2044,7 +2084,7 @@ func cmdLog(p paths, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := call(p, Request{Op: "log", As: name, From: *from, Topic: *topic, Grep: *grep, Since: *since, All: *all, Max: *max})
+	resp, err := call(p, Request{Op: "log", As: name, From: *from, To: *to, Topic: *topic, Grep: *grep, Since: *since, All: *all, Max: *max})
 	if err != nil {
 		return err
 	}
@@ -2165,7 +2205,9 @@ func cmdWhoIs(p paths, args []string) error {
 //	! mess islistening && mess broadcast "$who idle"
 func cmdIsListening(p paths, args []string) error {
 	fs, as := newFlags("islistening")
-	parseAnywhere(fs, args)
+	if err := parseStrict(fs, args); err != nil {
+		return err
+	}
 	name, err := agentName(p, *as)
 	if err != nil {
 		return err
@@ -2285,8 +2327,7 @@ const (
 // broadcasts, which have no coherent reply target) as the implicit root for a
 // future `mess reply`. Best-effort; called after a successful mess recv.
 func updateLastMsg(p paths, msgs []Message) {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		m := msgs[i]
+	for _, m := range slices.Backward(msgs) {
 		// If the newest message is itself a reply, target its thread's root —
 		// not the reply's own ID — so a further `mess reply` stays flat under
 		// the same root instead of spawning a reply-to-a-reply sub-thread.
@@ -2386,7 +2427,9 @@ func cmdPs(p paths, args []string) error {
 	room := fs.String("room", "", "show this room instead of your own")
 	all := fs.Bool("all", false, "show every room")
 	noCC := fs.Bool("no-cc", false, "omit Claude Code session info")
-	parseAnywhere(fs, args)
+	if err := parseStrict(fs, args); err != nil {
+		return err
+	}
 	resp, err := call(p, Request{Op: "ps", Room: *room, All: *all})
 	if err != nil {
 		return err

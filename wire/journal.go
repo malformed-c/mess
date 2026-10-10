@@ -37,6 +37,7 @@ type Filter struct {
 	Room  string
 	All   bool
 	From  string
+	To    string
 	Topic string
 	Grep  string
 	Since time.Duration
@@ -92,6 +93,9 @@ func SearchJournal(path string, filter Filter) ([]Message, error) {
 				continue
 			}
 			if filter.From != "" && !strings.EqualFold(line.From, filter.From) {
+				continue
+			}
+			if filter.To != "" && !strings.EqualFold(line.To, filter.To) {
 				continue
 			}
 			if filter.Topic != "" && line.Topic != filter.Topic {

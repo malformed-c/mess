@@ -93,7 +93,7 @@ func (j *journalWriter) rotateLocked() error {
 	for i := journalMaxGenerations - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", j.path, i)
 		if _, err := os.Stat(src); err == nil {
-			os.Rename(src, fmt.Sprintf("%s.%d", j.path, i+1))
+			_ = os.Rename(src, fmt.Sprintf("%s.%d", j.path, i+1)) // old generations are best-effort; the current file's rename below is checked
 		}
 	}
 	if err := os.Rename(j.path, j.path+".1"); err != nil && !os.IsNotExist(err) {

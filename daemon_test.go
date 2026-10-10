@@ -107,7 +107,7 @@ func TestRecvEvictedOnRemove(t *testing.T) {
 // two racing wakes, no deadlock/panic. Run repeatedly (not just once) since
 // a race, if one existed, wouldn't necessarily show on a single run.
 func TestTwoParkedWaitersOnSameAgentNoDoubleDeliveryNoLoss(t *testing.T) {
-	for iter := 0; iter < 20; iter++ {
+	for iter := range 20 {
 		d := &daemon{broker: NewBroker(), stop: make(chan struct{})}
 		_, serverA := net.Pipe()
 		_, serverB := net.Pipe()
@@ -780,6 +780,28 @@ func TestDispatchLogRejectsInvalidSince(t *testing.T) {
 	resp := d.dispatch(Request{Op: "log", As: "alice", Since: "nonsense"})
 	if resp.Error == "" {
 		t.Fatal("expected an error for an invalid --since")
+	}
+}
+
+// --to narrows a log query by recipient — the instrument whose absence once
+// made a room-wide query wear a recipient-filtered look (a real incident; see
+// TestParseStrictRejectsUnknownFlag). Case-insensitive like --from; a
+// recipient with no mail is an empty result, not every message.
+func TestDispatchLogFiltersByRecipient(t *testing.T) {
+	d := newTestDaemonWithJournal(t)
+	d.broker.RegisterOwned("bob", "", 0, false)
+	d.broker.RegisterOwned("carol", "", 0, false)
+	d.dispatch(Request{Op: "send", As: "alice", To: "bob", Body: "for bob"})
+	d.dispatch(Request{Op: "send", As: "alice", To: "carol", Body: "for carol"})
+
+	resp := d.dispatch(Request{Op: "log", As: "alice", To: "BOB", All: true})
+	if !resp.OK || len(resp.Messages) != 1 || resp.Messages[0].Body != "for bob" {
+		t.Fatalf("expected only bob's message (case-insensitive), got %+v", resp)
+	}
+
+	resp = d.dispatch(Request{Op: "log", As: "alice", To: "nobody", All: true})
+	if !resp.OK || len(resp.Messages) != 0 {
+		t.Fatalf("expected 0 messages for an unknown recipient, got %+v", resp)
 	}
 }
 

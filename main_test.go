@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -552,6 +553,69 @@ func TestHoistFlagsReportsScannedPositionalsForTypoDetection(t *testing.T) {
 		if a == "--as" || a == "alice" {
 			t.Fatalf("a recognized flag leaked into the positionals: %q", scanned)
 		}
+	}
+}
+
+// --- strict parsing for bodyless commands ---
+//
+// Real incident: `mess log --to apsis-sdk-glm` (log had no --to) demoted the
+// unknown flag to a positional and ran the query ROOM-WIDE with exit 0 — the
+// output looked recipient-filtered, the reader trusted it, and a phantom
+// "inbox delivery crossing" investigation grew from it. Bodyless commands now
+// reject unknown dash-flags outright: there is no body to demote them into,
+// so a misspelled filter can only be a mistake.
+
+func newStrictTestFlagSet() *flag.FlagSet {
+	fs := flag.NewFlagSet("log", flag.ContinueOnError)
+	fs.String("from", "", "")
+	fs.String("to", "", "")
+	fs.String("grep", "", "")
+	return fs
+}
+
+func TestParseStrictRejectsUnknownFlag(t *testing.T) {
+	err := parseStrict(newStrictTestFlagSet(), []string{"--to", "bob", "--form", "alice"})
+	if err == nil || !strings.Contains(err.Error(), "--form") {
+		t.Fatalf("expected an error naming --form, got %v", err)
+	}
+
+	// Single-dash tokens are covered too — the flag they stand for is just as
+	// unknown, and there is still no body to demote them into.
+	if err := parseStrict(newStrictTestFlagSet(), []string{"-x"}); err == nil {
+		t.Fatal("expected an error for an unknown single-dash token")
+	}
+}
+
+func TestParseStrictAcceptsKnownFlags(t *testing.T) {
+	fs := newStrictTestFlagSet()
+	if err := parseStrict(fs, []string{"--to", "bob", "--grep", "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fs.Lookup("to").Value.String(); got != "bob" {
+		t.Fatalf("--to parsed as %q, want %q", got, "bob")
+	}
+	if got := fs.Lookup("grep").Value.String(); got != "hello" {
+		t.Fatalf("--grep parsed as %q, want %q", got, "hello")
+	}
+}
+
+func TestParseStrictExemptsExplicitTerminator(t *testing.T) {
+	// Everything after an explicit "--" is verbatim by the caller's own
+	// declaration — the strict check governs flags before it only.
+	if err := parseStrict(newStrictTestFlagSet(), []string{"--", "--form", "alice"}); err != nil {
+		t.Fatalf("explicit -- args must pass strict parsing, got %v", err)
+	}
+}
+
+func TestParseAnywhereStillDemotesUnknownFlags(t *testing.T) {
+	// Body-shaped commands keep the lenient behavior: a dash-token really can
+	// be message text there (`mess send bob -1`), so it stays a positional.
+	// (parseAnywhere has no error return — see its doc — so this also guards
+	// that the lenient path never panics or exits on an unknown flag.)
+	fs := newStrictTestFlagSet()
+	parseAnywhere(fs, []string{"--form", "alice"})
+	if fs.NArg() != 2 || fs.Arg(0) != "--form" || fs.Arg(1) != "alice" {
+		t.Fatalf("expected --form demoted to positionals, got %q", fs.Args())
 	}
 }
 
