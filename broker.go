@@ -1144,7 +1144,7 @@ func (b *Broker) Invite(from, to, topic, room string, body string) (Message, err
 // — and the honest advice there is the command that does work.
 func joinFirstHint(fromRoom, invitee string) string {
 	if fromRoom == "" {
-		return fmt.Sprintf("The global room has no name to invite into; they would run `mess room leave` to come back to it, then you can invite them to the topic.")
+		return "The global room has no name to invite into; they would run `mess room leave` to come back to it, then you can invite them to the topic."
 	}
 	return fmt.Sprintf("Invite them to the room first: `mess invite %s %s`", invitee, fromRoom)
 }

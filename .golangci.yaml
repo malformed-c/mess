@@ -1,0 +1,128 @@
+# Ported from apsis-io/periapsis's .golangci.yaml (engi, 2026-10-10): the same
+# linter set, the same no-silent-truncation posture, and the same staticcheck
+# policy. The repo-specific path exclusions (ce/distill, internal/uring,
+# proppipeline_test.go, …) are NOT ported — they name code this tree does not
+# have, and a dead exclusion reads as careful scoping while excluding nothing.
+# Add mess's own back only when a finding earns it, with the audit written down
+# the way periapsis does.
+version: "2"
+linters:
+  enable:
+    - gosec
+    - misspell
+    - unconvert
+    - modernize
+    # wsl_v5 (whitespace style, from velocity via periapsis: a blank line where
+    # a block ends and a new statement group begins) is deliberately NOT in
+    # the default set yet: measured 2026-10-10, this tree carries ~1790
+    # findings, and a gate that fires 1791 times on style is a gate nobody
+    # finishes reading — periapsis's own stated anti-pattern. It runs via
+    # `just wsl` / `just wsl-fix` as a separate, reviewed conversion commit;
+    # move it into this enable list once that lands.
+
+  settings:
+    staticcheck:
+      # staticcheck's QF* family is QUICKFIXES: refactorings upstream intends
+      # for editor integration, not for a CI gate. SA*, S*, ST* all stay on —
+      # those are the ones that find defects. This repeats the DEFAULT ST
+      # exclusions because setting `checks` REPLACES the default list rather
+      # than adding to it — dropping them here would silently switch six
+      # naming/comment checks ON while appearing to only turn QF off.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF*
+
+    gosec:
+      excludes:
+        - G304
+        # G104 (errors unhandled) duplicates errcheck's own check, but without
+        # errcheck's text-based ability to distinguish a genuine unhandled
+        # error from a Close/Remove/Flush best-effort cleanup call. errcheck
+        # remains enabled and catches genuinely important unchecked errors.
+        - G104
+
+    lll:
+      line-length: 200
+
+  exclusions:
+    generated: lax
+    rules:
+      # Best-effort cleanup calls: a Close/Flush/Remove on a best-effort path
+      # is not a defect, and the daemon's notify/logging paths are full of
+      # them. Everything else errcheck reports stays reportable.
+      #
+      # ⚠ THE CASE TRAP, INHERITED FROM PERIAPSIS AND FIXED HERE ON ARRIVAL:
+      # `.*Close` (what periapsis shipped) is case-SENSITIVE and never matched
+      # mess's lowercase cleanup methods — all 3 `jw.close` findings sailed
+      # through a rule written to cover them, in the exact shape periapsis's
+      # own `std(out|err)` story warns about. Hence `(C|c)lose`.
+      - path: (.+)\.go$
+        text: Error return value of .((os\.)?Std(out|err)\..*|.*(C|c)lose|.*Flush|os\.Remove(All)?|.*print(f|ln)?|os\.(Un)?Setenv). (is not checked|Errors unhandled)
+      # Test-fixture sends: broker.Send/SendThreaded in setup position. An
+      # in-memory broker send that failed would surface one line later as
+      # failed assertions, so checking each of 60+ setup calls adds nothing
+      # but noise. SCOPED to the send receivers in _test.go, not to errcheck
+      # in tests: a genuinely unchecked error on any other call in a test
+      # still gets reported.
+      - path: _test\.go$
+        linters:
+          - errcheck
+        text: Error return value of .(b|br|d\.broker)\.[sS]end(Threaded)?` is not checked
+      # Test code is not an attack surface: it compiles into no shipped
+      # binary and runs on inputs the test itself wrote. (Same reasoning as
+      # periapsis's exclusion of the same name.) A genuine credential in a
+      # _test.go file is a secret-scanning problem, not a linter one.
+      - path: _test\.go$
+        linters:
+          - gosec
+      # Subprocess launches with computed argv — THE TOOL'S JOB, not a smell:
+      # notify.go execs the operator's notifier (kdeconnect-cli / notify-send)
+      # with the message as separate argv members (exec does NOT interpret a
+      # shell), tuishim.go execs the built mess-tui, client.go relaunches the
+      # mess binary itself as the daemon (os.Executable), and main.go's
+      # detectRepoRoom runs `git -C <dir> rev-parse` over fixed argv. Scoped
+      # to those four files so a computed exec appearing ANYWHERE ELSE still
+      # gets reported. G702 (variadic exec) is the same call sites.
+      - path: (notify\.go|tuishim\.go|client\.go|main\.go)$
+        linters:
+          - gosec
+        text: G204|G702
+      # identity.go's ident/room file paths are `filepath.Join(dir, "ident",
+      # stateKey(sid))`, and G703 flags the sid taint. The defense is real:
+      # stateKey strips every byte outside [A-Za-z0-9._-] — separators cannot
+      # survive, so Join always yields a single component inside ident/ (a
+      # session id of "../../x" sanitizes to "....x", a weird FILENAME, not a
+      # traversal). Scoped to identity.go; stateKey regressing there still
+      # leaves the sanitizer's own tests as the guard.
+      - path: identity\.go$
+        linters:
+          - gosec
+        text: G703
+
+# ⛔ THE DEFAULTS HERE MADE THE LINTER REPORT A CAP AS A COUNT (carried over
+# from periapsis, where it was measured: default caps reported 106 issues where
+# --max-*-issues=0 showed 247, both suspicious numbers EQUALING their cap).
+# golangci-lint truncates silently — a gate that hides findings and reports a
+# round number is worse than a red one. 0 = no limit.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # At most one issue per source line by default, the rest dropped without a
+  # word — which makes finding counts NON-ADDITIVE across exclusions and can
+  # UNMASK a more serious rule hidden behind a milder one on the same line.
+  uniq-by-line: false
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  # No formatter path exclusions: unlike linter exclusions, there is nothing to
+  # scope out yet — and if one is ever added, remember the formatter
+  # exclusions list is NOT independent of the linter one (periapsis shipped a
+  # wrong commit by assuming it was).

@@ -290,7 +290,7 @@ func TestSessionEndHookFreesTheWaiterForARelaunch(t *testing.T) {
 	if !e.waitListening("victim", false, 3*time.Second) {
 		t.Fatal("session-end left a phantom listener behind")
 	}
-	for _, line := range strings.Split(e.mess("victim", "ps"), "\n") {
+	for line := range strings.SplitSeq(e.mess("victim", "ps"), "\n") {
 		if strings.Contains(line, "victim") && strings.Contains(line, "working") {
 			t.Fatalf("session-end must clear `working`, not leave busy's 1h backstop running: %q", line)
 		}
@@ -446,7 +446,7 @@ func TestSteerInlineTruncatesAndCapsTheBatch(t *testing.T) {
 	}
 
 	got := e.steer("victim", "MESS_STEER_RENOTIFY=1", "MESS_STEER_INLINE_N=2", "MESS_STEER_INLINE_MAX=12")
-	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(got), "\n") {
 		if len(line) > 400 {
 			t.Fatalf("a body escaped truncation and blew up a line: %q", line)
 		}
@@ -475,7 +475,7 @@ func TestSteerInlineSurvivesShellMetacharacters(t *testing.T) {
 		t.Fatalf("body was not carried through literally: %q", got)
 	}
 	var probe map[string]any
-	line := strings.SplitN(strings.TrimSpace(got), "\n", 2)[0]
+	line, _, _ := strings.Cut(strings.TrimSpace(got), "\n")
 	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &probe); err != nil {
 		t.Fatalf("notice is not valid JSON (%v); first line %q", err, line)
 	}

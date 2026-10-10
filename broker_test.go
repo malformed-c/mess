@@ -933,7 +933,7 @@ func TestReplayReturnsConsumedHistory(t *testing.T) {
 // a future refactor could silently drop the cap with nothing to catch it.
 func TestHistoryCapsAtMaxHistory(t *testing.T) {
 	b := newTestBroker()
-	for i := 0; i < maxHistory+20; i++ {
+	for i := range maxHistory + 20 {
 		b.Send("peer", "bob", fmt.Sprintf("msg-%d", i))
 	}
 	b.Drain("bob", false, 0) // consume everything at once -> history
@@ -957,7 +957,7 @@ func TestHistoryCapsAtMaxHistory(t *testing.T) {
 // since the two could plausibly diverge in a future edit.
 func TestHistoryCapsAtMaxHistoryIncrementally(t *testing.T) {
 	b := newTestBroker()
-	for i := 0; i < maxHistory+20; i++ {
+	for i := range maxHistory + 20 {
 		b.Send("peer", "bob", fmt.Sprintf("msg-%d", i))
 		b.Drain("bob", false, 0)
 	}
@@ -2377,7 +2377,7 @@ func TestPendingAskTableIsBounded(t *testing.T) {
 	b := newTestBroker()
 	b.Register("alice")
 	b.Register("bob")
-	for i := 0; i < maxPendingAsks+50; i++ {
+	for range maxPendingAsks + 50 {
 		if _, err := b.SendAsk("alice", "bob", "q"); err != nil {
 			t.Fatal(err)
 		}

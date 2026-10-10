@@ -21,9 +21,9 @@ import (
 // populateBroker seeds nAgents agents, each with msgsPerAgent pending
 // messages, to simulate a fleet at realistic backlog levels.
 func populateBroker(b *Broker, nAgents, msgsPerAgent int) {
-	for a := 0; a < nAgents; a++ {
+	for a := range nAgents {
 		name := fmt.Sprintf("agent-%d", a)
-		for m := 0; m < msgsPerAgent; m++ {
+		for m := range msgsPerAgent {
 			b.Send("bench-sender", name, fmt.Sprintf("message body number %d, some realistic-length filler text", m))
 		}
 	}
@@ -90,7 +90,7 @@ func BenchmarkDrainLargeInbox(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				br := NewBroker()
-				for m := 0; m < n; m++ {
+				for range n {
 					br.Send("bench-sender", "bob", "message body")
 				}
 				b.StartTimer()

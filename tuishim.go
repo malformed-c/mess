@@ -24,8 +24,7 @@ func cmdTUI(_ paths, args []string) error {
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 			os.Exit(ee.ExitCode())
 		}
 		return fmt.Errorf("running mess-tui: %w", err)
