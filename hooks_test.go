@@ -861,6 +861,71 @@ func TestAWakeLeavesNonWakingBacklogQueued(t *testing.T) {
 	}
 }
 
+// The receiver's-seat staleness report (ts-glm): mail that queued mid-turn was
+// previewed by the steer hook, then the wake delivered the same bodies as
+// BRAND-NEW with no timestamp — a whole turn went to re-adjudicating cold mail
+// that had already been acted on. Every delivered line now carries its send
+// time.
+func TestWakeDeliveryStampsTheSentTime(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("bob", "register", "bob")
+	e.mess("alice", "register", "alice")
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+
+	e.mess("alice", "send", "bob", "the timestamped message")
+
+	code, stderr := h.wait(t, 10*time.Second)
+	if code != 2 || !strings.Contains(stderr, "the timestamped message") {
+		t.Fatalf("want the direct message delivered on wake, got exit=%d stderr=%q", code, stderr)
+	}
+
+	if !strings.Contains(stderr, "(sent ") {
+		t.Fatalf("the delivery must stamp each line with its send time, got %q", stderr)
+	}
+	// No steer state file: nothing was announced mid-turn, so the marker must
+	// not appear (it would read as a false duplicate flag).
+	if strings.Contains(stderr, "announced mid-turn") {
+		t.Fatalf("with no steer watermark nothing may be marked announced, got %q", stderr)
+	}
+}
+
+// ...and when the steer's watermark says the id was already announced
+// mid-turn, the wake says so — the same mail must be recognizably the same
+// mail, not present itself as a fresh arrival.
+func TestWakeMarksMailTheSteerAlreadyAnnounced(t *testing.T) {
+	e := newHookEnv(t)
+	e.mess("bob", "register", "bob")
+	e.mess("alice", "register", "alice")
+
+	// The steer writes "<maxid> <when> <repeats>" to its state file; a huge
+	// watermark means "everything queued so far was announced mid-turn". Seed
+	// it BEFORE the send so the delivered message falls under it.
+	steerState := filepath.Join(e.tmp, "mess-steer-bob.id")
+	if err := os.WriteFile(steerState, fmt.Appendf(nil, "999999 %d 0\n", time.Now().Unix()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := e.wakeHook("bob")
+	if !e.waitListening("bob", true, 5*time.Second) {
+		t.Fatal("wake hook never parked")
+	}
+
+	e.mess("alice", "send", "bob", "the pre-announced message")
+
+	code, stderr := h.wait(t, 10*time.Second)
+	if code != 2 || !strings.Contains(stderr, "the pre-announced message") {
+		t.Fatalf("want the direct message delivered on wake, got exit=%d stderr=%q", code, stderr)
+	}
+
+	if !strings.Contains(stderr, "announced mid-turn at ") {
+		t.Fatalf("mail under the steer watermark must be marked as announced mid-turn, got %q", stderr)
+	}
+}
+
 // mess-ask-notify.sh had drifted furthest from its siblings precisely because
 // nothing could drive it: it hardcoded the binary path with no MESS_BIN
 // override, and had lost the Grok session mapping, so on Grok it silently did

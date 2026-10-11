@@ -145,10 +145,41 @@ while true; do
     [ -z "$drained" ] && break
 
     n=$(printf '%s\n' "$drained" | grep -c .)
+
+    # Staleness context, from the receiver's seat (ts-glm's report): a wake
+    # that delivers mail which queued during the previous turn presented the
+    # same bodies the mid-turn steer had already previewed as BRAND-NEW, with
+    # no timestamp to judge age by — a whole turn went to re-adjudicating mail
+    # that was cold and already acted on. So each delivered line carries its
+    # send time, and — when the steer's watermark says that id was already
+    # announced mid-turn — says that too. The watermark is a lower bound on
+    # what was announced (the notice names the newest id, and inlines bodies
+    # only when enabled), hence "announced", not "previewed".
+    steer_idf="${TMPDIR:-/tmp}/mess-steer-$who.id"
+    announced=0
+    announced_at=0
+    if [ -r "$steer_idf" ]; then
+      read -r announced announced_at _ < "$steer_idf" 2>/dev/null
+    fi
+    case "$announced" in ''|*[!0-9]*) announced=0 ;; esac
+    case "$announced_at" in ''|*[!0-9]*) announced_at=0 ;; esac
+    announced_hm=""
+    [ "$announced" -gt 0 ] && announced_hm=$(date -d "@$announced_at" +%H:%M 2>/dev/null)
+
     {
       printf '[mess] %s new peer message(s) (delivered on wake - no recv needed):\n' "$n"
       printf '%s\n' "$drained" | jq -r \
-        '"  " + (if .ask then "[QUESTION \(.id) - answer with mess reply, or @mention the asker] " else "" end) + .from + (if .topic then " #\(.topic)" else "" end) + ": " + .body'
+        --argjson announced "$announced" --arg announced_hm "$announced_hm" --arg today "$(date +%F)" '
+        ((.id | tostring | ltrimstr("m") | tonumber?) // 0) as $mid |
+        (.time // "") as $t |
+        (if ($t | length) >= 16 then $t[11:16] else "" end) as $hm |
+        (if ($t | length) >= 10 and $t[0:10] != $today then $t[0:10] + " " else "" end) as $day |
+        (if $announced > 0 and $mid <= $announced
+         then ", announced mid-turn" + (if $announced_hm != "" then " at " + $announced_hm else "" end)
+         else "" end) as $seen |
+        "  " + (if .ask then "[QUESTION \(.id) - answer with mess reply, or @mention the asker] " else "" end)
+          + .from + (if .topic then " #\(.topic)" else "" end)
+          + " (" + $day + "sent " + $hm + $seen + "): " + .body'
 
       # Receiving code is the moment before quoting code back, which is exactly
       # when bash eats it (it runs `backticks`/$() in a double-quoted argument
